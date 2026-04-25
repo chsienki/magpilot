@@ -49,21 +49,28 @@ exposes a tiny HTTP+SSE API to the LAN.
 
 A central **hub** daemon runs on the docker LXC. It auto-discovers
 agents via UDP broadcast, aggregates their sessions, proxies
-streams, and is the single endpoint the phone talks to. This makes
-the WireGuard story simple: the phone has one address book entry
-forever (`https://copilot.home.sienkiewi.cz` or the LAN IP), and
-the hub deals with finding and routing to the actual hosts.
+streams, and is the single endpoint clients talk to. This makes
+the WireGuard story simple: one address (`https://clawpilot.home.sienkiewi.cz`)
+forever, hub deals with finding and routing to the actual hosts.
 
-A **.NET MAUI app** on the Pixel renders the chats, modals, and
-sessions tree. Notifications go via Firebase Cloud Messaging.
+Two clients consume the hub's API and share **a single Blazor UI
+codebase** (MAUI Blazor Hybrid):
+
+- A **.NET MAUI Android app** on the Pixel that hosts the Blazor UI
+  in a WebView. Bearer-token auth, FCM push.
+- A **Blazor WebAssembly SPA** at `https://clawpilot.home.sienkiewi.cz`
+  for any browser. GitHub OAuth login (allowlisted to a single user),
+  Web Push notifications.
 
 ## Components
 
 | Name             | What                                                     | Where it runs              |
 |------------------|----------------------------------------------------------|----------------------------|
 | `copilot-agent`  | ACP-to-HTTP/SSE adapter, one per machine                 | HENDRIK, Mac, etc.         |
-| `copilot-hub`    | Aggregator, discovery, push, single phone-facing endpoint | docker LXC (CT 102)        |
-| `CopilotChat`    | .NET MAUI Android app                                    | Pixel (later: iOS, macOS)  |
+| `copilot-hub`    | Aggregator, discovery, push, OAuth, serves the web SPA   | docker LXC (CT 102)        |
+| `Clawpilot.UI`   | Shared Blazor UI library (chat, sessions tree, modals)   | Phone WebView + browser    |
+| `Clawpilot.Web`  | Blazor WASM shell for browsers                           | Browser, served by hub     |
+| `CopilotChat.Maui` | MAUI Blazor Hybrid shell for the phone                 | Pixel (later: iOS, macOS)  |
 
 ## Status
 
@@ -80,7 +87,9 @@ clawpilot/
       plan.md                <- the design doc (start here)
    agent/                    <- copilot-agent (.NET 9), TBD
    hub/                      <- copilot-hub (.NET 9), TBD
-   app/                      <- CopilotChat (.NET MAUI), TBD
+   ui/                       <- Clawpilot.UI shared Blazor components, TBD
+   web/                      <- Clawpilot.Web Blazor WASM shell, TBD
+   app/                      <- CopilotChat.Maui Blazor Hybrid shell, TBD
 ```
 
 ## Related context
