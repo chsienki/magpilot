@@ -1,0 +1,13 @@
+bin/
+obj/
+*.user
+.vs/
+.idea/
+*.swp
+.DS_Store
+# MAUI/Android
+*.keystore
+local.properties
+# Secrets
+appsettings.Local.json
+*.fcm-service-account.json
