@@ -15,7 +15,7 @@ public sealed class HubClient
     {
         _http = http;
         _auth = auth;
-        _http.BaseAddress = new Uri(auth.HubBaseUrl.TrimEnd('/') + "/");
+        // Caller is responsible for setting HttpClient.BaseAddress to an absolute URI.
         if (!auth.UseCookieAuth && auth.BearerToken is { } t)
             _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", t);
     }

@@ -50,6 +50,7 @@ public sealed class AcpSessionManager
 
     public async Task PromptAsync(string sessionId, string text, CancellationToken ct)
     {
+        _logger.LogDebug("PromptAsync sid={Sid} len={Len}", sessionId, text.Length);
         await _client.CallAsync("session/prompt", new JsonObject
         {
             ["sessionId"] = sessionId,
@@ -110,6 +111,7 @@ public sealed class AcpSessionManager
     {
         if (update is null) return;
         var kind = update["sessionUpdate"]?.GetValue<string>();
+        _logger.LogDebug("HandleUpdate sid={Sid} kind={Kind}", sessionId, kind);
         StreamEvent? evt = kind switch
         {
             "agent_message_chunk" => new AssistantDelta(ExtractText(update["content"]) ?? ""),

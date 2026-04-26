@@ -82,6 +82,21 @@ public static class GitHubOAuth
             await ctx.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
             return Results.NoContent();
         });
+
+        routes.MapGet("/dev-login", async (HubAuthOptions opts, HttpContext ctx) =>
+        {
+            if (Environment.GetEnvironmentVariable("CLAWPILOT_DEV_BYPASS_AUTH") != "true")
+                return Results.NotFound();
+            var login = opts.AllowedGitHubUsers.FirstOrDefault() ?? "dev";
+            var claims = new ClaimsIdentity([
+                new Claim(ClaimTypes.Name, login),
+                new Claim("auth_kind", "dev_bypass"),
+            ], CookieAuthenticationDefaults.AuthenticationScheme);
+            await ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme,
+                new ClaimsPrincipal(claims),
+                new AuthenticationProperties { IsPersistent = true, ExpiresUtc = DateTimeOffset.UtcNow.AddDays(1) });
+            return Results.Redirect("/");
+        });
     }
 
     private sealed record TokenResponse([property: JsonPropertyName("access_token")] string? AccessToken);

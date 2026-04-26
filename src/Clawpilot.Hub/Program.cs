@@ -16,8 +16,13 @@ builder.Services.AddHubAuth(builder.Configuration);
 var app = builder.Build();
 
 // SPA assets live in wwwroot/. The build copies the Web project's published output here.
+app.UseBlazorFrameworkFiles();
 app.UseDefaultFiles();
-app.UseStaticFiles();
+app.UseStaticFiles(new StaticFileOptions
+{
+    ServeUnknownFileTypes = true,
+    DefaultContentType = "application/octet-stream",
+});
 
 app.UseAuthentication();
 app.UseAuthorization();
