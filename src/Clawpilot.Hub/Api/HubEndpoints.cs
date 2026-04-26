@@ -90,11 +90,14 @@ public static class HubEndpoints
             async (string name, string id, AgentHttpClient http, HttpContext ctx, CancellationToken ct) =>
             {
                 using var client = http.ClientFor(name);
-                using var req = new HttpRequestMessage(HttpMethod.Get, $"api/sessions/{id}/stream");
+                var qs = ctx.Request.QueryString.HasValue ? ctx.Request.QueryString.Value : "";
+                using var req = new HttpRequestMessage(HttpMethod.Get, $"api/sessions/{id}/stream{qs}");
                 using var resp = await client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
                 ctx.Response.StatusCode = (int)resp.StatusCode;
                 ctx.Response.Headers.ContentType = "text/event-stream";
                 ctx.Response.Headers.CacheControl = "no-cache";
+                ctx.Response.Headers["X-Accel-Buffering"] = "no";
+                await ctx.Response.Body.FlushAsync(ct);
                 await using var stream = await resp.Content.ReadAsStreamAsync(ct);
                 var buf = new byte[8192];
                 int n;

@@ -67,31 +67,73 @@ public static class AgentEndpoints
             return ok ? Results.NoContent() : Results.NotFound();
         });
 
-        api.MapGet("/sessions/{id}/stream", async (string id, AcpSessionManager acp, HttpContext ctx, CancellationToken ct) =>
+        api.MapGet("/sessions/{id}/stream", async (string id, AcpSessionManager acp, SessionRegistry reg, HttpContext ctx, CancellationToken ct) =>
         {
             ctx.Response.Headers.ContentType = "text/event-stream";
             ctx.Response.Headers.CacheControl = "no-cache";
             ctx.Response.Headers["X-Accel-Buffering"] = "no";
 
+            // Single writer pattern: every producer (acp updates, heartbeat,
+            // load lifecycle) writes into this channel; one task drains it
+            // to ctx.Response. Avoids interleaved bytes mid-event.
+            var outbound = System.Threading.Channels.Channel.CreateUnbounded<StreamEvent>(
+                new System.Threading.Channels.UnboundedChannelOptions { SingleReader = true });
+
             var reader = acp.Subscribe(id);
-            try
+
+            // Commit response headers immediately so the client's fetch promise
+            // resolves before the first heartbeat.
+            await ctx.Response.Body.FlushAsync(ct);
+
+            // Bridge upstream session-update events into the outbound channel.
+            var bridgeTask = Task.Run(async () =>
             {
-                using var heartbeat = new PeriodicTimer(TimeSpan.FromSeconds(15));
-                var heartbeatTask = Task.Run(async () =>
+                try
                 {
-                    while (!ct.IsCancellationRequested)
+                    await foreach (var evt in reader.ReadAllAsync(ct))
+                        outbound.Writer.TryWrite(evt);
+                }
+                catch (OperationCanceledException) { }
+            }, ct);
+
+            // Heartbeat.
+            var heartbeatTask = Task.Run(async () =>
+            {
+                try
+                {
+                    using var t = new PeriodicTimer(TimeSpan.FromSeconds(15));
+                    while (await t.WaitForNextTickAsync(ct))
+                        outbound.Writer.TryWrite(new HeartbeatEvent());
+                }
+                catch (OperationCanceledException) { }
+            }, ct);
+
+            // Optional load-on-connect: kick off after subscribe so replay
+            // events captured by the subscriber list flow into outbound.
+            var loadRequested = ctx.Request.Query.TryGetValue("load", out var lv)
+                && bool.TryParse(lv, out var lb) && lb;
+            var force = ctx.Request.Query.TryGetValue("force", out var fv)
+                && bool.TryParse(fv, out var fb) && fb;
+            if (loadRequested)
+            {
+                _ = Task.Run(async () =>
+                {
+                    outbound.Writer.TryWrite(new LoadStarted());
+                    try
                     {
-                        if (!await heartbeat.WaitForNextTickAsync(ct)) break;
-                        try
-                        {
-                            await ctx.Response.WriteAsync(": heartbeat\n\n", ct);
-                            await ctx.Response.Body.FlushAsync(ct);
-                        }
-                        catch { return; }
+                        await reg.AdoptAsync(id, force, ct);
+                        outbound.Writer.TryWrite(new HistoryDone());
+                    }
+                    catch (Exception ex)
+                    {
+                        outbound.Writer.TryWrite(new LoadFailed(ex.Message));
                     }
                 }, ct);
+            }
 
-                await foreach (var evt in reader.ReadAllAsync(ct))
+            try
+            {
+                await foreach (var evt in outbound.Reader.ReadAllAsync(ct))
                 {
                     var json = JsonSerializer.Serialize<StreamEvent>(evt);
                     await ctx.Response.WriteAsync($"data: {json}\n\n", ct);

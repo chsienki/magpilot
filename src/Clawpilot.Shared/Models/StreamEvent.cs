@@ -12,6 +12,9 @@ namespace Clawpilot.Shared.Models;
 [JsonDerivedType(typeof(TurnComplete), "turn_complete")]
 [JsonDerivedType(typeof(ErrorEvent), "error")]
 [JsonDerivedType(typeof(HeartbeatEvent), "heartbeat")]
+[JsonDerivedType(typeof(LoadStarted), "load_started")]
+[JsonDerivedType(typeof(HistoryDone), "history_done")]
+[JsonDerivedType(typeof(LoadFailed), "load_failed")]
 public abstract record StreamEvent;
 
 public sealed record AssistantDelta(string Text) : StreamEvent;
@@ -23,5 +26,8 @@ public sealed record ApprovalRequired(string ApprovalId, string Title, string? D
 public sealed record TurnComplete(string StopReason) : StreamEvent;
 public sealed record ErrorEvent(string Message) : StreamEvent;
 public sealed record HeartbeatEvent : StreamEvent;
+public sealed record LoadStarted : StreamEvent;
+public sealed record HistoryDone : StreamEvent;
+public sealed record LoadFailed(string Error) : StreamEvent;
 
 public sealed record ApprovalOption(string OptionId, string Label, string? Kind);

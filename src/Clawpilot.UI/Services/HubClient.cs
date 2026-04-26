@@ -56,9 +56,12 @@ public sealed class HubClient
 
     public async IAsyncEnumerable<StreamEvent> StreamAsync(
         string agent, string id,
+        bool load = false, bool force = false,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, $"api/agents/{agent}/sessions/{id}/stream");
+        var url = $"api/agents/{agent}/sessions/{id}/stream";
+        if (load) url += $"?load=true&force={(force ? "true" : "false")}";
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
         using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
         resp.EnsureSuccessStatusCode();
         await using var stream = await resp.Content.ReadAsStreamAsync(ct);

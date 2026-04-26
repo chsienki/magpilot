@@ -52,11 +52,27 @@
         }
     </aside>
     <main class="chat-pane">
-        @if (Agent is not null && SessionId is not null)
+        @if (_pendingOrphan is not null)
         {
+            <div class="orphan-confirm">
+                <h3>Adopt running session?</h3>
+                <p>This session is held by another process (PID <strong>@_pendingOrphan.OwnerPid</strong>). Adopting will <em>kill</em> that process and load the session under clawpilot.</p>
+                <p class="muted">@(_pendingOrphan.Summary ?? _pendingOrphan.Id)</p>
+                <div class="actions">
+                    <button class="primary" @onclick="ConfirmOrphanAdopt">Kill PID @_pendingOrphan.OwnerPid and adopt</button>
+                    <button @onclick="CancelOrphanAdopt">Cancel</button>
+                </div>
+            </div>
+        }
+        else if (Agent is not null && SessionId is not null)
+        {
+            @if (_loading)
+            {
+                <div class="loading-banner">Loading history…</div>
+            }
             <ChatView Messages="@_messages"
                       PendingApproval="@_pendingApproval"
-                      Disabled="@(_busy)"
+                      Disabled="@(_busy || _loading)"
                       OnSend="HandleSend"
                       OnApproval="HandleApproval" />
         }
@@ -81,7 +97,9 @@
     private ApprovalRequired? _pendingApproval;
     private CancellationTokenSource? _streamCts;
     private bool _busy;
+    private bool _loading;
     private string? _streamingFor;
+    private SessionInfo? _pendingOrphan;
 
     protected override async Task OnInitializedAsync()
     {
@@ -100,8 +118,37 @@
         if (Agent is not null && SessionId is not null && _streamingFor != $"{Agent}/{SessionId}")
         {
             await StopStreamingAsync();
-            await StartStreamingAsync();
+            _pendingOrphan = null;
+
+            var info = _sessions?.FirstOrDefault(s => s.Id == SessionId);
+            if (info?.State == SessionState.LiveOrphan)
+            {
+                // Show confirmation; user must click "Adopt" to proceed.
+                _pendingOrphan = info;
+                _streamingFor = $"{Agent}/{SessionId}";
+                StateHasChanged();
+                return;
+            }
+
+            var needsLoad = info is not null && info.State != SessionState.LiveOwned;
+            await StartStreamingAsync(load: needsLoad, force: false);
         }
+    }
+
+    private async Task ConfirmOrphanAdopt()
+    {
+        if (_pendingOrphan is null) return;
+        var info = _pendingOrphan;
+        _pendingOrphan = null;
+        StateHasChanged();
+        await StartStreamingAsync(load: true, force: true);
+    }
+
+    private void CancelOrphanAdopt()
+    {
+        _pendingOrphan = null;
+        _streamingFor = null;
+        Nav.NavigateTo($"/agents/{Agent}");
     }
 
     private void SelectAgent(string name)
@@ -125,11 +172,12 @@
         }
     }
 
-    private async Task StartStreamingAsync()
+    private async Task StartStreamingAsync(bool load = false, bool force = false)
     {
         if (Agent is null || SessionId is null) return;
         _messages.Clear();
         _streamingAssistant = null;
+        _loading = load;
         _streamCts = new CancellationTokenSource();
         _streamingFor = $"{Agent}/{SessionId}";
         var ct = _streamCts.Token;
@@ -139,12 +187,28 @@
         {
             try
             {
-                await foreach (var evt in Hub.StreamAsync(agent, sid, ct))
+                await foreach (var evt in Hub.StreamAsync(agent, sid, load, force, ct))
                     await InvokeAsync(() => Apply(evt));
             }
             catch (OperationCanceledException) { }
             catch (Exception ex) { Console.Error.WriteLine($"stream: {ex.Message}"); }
         }, ct);
+
+        if (load)
+        {
+            // After load completes, refresh the session list so the badge updates.
+            _ = Task.Run(async () =>
+            {
+                while (!ct.IsCancellationRequested && _loading)
+                    await Task.Delay(250, ct);
+                try
+                {
+                    var fresh = await Hub.ListSessionsAsync(agent, ct);
+                    await InvokeAsync(() => { _sessions = fresh; StateHasChanged(); });
+                }
+                catch { }
+            }, ct);
+        }
     }
 
     private async Task StopStreamingAsync()
@@ -170,9 +234,13 @@
                 _streamingAssistant.Text += d.Text;
                 break;
             case UserDelta d:
+                // Finalize any in-progress assistant message before starting a new turn
+                // (during replay, ACP sends user_message_chunk, agent_message_chunk*, user_message_chunk, ...).
+                _streamingAssistant = null;
                 _messages.Add(new ChatMessage { Role = "user", Text = d.Text });
                 break;
             case ToolCallStart t:
+                _streamingAssistant = null;
                 _messages.Add(new ChatMessage { Role = "tool", ToolCallId = t.ToolCallId, Text = $"[start] {t.Name}" });
                 break;
             case ToolCallEnd t:
@@ -184,6 +252,19 @@
             case TurnComplete:
                 _streamingAssistant = null;
                 _busy = false;
+                break;
+            case LoadStarted:
+                _loading = true;
+                break;
+            case HistoryDone:
+                _loading = false;
+                _streamingAssistant = null;
+                break;
+            case LoadFailed lf:
+                _loading = false;
+                _messages.Add(new ChatMessage { Role = "tool", Text = $"load failed: {lf.Error}" });
+                break;
+            case HeartbeatEvent:
                 break;
         }
         StateHasChanged();
