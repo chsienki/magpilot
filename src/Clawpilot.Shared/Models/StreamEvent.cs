@@ -4,6 +4,7 @@ namespace Clawpilot.Shared.Models;
 
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "type")]
 [JsonDerivedType(typeof(AssistantDelta), "assistant_delta")]
+[JsonDerivedType(typeof(ThoughtDelta), "thought_delta")]
 [JsonDerivedType(typeof(UserDelta), "user_delta")]
 [JsonDerivedType(typeof(ToolCallStart), "tool_call_start")]
 [JsonDerivedType(typeof(ToolCallProgress), "tool_call_progress")]
@@ -18,6 +19,7 @@ namespace Clawpilot.Shared.Models;
 public abstract record StreamEvent;
 
 public sealed record AssistantDelta(string Text) : StreamEvent;
+public sealed record ThoughtDelta(string Text) : StreamEvent;
 public sealed record UserDelta(string Text) : StreamEvent;
 public sealed record ToolCallStart(string ToolCallId, string Name, string? RawInput) : StreamEvent;
 public sealed record ToolCallProgress(string ToolCallId, string? PartialOutput) : StreamEvent;

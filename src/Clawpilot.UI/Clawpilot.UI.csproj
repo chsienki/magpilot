@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.Components.Web" Version="9.0.15" />
+    <PackageReference Include="Markdig" Version="0.42.0" />
   </ItemGroup>
 
   <ItemGroup>

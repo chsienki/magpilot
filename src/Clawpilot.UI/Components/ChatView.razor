@@ -3,9 +3,32 @@
     <div class="messages">
         @foreach (var m in Messages)
         {
+            var isThought = m.Role.Equals("thought", StringComparison.OrdinalIgnoreCase);
+            if (isThought && !ShowThoughts) { continue; }
             <div class="msg msg-@m.Role.ToLowerInvariant()">
-                <div class="role">@m.Role</div>
-                <pre class="text">@m.Text</pre>
+                <div class="role">@(isThought ? "thinking" : m.Role)</div>
+                @if (isThought)
+                {
+                    <details class="thought" open>
+                        <summary>thought</summary>
+                        <MarkdownView Text="@m.Text" />
+                    </details>
+                }
+                else if (m.Role.Equals("assistant", StringComparison.OrdinalIgnoreCase))
+                {
+                    <MarkdownView Text="@m.Text" />
+                }
+                else
+                {
+                    <pre class="text">@m.Text</pre>
+                }
+            </div>
+        }
+        @if (Thinking)
+        {
+            <div class="msg msg-assistant thinking-row">
+                <div class="role">assistant</div>
+                <div class="thinking" aria-label="thinking"><span></span><span></span><span></span></div>
             </div>
         }
         @if (PendingApproval is not null)
@@ -36,6 +59,8 @@
     [Parameter, EditorRequired] public ObservableCollection<ChatMessage> Messages { get; set; } = default!;
     [Parameter] public ApprovalRequired? PendingApproval { get; set; }
     [Parameter] public bool Disabled { get; set; }
+    [Parameter] public bool Thinking { get; set; }
+    [Parameter] public bool ShowThoughts { get; set; } = true;
     [Parameter] public EventCallback<string> OnSend { get; set; }
     [Parameter] public EventCallback<(string ApprovalId, string OptionId)> OnApproval { get; set; }
 

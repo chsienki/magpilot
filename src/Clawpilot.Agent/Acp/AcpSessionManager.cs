@@ -51,14 +51,36 @@ public sealed class AcpSessionManager
     public async Task PromptAsync(string sessionId, string text, CancellationToken ct)
     {
         _logger.LogDebug("PromptAsync sid={Sid} len={Len}", sessionId, text.Length);
-        await _client.CallAsync("session/prompt", new JsonObject
+        var stopReason = "end_turn";
+        try
         {
-            ["sessionId"] = sessionId,
-            ["prompt"] = new JsonArray
+            var resp = await _client.CallAsync("session/prompt", new JsonObject
             {
-                new JsonObject { ["type"] = "text", ["text"] = text },
-            },
-        }, ct, timeoutSec: 600);
+                ["sessionId"] = sessionId,
+                ["prompt"] = new JsonArray
+                {
+                    new JsonObject { ["type"] = "text", ["text"] = text },
+                },
+            }, ct, timeoutSec: 600);
+            stopReason = resp?["stopReason"]?.GetValue<string>() ?? stopReason;
+        }
+        catch (Exception ex)
+        {
+            stopReason = "error";
+            _logger.LogWarning(ex, "session/prompt failed for {Sid}", sessionId);
+        }
+
+        // Notify subscribers so the SPA can clear its busy/thinking flags.
+        Publish(sessionId, new TurnComplete(stopReason));
+    }
+
+    private void Publish(string sessionId, StreamEvent evt)
+    {
+        List<Channel<StreamEvent>>? list;
+        lock (_subLock) _subscribers.TryGetValue(sessionId, out list);
+        if (list is null) return;
+        foreach (var ch in list)
+            ch.Writer.TryWrite(evt);
     }
 
     public async Task CancelAsync(string sessionId, CancellationToken ct)
@@ -115,6 +137,7 @@ public sealed class AcpSessionManager
         StreamEvent? evt = kind switch
         {
             "agent_message_chunk" => new AssistantDelta(ExtractText(update["content"]) ?? ""),
+            "agent_thought_chunk" => new ThoughtDelta(ExtractText(update["content"]) ?? ""),
             "user_message_chunk"  => new UserDelta(ExtractText(update["content"]) ?? ""),
             "tool_call_start"     => new ToolCallStart(
                 update["toolCallId"]?.GetValue<string>() ?? "",

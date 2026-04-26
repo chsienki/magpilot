@@ -18,7 +18,10 @@ public static class AgentEndpoints
             cwd = Environment.CurrentDirectory,
         });
 
-        api.MapGet("/sessions", (SessionRegistry reg) => reg.List());
+        api.MapGet("/sessions", (SessionRegistry reg) => reg.List()
+            .OrderByDescending(s => s.UpdatedAt ?? DateTimeOffset.MinValue)
+            .ThenByDescending(s => s.CreatedAt ?? DateTimeOffset.MinValue)
+            .ToList());
 
         api.MapGet("/sessions/{id}", (string id, SessionRegistry reg) =>
         {
@@ -49,9 +52,12 @@ public static class AgentEndpoints
             return Results.NoContent();
         });
 
-        api.MapPost("/sessions/{id}/messages", async (string id, PromptRequest req, AcpSessionManager acp, CancellationToken ct) =>
+        api.MapPost("/sessions/{id}/messages", (string id, PromptRequest req, AcpSessionManager acp) =>
         {
-            await acp.PromptAsync(id, req.Text, ct);
+            // Fire-and-forget: session/prompt returns when the turn completes
+            // (could be 60s+). The endpoint returns 202 immediately and the
+            // SPA learns the turn ended via the SSE TurnComplete event.
+            _ = Task.Run(() => acp.PromptAsync(id, req.Text, CancellationToken.None));
             return Results.Accepted();
         });
 

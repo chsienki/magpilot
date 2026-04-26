@@ -3,6 +3,7 @@
 @page "/agents/{agent}/sessions/{sessionId}"
 @inject HubClient Hub
 @inject NavigationManager Nav
+@inject IJSRuntime JS
 @implements IAsyncDisposable
 @using System.Collections.ObjectModel
 
@@ -37,7 +38,7 @@
         }
         else
         {
-            <button class="new" @onclick="NewSession">+ New chat</button>
+            <button class="new" @onclick="OpenNewSessionDialog">+ New chat</button>
             <ul class="sessions">
                 @foreach (var s in _sessions)
                 {
@@ -45,6 +46,10 @@
                         <button class="link" @onclick="() => OpenSession(s)">
                             <div class="sess-title">@(s.Summary ?? s.Id[..8])</div>
                             <div class="sess-meta">@s.State @(s.Repository ?? "") @(s.Branch ?? "")</div>
+                            @if (!string.IsNullOrWhiteSpace(s.Cwd))
+                            {
+                                <div class="sess-cwd" title="@s.Cwd">@s.Cwd</div>
+                            }
                         </button>
                     </li>
                 }
@@ -52,7 +57,39 @@
         }
     </aside>
     <main class="chat-pane">
-        @if (_pendingOrphan is not null)
+        @if (Agent is not null && SessionId is not null && _pendingOrphan is null && !_newSessionOpen)
+        {
+            <div class="chat-toolbar">
+                <label class="toggle">
+                    <input type="checkbox" checked="@_showThoughts" @onchange="ToggleShowThoughts" />
+                    Show thinking
+                </label>
+            </div>
+        }
+        @if (_newSessionOpen)
+        {
+            <div class="orphan-confirm">
+                <h3>New chat on @Agent</h3>
+                <p>Working directory:</p>
+                <input class="cwd-input" type="text" @bind="_newSessionCwd" @bind:event="oninput"
+                       list="cwd-suggestions" placeholder="(leave blank to use agent default)" />
+                <datalist id="cwd-suggestions">
+                    @foreach (var c in _cwdSuggestions)
+                    {
+                        <option value="@c"></option>
+                    }
+                </datalist>
+                @if (_newSessionError is not null)
+                {
+                    <p class="muted" style="color:#f87171">@_newSessionError</p>
+                }
+                <div class="actions">
+                    <button class="primary" disabled="@_newSessionBusy" @onclick="ConfirmNewSession">@(_newSessionBusy ? "Creating…" : "Create")</button>
+                    <button disabled="@_newSessionBusy" @onclick="CancelNewSession">Cancel</button>
+                </div>
+            </div>
+        }
+        else if (_pendingOrphan is not null)
         {
             <div class="orphan-confirm">
                 <h3>Adopt running session?</h3>
@@ -73,6 +110,8 @@
             <ChatView Messages="@_messages"
                       PendingApproval="@_pendingApproval"
                       Disabled="@(_busy || _loading)"
+                      Thinking="@_thinking"
+                      ShowThoughts="@_showThoughts"
                       OnSend="HandleSend"
                       OnApproval="HandleApproval" />
         }
@@ -94,17 +133,47 @@
     private List<SessionInfo>? _sessions;
     private readonly ObservableCollection<ChatMessage> _messages = new();
     private ChatMessage? _streamingAssistant;
+    private ChatMessage? _streamingThought;
     private ApprovalRequired? _pendingApproval;
     private CancellationTokenSource? _streamCts;
     private bool _busy;
     private bool _loading;
+    private bool _thinking;
     private string? _streamingFor;
     private SessionInfo? _pendingOrphan;
+    private bool _newSessionOpen;
+    private string _newSessionCwd = "";
+    private string? _newSessionError;
+    private bool _newSessionBusy;
+    private List<string> _cwdSuggestions = new();
+
+    // Per-session in-memory snapshot of messages, keyed by "{Agent}/{SessionId}".
+    // We keep this so switching back to a LiveOwned session restores its
+    // chat history without re-issuing session/load (ACP rejects double-load
+    // with -32602 "already loaded"). Snapshots are written when leaving a
+    // session and refreshed on every Apply() while viewing it.
+    private readonly Dictionary<string, List<ChatMessage>> _msgCache = new();
+    private bool _showThoughts = true;
+    private const string ShowThoughtsKey = "clawpilot.showThoughts";
 
     protected override async Task OnInitializedAsync()
     {
         try { _agents = await Hub.ListAgentsAsync(); }
         catch (Exception ex) { _agents = []; Console.Error.WriteLine($"ListAgentsAsync failed: {ex.Message}"); }
+
+        try
+        {
+            var stored = await JS.InvokeAsync<string?>("localStorage.getItem", ShowThoughtsKey);
+            if (stored is not null) _showThoughts = stored == "true";
+        }
+        catch { }
+    }
+
+    private async Task ToggleShowThoughts(ChangeEventArgs e)
+    {
+        _showThoughts = e.Value is bool b ? b : bool.TryParse(e.Value?.ToString(), out var p) && p;
+        try { await JS.InvokeVoidAsync("localStorage.setItem", ShowThoughtsKey, _showThoughts ? "true" : "false"); }
+        catch { }
     }
 
     protected override async Task OnParametersSetAsync()
@@ -117,6 +186,10 @@
 
         if (Agent is not null && SessionId is not null && _streamingFor != $"{Agent}/{SessionId}")
         {
+            // Snapshot the previous session before tearing down its stream so
+            // we can rehydrate when the user navigates back.
+            SnapshotCurrentMessages();
+
             await StopStreamingAsync();
             _pendingOrphan = null;
 
@@ -130,8 +203,15 @@
                 return;
             }
 
-            var needsLoad = info is not null && info.State != SessionState.LiveOwned;
-            await StartStreamingAsync(load: needsLoad, force: false);
+            // If we have a cached snapshot AND the session is still loaded
+            // into ACP (LiveOwned), restore the snapshot and connect WITHOUT
+            // requesting a load -- ACP would reject session/load on an
+            // already-loaded session. For Past sessions (or first visit
+            // when no cache exists), request load=true so ACP replays history.
+            var key = $"{Agent}/{SessionId}";
+            var hasCache = _msgCache.TryGetValue(key, out var cached);
+            var canRehydrate = hasCache && info?.State == SessionState.LiveOwned;
+            await StartStreamingAsync(load: !canRehydrate, force: false, restoreFrom: canRehydrate ? cached : null);
         }
     }
 
@@ -161,22 +241,99 @@
         Nav.NavigateTo($"/agents/{Agent}/sessions/{s.Id}");
     }
 
-    private async Task NewSession()
+    private void OpenNewSessionDialog()
     {
         if (Agent is null) return;
-        var s = await Hub.NewSessionAsync(Agent, null);
-        if (s is not null)
+        // Build cwd suggestions from existing sessions (most-recent first, deduped).
+        _cwdSuggestions = (_sessions ?? new())
+            .Where(s => !string.IsNullOrWhiteSpace(s.Cwd))
+            .OrderByDescending(s => s.UpdatedAt)
+            .Select(s => s.Cwd!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(20)
+            .ToList();
+        _newSessionCwd = _cwdSuggestions.FirstOrDefault() ?? "";
+        _newSessionError = null;
+        _newSessionBusy = false;
+        _newSessionOpen = true;
+    }
+
+    private void CancelNewSession()
+    {
+        _newSessionOpen = false;
+        _newSessionError = null;
+    }
+
+    private async Task ConfirmNewSession()
+    {
+        if (Agent is null) return;
+        _newSessionBusy = true;
+        _newSessionError = null;
+        try
         {
-            _sessions = await Hub.ListSessionsAsync(Agent);
+            var cwd = string.IsNullOrWhiteSpace(_newSessionCwd) ? null : _newSessionCwd.Trim();
+            var s = await Hub.NewSessionAsync(Agent, cwd);
+            if (s is null) { _newSessionError = "Server returned no session"; _newSessionBusy = false; return; }
+            // Instant-insert: prepend the new session to the visible list
+            // before navigating, so the user sees it appear immediately.
+            _sessions ??= new List<SessionInfo>();
+            if (!_sessions.Any(x => x.Id == s.Id))
+                _sessions.Insert(0, s);
+            _newSessionOpen = false;
             Nav.NavigateTo($"/agents/{Agent}/sessions/{s.Id}");
+            // Reconcile in the background to pick up server-filled fields.
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var fresh = await Hub.ListSessionsAsync(Agent);
+                    await InvokeAsync(() => { _sessions = fresh; StateHasChanged(); });
+                }
+                catch { }
+            });
+        }
+        catch (Exception ex)
+        {
+            _newSessionError = ex.Message;
+            _newSessionBusy = false;
         }
     }
 
-    private async Task StartStreamingAsync(bool load = false, bool force = false)
+    private async Task NewSession()
+    {
+        if (Agent is null) return;
+        try
+        {
+            var s = await Hub.NewSessionAsync(Agent, null);
+            if (s is not null)
+            {
+                _sessions = await Hub.ListSessionsAsync(Agent);
+                Nav.NavigateTo($"/agents/{Agent}/sessions/{s.Id}");
+            }
+        }
+        catch (Exception ex) { Console.Error.WriteLine($"NewSession failed: {ex.Message}"); }
+    }
+
+    private void SnapshotCurrentMessages()
+    {
+        if (_streamingFor is null || _messages.Count == 0) return;
+        // Deep-clone the message records so subsequent mutations to the
+        // observable collection (Clear, Add) don't poke the cached snapshot.
+        _msgCache[_streamingFor] = _messages
+            .Select(m => new ChatMessage { Role = m.Role, Text = m.Text, ToolCallId = m.ToolCallId })
+            .ToList();
+    }
+
+    private async Task StartStreamingAsync(bool load = false, bool force = false, List<ChatMessage>? restoreFrom = null)
     {
         if (Agent is null || SessionId is null) return;
         _messages.Clear();
         _streamingAssistant = null;
+        if (restoreFrom is not null)
+        {
+            foreach (var m in restoreFrom)
+                _messages.Add(new ChatMessage { Role = m.Role, Text = m.Text, ToolCallId = m.ToolCallId });
+        }
         _loading = load;
         _streamCts = new CancellationTokenSource();
         _streamingFor = $"{Agent}/{SessionId}";
@@ -226,6 +383,8 @@
         switch (evt)
         {
             case AssistantDelta d:
+                _thinking = false;
+                _streamingThought = null;
                 if (_streamingAssistant is null)
                 {
                     _streamingAssistant = new ChatMessage { Role = "assistant", Text = "" };
@@ -233,24 +392,39 @@
                 }
                 _streamingAssistant.Text += d.Text;
                 break;
+            case ThoughtDelta td:
+                _thinking = false;
+                if (_streamingThought is null)
+                {
+                    _streamingThought = new ChatMessage { Role = "thought", Text = "" };
+                    _messages.Add(_streamingThought);
+                }
+                _streamingThought.Text += td.Text;
+                break;
             case UserDelta d:
                 // Finalize any in-progress assistant message before starting a new turn
                 // (during replay, ACP sends user_message_chunk, agent_message_chunk*, user_message_chunk, ...).
                 _streamingAssistant = null;
+                _streamingThought = null;
                 _messages.Add(new ChatMessage { Role = "user", Text = d.Text });
                 break;
             case ToolCallStart t:
+                _thinking = false;
                 _streamingAssistant = null;
+                _streamingThought = null;
                 _messages.Add(new ChatMessage { Role = "tool", ToolCallId = t.ToolCallId, Text = $"[start] {t.Name}" });
                 break;
             case ToolCallEnd t:
                 _messages.Add(new ChatMessage { Role = "tool", ToolCallId = t.ToolCallId, Text = $"[end] {(t.Success ? "ok" : "fail")}" });
                 break;
             case ApprovalRequired a:
+                _thinking = false;
                 _pendingApproval = a;
                 break;
             case TurnComplete:
+                _thinking = false;
                 _streamingAssistant = null;
+                _streamingThought = null;
                 _busy = false;
                 break;
             case LoadStarted:
@@ -259,6 +433,7 @@
             case HistoryDone:
                 _loading = false;
                 _streamingAssistant = null;
+                _streamingThought = null;
                 break;
             case LoadFailed lf:
                 _loading = false;
@@ -275,8 +450,9 @@
         if (Agent is null || SessionId is null) return;
         _messages.Add(new ChatMessage { Role = "user", Text = text });
         _busy = true;
+        _thinking = true;
         try { await Hub.SendPromptAsync(Agent, SessionId, text); }
-        catch (Exception ex) { _messages.Add(new ChatMessage { Role = "tool", Text = $"send failed: {ex.Message}" }); _busy = false; }
+        catch (Exception ex) { _messages.Add(new ChatMessage { Role = "tool", Text = $"send failed: {ex.Message}" }); _busy = false; _thinking = false; }
         StateHasChanged();
     }
 
@@ -290,6 +466,7 @@
 
     public async ValueTask DisposeAsync()
     {
+        SnapshotCurrentMessages();
         await StopStreamingAsync();
     }
 }

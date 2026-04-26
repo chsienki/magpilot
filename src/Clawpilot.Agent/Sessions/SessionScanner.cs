@@ -67,7 +67,28 @@ public sealed class SessionScanner
         }
 
         var (cwd, repository, branch, summary, createdAt, updatedAt) = ParseWorkspaceYaml(Path.Combine(dir, "workspace.yaml"));
+        // Prefer the most recent activity signal: events.jsonl mtime > workspace.yaml mtime > dir mtime.
+        // workspace.yaml's updated_at field isn't rewritten on every message,
+        // so it's a poor sort key on its own.
+        var derivedUpdated = LatestMTime(dir, ["events.jsonl", "workspace.yaml"]);
+        if (derivedUpdated is { } d && (updatedAt is null || d > updatedAt))
+            updatedAt = d;
         return new SessionInfo(id, state, cwd, repository, branch, summary, ownerPid, createdAt, updatedAt);
+    }
+
+    private static DateTimeOffset? LatestMTime(string dir, string[] candidates)
+    {
+        DateTimeOffset? best = null;
+        foreach (var name in candidates)
+        {
+            var p = Path.Combine(dir, name);
+            if (!File.Exists(p)) continue;
+            var t = new DateTimeOffset(File.GetLastWriteTimeUtc(p), TimeSpan.Zero);
+            if (best is null || t > best) best = t;
+        }
+        if (best is null && Directory.Exists(dir))
+            best = new DateTimeOffset(Directory.GetLastWriteTimeUtc(dir), TimeSpan.Zero);
+        return best;
     }
 
     /// <summary>

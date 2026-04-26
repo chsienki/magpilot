@@ -1,0 +1,28 @@
+@using Markdig
+@if (!string.IsNullOrEmpty(Text))
+{
+    <div class="md-body">@_html</div>
+}
+
+@code {
+    [Parameter, EditorRequired] public string Text { get; set; } = "";
+
+    private static readonly MarkdownPipeline Pipeline = new MarkdownPipelineBuilder()
+        .UseSoftlineBreakAsHardlineBreak()
+        .UsePipeTables()
+        .UseAutoLinks()
+        .DisableHtml()
+        .Build();
+
+    private MarkupString _html;
+    private string? _lastText;
+
+    protected override void OnParametersSet()
+    {
+        if (!ReferenceEquals(_lastText, Text) && _lastText != Text)
+        {
+            _html = (MarkupString)Markdown.ToHtml(Text ?? "", Pipeline);
+            _lastText = Text;
+        }
+    }
+}
