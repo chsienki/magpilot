@@ -1,0 +1,27 @@
+# Clawpilot Hub stack for /srv/clawpilot on the docker LXC (102).
+#
+# host networking is required so the hub can:
+#  - send/receive UDP broadcast on 47823 for agent discovery on the LAN
+#  - bind a stable port (7088) that NPM forwards clawpilot.home.sienkiewi.cz to
+#
+# Bring up:
+#   cd /srv/clawpilot && docker compose up -d
+#
+# Required env (in /srv/clawpilot/.env):
+#   CLAWPILOT_AGENT_TOKEN=<shared secret matching the agents>
+
+services:
+  hub:
+    image: clawpilot-hub:latest
+    container_name: clawpilot-hub
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      ASPNETCORE_URLS: http://0.0.0.0:7088
+      ASPNETCORE_ENVIRONMENT: Production
+      CLAWPILOT_HUB_DATA: /data
+      CLAWPILOT_AGENT_TOKEN: ${CLAWPILOT_AGENT_TOKEN:?set CLAWPILOT_AGENT_TOKEN in .env}
+      CLAWPILOT_HUB_TRUSTED_PROXIES: 192.168.1.149
+      CLAWPILOT_DEV_BYPASS_AUTH: "true"
+    volumes:
+      - ./data:/data

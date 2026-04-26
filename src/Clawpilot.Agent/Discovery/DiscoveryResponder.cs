@@ -1,8 +1,7 @@
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text.Json;
-using Microsoft.AspNetCore.Hosting.Server;
-using Microsoft.AspNetCore.Hosting.Server.Features;
 
 namespace Clawpilot.Agent.Discovery;
 
@@ -16,12 +15,12 @@ public sealed class DiscoveryResponder : BackgroundService
     private const string Magic = "CLAWPILOT-DISCOVER-v1";
 
     private readonly ILogger<DiscoveryResponder> _logger;
-    private readonly IServer _server;
+    private readonly IConfiguration _config;
 
-    public DiscoveryResponder(ILogger<DiscoveryResponder> logger, IServer server)
+    public DiscoveryResponder(ILogger<DiscoveryResponder> logger, IConfiguration config)
     {
         _logger = logger;
-        _server = server;
+        _config = config;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -36,14 +35,16 @@ public sealed class DiscoveryResponder : BackgroundService
                 var msg = System.Text.Encoding.UTF8.GetString(result.Buffer);
                 if (!msg.StartsWith(Magic, StringComparison.Ordinal)) continue;
 
+                var url = ResolveSelfUrl(result.RemoteEndPoint.Address);
                 var reply = JsonSerializer.SerializeToUtf8Bytes(new
                 {
                     magic = Magic,
                     name = Environment.MachineName,
-                    url = ResolveSelfUrl(),
+                    url,
                     os = Environment.OSVersion.VersionString,
                 });
                 await udp.SendAsync(reply, reply.Length, result.RemoteEndPoint);
+                _logger.LogDebug("Replied to probe from {From} with url {Url}", result.RemoteEndPoint, url);
             }
         }
         catch (OperationCanceledException) { }
@@ -53,10 +54,39 @@ public sealed class DiscoveryResponder : BackgroundService
         }
     }
 
-    private string ResolveSelfUrl()
+    private string ResolveSelfUrl(IPAddress remoteHubAddr)
     {
-        var addresses = _server.Features.Get<IServerAddressesFeature>();
-        var first = addresses?.Addresses.FirstOrDefault();
-        return first ?? "http://localhost:5099";
+        // 1) Explicit override via config / env wins.
+        var explicitUrl = _config["Agent:PublicUrl"]
+            ?? Environment.GetEnvironmentVariable("CLAWPILOT_AGENT_PUBLIC_URL");
+        if (!string.IsNullOrWhiteSpace(explicitUrl))
+            return explicitUrl;
+
+        var port = _config.GetValue("Agent:Port", 5099);
+
+        // 2) Route-based: ask the OS which local IP would be used to talk back to the hub.
+        try
+        {
+            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            socket.Connect(new IPEndPoint(remoteHubAddr, 65530));
+            if (socket.LocalEndPoint is IPEndPoint local && !IPAddress.IsLoopback(local.Address))
+                return $"http://{local.Address}:{port}";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Route-based local IP detection failed; falling back to interface scan");
+        }
+
+        // 3) Pick first physical, up, non-loopback IPv4.
+        var fallback = NetworkInterface.GetAllNetworkInterfaces()
+            .Where(n => n.OperationalStatus == OperationalStatus.Up
+                        && n.NetworkInterfaceType is not (NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel))
+            .SelectMany(n => n.GetIPProperties().UnicastAddresses)
+            .Select(u => u.Address)
+            .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(a));
+
+        return fallback is not null
+            ? $"http://{fallback}:{port}"
+            : $"http://localhost:{port}";
     }
 }

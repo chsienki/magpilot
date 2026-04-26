@@ -15,9 +15,9 @@ public static class HubEndpoints
 
         api.MapGet("/agents", (AgentRegistry reg) => reg.List());
 
-        api.MapPost("/agents", (AgentInfo info, AgentRegistry reg) =>
+        api.MapPost("/agents", (AgentRegistrationRequest req, AgentRegistry reg) =>
         {
-            reg.Upsert(info.Name, info.Url, null, info.Online);
+            reg.Upsert(req.Name, req.Url, req.Token, online: true);
             return Results.NoContent();
         });
 
@@ -124,3 +124,5 @@ public static class HubEndpoints
 }
 
 public sealed record PushSubscriptionDto(string Kind, string Endpoint, string? KeysJson, string? UserAgent);
+
+public sealed record AgentRegistrationRequest(string Name, string Url, string? Token);

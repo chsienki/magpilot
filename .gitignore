@@ -16,3 +16,8 @@ src/Clawpilot.Hub/wwwroot/
 # Hub runtime data
 src/Clawpilot.Hub/data/
 hub-data/
+
+spikes/node_modules/
+spikes/package-lock.json
+spikes/package.json
+spikes/inspect-prod.js
