@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Clawpilot.Agent/Clawpilot.Agent.csproj" />
+    <Project Path="src/Clawpilot.Hub/Clawpilot.Hub.csproj" />
+    <Project Path="src/Clawpilot.Shared/Clawpilot.Shared.csproj" />
+    <Project Path="src/Clawpilot.UI/Clawpilot.UI.csproj" />
+    <Project Path="src/Clawpilot.Web/Clawpilot.Web.csproj" />
+  </Folder>
+</Solution>

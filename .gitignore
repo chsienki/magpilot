@@ -11,3 +11,8 @@ local.properties
 # Secrets
 appsettings.Local.json
 *.fcm-service-account.json
+# Built SPA bundle copied into hub at build time
+src/Clawpilot.Hub/wwwroot/
+# Hub runtime data
+src/Clawpilot.Hub/data/
+hub-data/

@@ -1,0 +1,213 @@
+@page "/"
+@page "/agents/{agent}/sessions/{sessionId}"
+@inject HubClient Hub
+@inject NavigationManager Nav
+@implements IAsyncDisposable
+@using System.Collections.ObjectModel
+
+<div class="app-layout">
+    <aside class="sidebar">
+        <h3>Hosts</h3>
+        @if (_agents is null)
+        {
+            <p>Loading...</p>
+        }
+        else
+        {
+            <ul class="hosts">
+                @foreach (var a in _agents)
+                {
+                    <li class="host @(a.Name == Agent ? "active" : "")">
+                        <button class="link" @onclick="() => SelectAgent(a.Name)">
+                            <span class="dot @(a.Online ? "on" : "off")"></span>@a.Name
+                        </button>
+                    </li>
+                }
+            </ul>
+        }
+        <h3>Sessions</h3>
+        @if (Agent is null)
+        {
+            <p class="muted">Pick a host</p>
+        }
+        else if (_sessions is null)
+        {
+            <p>Loading...</p>
+        }
+        else
+        {
+            <button class="new" @onclick="NewSession">+ New chat</button>
+            <ul class="sessions">
+                @foreach (var s in _sessions)
+                {
+                    <li class="sess sess-@s.State.ToString().ToLowerInvariant() @(s.Id == SessionId ? "active" : "")">
+                        <button class="link" @onclick="() => OpenSession(s)">
+                            <div class="sess-title">@(s.Summary ?? s.Id[..8])</div>
+                            <div class="sess-meta">@s.State @(s.Repository ?? "") @(s.Branch ?? "")</div>
+                        </button>
+                    </li>
+                }
+            </ul>
+        }
+    </aside>
+    <main class="chat-pane">
+        @if (Agent is not null && SessionId is not null)
+        {
+            <ChatView Messages="@_messages"
+                      PendingApproval="@_pendingApproval"
+                      Disabled="@(_busy)"
+                      OnSend="HandleSend"
+                      OnApproval="HandleApproval" />
+        }
+        else
+        {
+            <div class="welcome">
+                <h2>clawpilot</h2>
+                <p>Pick a host on the left to see its sessions.</p>
+            </div>
+        }
+    </main>
+</div>
+
+@code {
+    [Parameter] public string? Agent { get; set; }
+    [Parameter] public string? SessionId { get; set; }
+
+    private List<AgentInfo>? _agents;
+    private List<SessionInfo>? _sessions;
+    private readonly ObservableCollection<ChatMessage> _messages = new();
+    private ChatMessage? _streamingAssistant;
+    private ApprovalRequired? _pendingApproval;
+    private CancellationTokenSource? _streamCts;
+    private bool _busy;
+    private string? _streamingFor;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try { _agents = await Hub.ListAgentsAsync(); }
+        catch (Exception ex) { _agents = []; Console.Error.WriteLine($"ListAgentsAsync failed: {ex.Message}"); }
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Agent is not null)
+        {
+            try { _sessions = await Hub.ListSessionsAsync(Agent); }
+            catch (Exception ex) { Console.Error.WriteLine(ex.Message); _sessions = []; }
+        }
+
+        if (Agent is not null && SessionId is not null && _streamingFor != $"{Agent}/{SessionId}")
+        {
+            await StopStreamingAsync();
+            await StartStreamingAsync();
+        }
+    }
+
+    private void SelectAgent(string name)
+    {
+        Nav.NavigateTo($"/agents/{name}/sessions/");
+    }
+
+    private void OpenSession(SessionInfo s)
+    {
+        Nav.NavigateTo($"/agents/{Agent}/sessions/{s.Id}");
+    }
+
+    private async Task NewSession()
+    {
+        if (Agent is null) return;
+        var s = await Hub.NewSessionAsync(Agent, null);
+        if (s is not null)
+        {
+            _sessions = await Hub.ListSessionsAsync(Agent);
+            Nav.NavigateTo($"/agents/{Agent}/sessions/{s.Id}");
+        }
+    }
+
+    private async Task StartStreamingAsync()
+    {
+        if (Agent is null || SessionId is null) return;
+        _messages.Clear();
+        _streamingAssistant = null;
+        _streamCts = new CancellationTokenSource();
+        _streamingFor = $"{Agent}/{SessionId}";
+        var ct = _streamCts.Token;
+        var agent = Agent;
+        var sid = SessionId;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await foreach (var evt in Hub.StreamAsync(agent, sid, ct))
+                    await InvokeAsync(() => Apply(evt));
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { Console.Error.WriteLine($"stream: {ex.Message}"); }
+        }, ct);
+    }
+
+    private async Task StopStreamingAsync()
+    {
+        if (_streamCts is not null)
+        {
+            await _streamCts.CancelAsync();
+            _streamCts.Dispose();
+            _streamCts = null;
+        }
+    }
+
+    private void Apply(StreamEvent evt)
+    {
+        switch (evt)
+        {
+            case AssistantDelta d:
+                if (_streamingAssistant is null)
+                {
+                    _streamingAssistant = new ChatMessage { Role = "assistant", Text = "" };
+                    _messages.Add(_streamingAssistant);
+                }
+                _streamingAssistant.Text += d.Text;
+                break;
+            case UserDelta d:
+                _messages.Add(new ChatMessage { Role = "user", Text = d.Text });
+                break;
+            case ToolCallStart t:
+                _messages.Add(new ChatMessage { Role = "tool", ToolCallId = t.ToolCallId, Text = $"[start] {t.Name}" });
+                break;
+            case ToolCallEnd t:
+                _messages.Add(new ChatMessage { Role = "tool", ToolCallId = t.ToolCallId, Text = $"[end] {(t.Success ? "ok" : "fail")}" });
+                break;
+            case ApprovalRequired a:
+                _pendingApproval = a;
+                break;
+            case TurnComplete:
+                _streamingAssistant = null;
+                _busy = false;
+                break;
+        }
+        StateHasChanged();
+    }
+
+    private async Task HandleSend(string text)
+    {
+        if (Agent is null || SessionId is null) return;
+        _messages.Add(new ChatMessage { Role = "user", Text = text });
+        _busy = true;
+        try { await Hub.SendPromptAsync(Agent, SessionId, text); }
+        catch (Exception ex) { _messages.Add(new ChatMessage { Role = "tool", Text = $"send failed: {ex.Message}" }); _busy = false; }
+        StateHasChanged();
+    }
+
+    private async Task HandleApproval((string ApprovalId, string OptionId) a)
+    {
+        if (Agent is null || SessionId is null || _pendingApproval is null) return;
+        await Hub.ResolveApprovalAsync(Agent, SessionId, a.ApprovalId, a.OptionId);
+        _pendingApproval = null;
+        StateHasChanged();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await StopStreamingAsync();
+    }
+}

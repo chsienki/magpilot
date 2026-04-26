@@ -74,22 +74,55 @@ codebase** (MAUI Blazor Hybrid):
 
 ## Status
 
-Pre-implementation. The full design -- including alternatives
-considered, open questions, and a step-by-step build order -- lives
-in [`docs/plan.md`](docs/plan.md).
+**v0 scaffold (this commit):** the agent + hub + shared Blazor UI + web
+SPA all build and pass an end-to-end smoke test (hub auto-discovers the
+agent over UDP, lists past sessions on disk, creates new ACP sessions
+through the proxy, serves the WASM bundle at `/`).
+
+What is **NOT yet wired**: the MAUI Android shell, real FCM/Web Push
+delivery, TLS for hub<->agents, and the LXC compose deployment. See
+`docs/plan.md` for the full roadmap.
 
 ## Repository layout
 
 ```
 clawpilot/
-   README.md                 <- this file
-   docs/
-      plan.md                <- the design doc (start here)
-   agent/                    <- copilot-agent (.NET 9), TBD
-   hub/                      <- copilot-hub (.NET 9), TBD
-   ui/                       <- Clawpilot.UI shared Blazor components, TBD
-   web/                      <- Clawpilot.Web Blazor WASM shell, TBD
-   app/                      <- CopilotChat.Maui Blazor Hybrid shell, TBD
+   Clawpilot.sln
+   docs/plan.md              <- design doc (start here)
+   spikes/acp-smoke/         <- standalone ACP smoke test
+   scripts/build-hub.ps1     <- builds web SPA + copies into hub wwwroot
+   src/
+      Clawpilot.Shared/      <- DTOs, SSE event types
+      Clawpilot.Agent/       <- per-host daemon (ACP wrapper + HTTP/SSE API)
+      Clawpilot.Hub/         <- central daemon (proxy, OAuth, SPA host)
+      Clawpilot.UI/          <- shared Blazor components (chat, sessions)
+      Clawpilot.Web/         <- Blazor WASM shell
+      CopilotChat.Maui/      <- MAUI Blazor Hybrid shell (TBD)
+```
+
+## Build & run locally
+
+```pwsh
+# Build everything
+dotnet build
+
+# Run the agent (in one terminal)
+$env:CLAWPILOT_AGENT_TOKEN = "dev-token"
+$env:ASPNETCORE_URLS       = "http://localhost:5099"
+dotnet run --project src/Clawpilot.Agent
+
+# Build the SPA + copy it into the hub's wwwroot
+./scripts/build-hub.ps1
+
+# Run the hub (in another terminal)
+$env:CLAWPILOT_HUB_BEARER  = "dev-bearer"
+$env:CLAWPILOT_AGENT_TOKEN = "dev-token"
+$env:ASPNETCORE_URLS       = "http://localhost:7088"
+dotnet run --project src/Clawpilot.Hub
+
+# Open http://localhost:7088/  (web SPA, will require GitHub OAuth in prod)
+# Or curl with bearer:
+#   curl -H "Authorization: Bearer dev-bearer" http://localhost:7088/api/agents
 ```
 
 ## Related context
