@@ -18,7 +18,15 @@ public static class GitHubOAuth
         routes.MapGet("/login", (HubAuthOptions opts, HttpContext ctx) =>
         {
             if (string.IsNullOrEmpty(opts.OAuthClientId))
+            {
+                if (Environment.GetEnvironmentVariable("CLAWPILOT_DEV_BYPASS_AUTH") == "true")
+                {
+                    var ret = ctx.Request.Query["ReturnUrl"].ToString();
+                    var devUrl = string.IsNullOrEmpty(ret) ? "/dev-login" : $"/dev-login?ReturnUrl={Uri.EscapeDataString(ret)}";
+                    return Results.Redirect(devUrl);
+                }
                 return Results.Problem("OAUTH_CLIENT_ID not configured");
+            }
             var state = Guid.NewGuid().ToString("N");
             ctx.Response.Cookies.Append("oauth_state", state, new CookieOptions
             {
@@ -95,7 +103,8 @@ public static class GitHubOAuth
             await ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme,
                 new ClaimsPrincipal(claims),
                 new AuthenticationProperties { IsPersistent = true, ExpiresUtc = DateTimeOffset.UtcNow.AddDays(1) });
-            return Results.Redirect("/");
+            var ret = ctx.Request.Query["ReturnUrl"].ToString();
+            return Results.Redirect(string.IsNullOrEmpty(ret) ? "/" : ret);
         });
     }
 

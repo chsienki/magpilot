@@ -12,7 +12,8 @@ builder.Services.AddSingleton<IHubAuthProvider, WebHubAuthProvider>();
 builder.Services.AddScoped(sp =>
 {
     var auth = sp.GetRequiredService<IHubAuthProvider>();
-    var http = new HttpClient(new IncludeCredentialsHandler())
+    var js = sp.GetRequiredService<Microsoft.JSInterop.IJSRuntime>();
+    var http = new HttpClient(new IncludeCredentialsHandler(js))
     {
         // Cookie auth + same origin -> base address is the host page.
         BaseAddress = new Uri(builder.HostEnvironment.BaseAddress),
