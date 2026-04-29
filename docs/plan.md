@@ -1,8 +1,8 @@
-# clawpilot — Design Plan (v5: Blazor Hybrid + Web)
+# magpilot — Design Plan (v5: Blazor Hybrid + Web)
 
 > A purpose-built **shared Blazor UI** that runs both inside a .NET MAUI
 > Android shell on the Pixel and as a WebAssembly SPA at
-> `https://clawpilot.home.sienkiewi.cz`, plus a central hub on the docker
+> `https://magpilot.home.sienkiewi.cz`, plus a central hub on the docker
 > LXC and per-host agent daemons. Drives real `copilot` CLI processes on
 > any of Chris's computers via the Agent Client Protocol (ACP).
 >
@@ -22,7 +22,7 @@
 1. **Form factor (phone):** .NET MAUI Blazor Hybrid app, Android target
    for v1.
 2. **Form factor (web):** Blazor WebAssembly SPA, served by the hub at
-   `https://clawpilot.home.sienkiewi.cz`. **Full feature parity** with
+   `https://magpilot.home.sienkiewi.cz`. **Full feature parity** with
    the phone app — anything you can do on the phone, you can do in the
    browser, and vice versa.
 3. **Capability:** Full Copilot CLI agent — tool calls, file edits,
@@ -33,7 +33,7 @@
    a question while client is backgrounded, (c) any approval prompt
    fires. FCM for Android; **Web Push (VAPID)** for browsers.
 6. **Network:** All clients (phone or browser) talk to **one address** —
-   the hub on the docker LXC at `https://clawpilot.home.sienkiewi.cz`
+   the hub on the docker LXC at `https://magpilot.home.sienkiewi.cz`
    (NPM-fronted) or directly at `192.168.1.239:<port>` on LAN.
 7. **Auth:**
    - **Phone:** bearer token in Android Keystore (paste once on
@@ -94,7 +94,7 @@ hosts every chat on the host. If it crashes, agent re-spawns +
 
 ```
    +----- Pixel 10 Pro -----+        +-------- Browser ---------+
-   |  CopilotChat (MAUI)    |        |  https://clawpilot.home  |
+   |  CopilotChat (MAUI)    |        |  https://magpilot.home  |
    |   - WebView host       |        |  Blazor WASM SPA         |
    |   - FCM receiver       |        |  Web Push receiver       |
    +-----+------------------+        +--------+-----------------+
@@ -238,12 +238,12 @@ the same proxying work either way.
       VAPID_PRIVATE_KEY: <ask user>
       FCM_SA_FILE: /data/fcm-service-account.json
   ```
-- NPM proxy host added: `clawpilot.home.sienkiewi.cz` → `192.168.1.239:8443`
+- NPM proxy host added: `magpilot.home.sienkiewi.cz` → `192.168.1.239:8443`
   with the existing wildcard Let's Encrypt cert.
 
 ---
 
-## Component 3 — `Clawpilot.UI` (shared Blazor library)
+## Component 3 — `Magpilot.UI` (shared Blazor library)
 
 **Stack:** Razor components, CommunityToolkit.Mvvm-style view models
 in plain C# (no Blazor-specific MVVM lib needed; `INotifyPropertyChanged`
@@ -289,7 +289,7 @@ The Blazor lib defines interfaces; shells implement them:
 
 A thin .NET MAUI Blazor Hybrid app:
 
-- One `BlazorWebView` hosting `Clawpilot.UI` components.
+- One `BlazorWebView` hosting `Magpilot.UI` components.
 - Implements the cross-shell interfaces (FCM, Keystore, etc.).
 - App-launch flow: paste hub URL + bearer once → SecureStorage →
   Blazor UI takes over.
@@ -297,11 +297,11 @@ A thin .NET MAUI Blazor Hybrid app:
 
 ---
 
-## Component 5 — Web shell (`Clawpilot.Web`)
+## Component 5 — Web shell (`Magpilot.Web`)
 
 A Blazor WebAssembly project that:
 
-- References `Clawpilot.UI` and renders the same components.
+- References `Magpilot.UI` and renders the same components.
 - Implements the cross-shell interfaces using web APIs.
 - Service worker for offline scrollback + Web Push receive.
 - GitHub OAuth flow handled by hub; client just reads `/api/me`
@@ -358,10 +358,10 @@ deliver via the right channel → drop subscriptions on `410 Gone` /
 | `copilot-hub` | docker LXC 102 | Add to `/srv/openclaw/docker-compose.yml`, `docker compose up -d copilot-hub`. Watchtower auto-updates. |
 | `copilot-agent` Windows | HENDRIK | `copilot-agent install --service` |
 | `copilot-agent` macOS | Mac | `copilot-agent install --service` (launchd) |
-| `Clawpilot.Web` SPA | inside hub container | Built into hub image; served at `/` |
+| `Magpilot.Web` SPA | inside hub container | Built into hub image; served at `/` |
 | `CopilotChat.Maui` APK | Pixel | Obtainium → GitHub Releases |
 
-NPM proxy host `clawpilot.home.sienkiewi.cz` → `192.168.1.239:8443`,
+NPM proxy host `magpilot.home.sienkiewi.cz` → `192.168.1.239:8443`,
 with the existing wildcard cert.
 
 ---
@@ -375,7 +375,7 @@ with the existing wildcard cert.
    smooth. Mitigation: virtualize the message list (already standard
    in the Blazor lib).
 3. **GitHub OAuth callback URL behind NPM.** Need to register
-   `https://clawpilot.home.sienkiewi.cz/oauth/callback` on a personal
+   `https://magpilot.home.sienkiewi.cz/oauth/callback` on a personal
    GitHub OAuth App. NPM passes through the path; hub handles it.
 4. **Web Push from a self-hosted home service.** VAPID is straight-
    forward but browser push endpoints (mozilla, google) need internet
@@ -417,10 +417,10 @@ with the existing wildcard cert.
 2. **`copilot-agent` v0.** Single host, eight API endpoints, no
    auth, no TLS. Test from `curl`.
 3. **`copilot-hub` v0.** Pure proxy + agent address book.
-4. **`Clawpilot.UI` v0.** Sessions tree + chat + approvals as Razor
+4. **`Magpilot.UI` v0.** Sessions tree + chat + approvals as Razor
    components, in a standalone Blazor WASM test harness pointed at
    the hub.
-5. **Web shell.** Wrap UI in `Clawpilot.Web`, add GitHub OAuth +
+5. **Web shell.** Wrap UI in `Magpilot.Web`, add GitHub OAuth +
    cookie auth on the hub, serve static.
 6. **MAUI shell.** Wrap the same UI in `CopilotChat.Maui` with
    Android FCM and SecureStorage.

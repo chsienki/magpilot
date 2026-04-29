@@ -1,4 +1,4 @@
-# Clawpilot — Copilot agent instructions
+# Magpilot — Copilot agent instructions
 
 > Read this first. It captures the architecture, the moving parts, the
 > non-obvious gotchas, and the build/deploy workflow you need to make
@@ -6,7 +6,7 @@
 
 ## What this repo is
 
-Clawpilot puts the GitHub Copilot CLI on the user's phone (and any
+Magpilot puts the GitHub Copilot CLI on the user's phone (and any
 browser) by:
 
 1. Running `copilot --acp` (Agent Client Protocol over JSON-RPC on
@@ -18,31 +18,31 @@ browser) by:
 3. Clients (a Blazor WebAssembly SPA today; a MAUI Blazor Hybrid
    Android shell later) consume the hub's API.
 
-The user-facing URL is `https://clawpilot.home.sienkiewi.cz`
+The user-facing URL is `https://magpilot.home.sienkiewi.cz`
 (LAN/WireGuard only, fronted by NPM on the same LXC).
 
 ## Project layout
 
 ```
 src/
-  Clawpilot.Shared/   <- DTOs, SSE event types (StreamEvent discriminator)
-  Clawpilot.Agent/    <- per-host daemon: ACP client + minimal HTTP/SSE API
+  Magpilot.Shared/   <- DTOs, SSE event types (StreamEvent discriminator)
+  Magpilot.Agent/    <- per-host daemon: ACP client + minimal HTTP/SSE API
     Acp/AcpSessionManager.cs       <- the heart; ACP <-> SSE translation
     Api/AgentEndpoints.cs          <- HTTP endpoints (sessions, /messages, SSE)
     Sessions/SessionScanner.cs     <- discovers Owned/Locked/Dormant sessions
-  Clawpilot.Hub/      <- central daemon: agent registry, proxy, SPA host, auth
-  Clawpilot.UI/       <- shared Blazor components
+  Magpilot.Hub/      <- central daemon: agent registry, proxy, SPA host, auth
+  Magpilot.UI/       <- shared Blazor components
     Pages/Home.razor               <- main chat page (per-session message cache, SSE consumer)
     Components/ChatView.razor      <- renders messages (assistant=markdown, thought=details)
     Components/MarkdownView.razor  <- Markdig wrapper
-  Clawpilot.Web/      <- Blazor WASM shell (built into Clawpilot.Hub/wwwroot/)
+  Magpilot.Web/      <- Blazor WASM shell (built into Magpilot.Hub/wwwroot/)
 deploy/               <- docker-compose + deploy notes for LXC 102
 docs/plan.md          <- full design doc (v5: Blazor Hybrid + Web). Read this for context.
 spikes/acp-smoke/     <- standalone ACP smoke test (Node.js)
 scripts/build-hub.ps1 <- publishes Web SPA -> copies into Hub/wwwroot
 ```
 
-`Clawpilot.slnx` (XML solution format) is the solution. There is no
+`Magpilot.slnx` (XML solution format) is the solution. There is no
 `.sln`. `dotnet build` / `dotnet test` understand `.slnx`.
 
 ## Build, run, deploy
@@ -52,37 +52,37 @@ scripts/build-hub.ps1 <- publishes Web SPA -> copies into Hub/wwwroot
 dotnet build
 
 # Run the agent (terminal 1; on the host whose Copilot CLI you want to drive)
-$env:CLAWPILOT_AGENT_TOKEN      = "dev-token"
-$env:CLAWPILOT_AGENT_PUBLIC_URL = "http://localhost:5099"   # what the hub uses to reach back
+$env:MAGPILOT_AGENT_TOKEN      = "dev-token"
+$env:MAGPILOT_AGENT_PUBLIC_URL = "http://localhost:5099"   # what the hub uses to reach back
 $env:ASPNETCORE_URLS            = "http://localhost:5099"
-dotnet run --project src/Clawpilot.Agent
+dotnet run --project src/Magpilot.Agent
 
 # Build SPA + copy into hub wwwroot, then run hub (terminal 2)
 ./scripts/build-hub.ps1
-$env:CLAWPILOT_HUB_BEARER       = "dev-bearer"
-$env:CLAWPILOT_AGENT_TOKEN      = "dev-token"
-$env:CLAWPILOT_DEV_BYPASS_AUTH  = "true"
+$env:MAGPILOT_HUB_BEARER       = "dev-bearer"
+$env:MAGPILOT_AGENT_TOKEN      = "dev-token"
+$env:MAGPILOT_DEV_BYPASS_AUTH  = "true"
 $env:ASPNETCORE_URLS            = "http://localhost:7088"
-dotnet run --project src/Clawpilot.Hub
+dotnet run --project src/Magpilot.Hub
 # Open http://localhost:7088
 ```
 
-Hot-reload UI work: `dotnet watch --project src/Clawpilot.Web` does NOT
+Hot-reload UI work: `dotnet watch --project src/Magpilot.Web` does NOT
 go through the hub's API. For end-to-end UI dev use the inspect skill
-(`run-and-inspect`) against `Clawpilot.Web` proxied to the hub, or
+(`run-and-inspect`) against `Magpilot.Web` proxied to the hub, or
 just rebuild SPA + restart hub.
 
 ### Deploying the hub to the LXC
 
 `deploy/README.md` is the canonical recipe. Short version:
 
-1. `docker buildx build --platform linux/amd64 -f src/Clawpilot.Hub/Dockerfile -t clawpilot-hub:latest --load .`
+1. `docker buildx build --platform linux/amd64 -f src/Magpilot.Hub/Dockerfile -t magpilot-hub:latest --load .`
 2. `docker save` -> `scp` to proxmox -> `pct push 102` -> `docker load` inside the container.
-3. `pct exec 102 -- bash -c 'cd /srv/clawpilot && docker compose up -d'`
+3. `pct exec 102 -- bash -c 'cd /srv/magpilot && docker compose up -d'`
 
 **Critical `tar`/exclude gotcha when shipping source**: do NOT exclude
-`**/wwwroot` blanket-style — that kills `Clawpilot.Web/wwwroot/index.html`
-which is real source. Only exclude `src/Clawpilot.Hub/wwwroot/` (the
+`**/wwwroot` blanket-style — that kills `Magpilot.Web/wwwroot/index.html`
+which is real source. Only exclude `src/Magpilot.Hub/wwwroot/` (the
 build output). The `.gitignore` reflects this.
 
 The agent runs on each host directly (no docker). On HENDRIK it is a
@@ -92,12 +92,12 @@ plain `dotnet run` in an `async` PowerShell session named `agent`.
 
 | Var | Where | Purpose |
 |---|---|---|
-| `CLAWPILOT_AGENT_TOKEN` | agent + hub | Shared bearer secret hub uses to call agents. **Must match.** |
-| `CLAWPILOT_AGENT_PUBLIC_URL` | agent | URL the agent broadcasts in UDP discovery so the hub can call back. |
-| `CLAWPILOT_HUB_BEARER` | hub | Bearer for non-OAuth API calls (curl, MAUI app). |
-| `CLAWPILOT_DEV_BYPASS_AUTH` | hub | When `"true"`, skips OAuth (dev only). |
-| `CLAWPILOT_HUB_DATA` | hub | Directory for `hub.db`. Defaults to `./data`. |
-| `CLAWPILOT_HUB_TRUSTED_PROXIES` | hub | Comma list of IPs allowed to set `X-Forwarded-*` (NPM IP). |
+| `MAGPILOT_AGENT_TOKEN` | agent + hub | Shared bearer secret hub uses to call agents. **Must match.** |
+| `MAGPILOT_AGENT_PUBLIC_URL` | agent | URL the agent broadcasts in UDP discovery so the hub can call back. |
+| `MAGPILOT_HUB_BEARER` | hub | Bearer for non-OAuth API calls (curl, MAUI app). |
+| `MAGPILOT_DEV_BYPASS_AUTH` | hub | When `"true"`, skips OAuth (dev only). |
+| `MAGPILOT_HUB_DATA` | hub | Directory for `hub.db`. Defaults to `./data`. |
+| `MAGPILOT_HUB_TRUSTED_PROXIES` | hub | Comma list of IPs allowed to set `X-Forwarded-*` (NPM IP). |
 
 ## Architectural rules and gotchas
 
@@ -209,7 +209,7 @@ config; do NOT enable Caching in the NPM UI.
   `Fact`/`Theory`).
 - ASCII only in source comments and string literals (PowerShell-side
   encoding can mangle non-ASCII characters in commit pipelines).
-- Keep DTOs in `Clawpilot.Shared`. The SSE wire format
+- Keep DTOs in `Magpilot.Shared`. The SSE wire format
   (`StreamEvent` discriminated union) is the contract between agent
   and SPA — bumping it requires both sides to ship together.
 
@@ -217,12 +217,12 @@ config; do NOT enable Caching in the NPM UI.
 
 ```pwsh
 # Tail the hub logs on the LXC
-ssh proxmox "pct exec 102 -- docker logs --tail 200 -f clawpilot-hub"
+ssh proxmox "pct exec 102 -- docker logs --tail 200 -f magpilot-hub"
 
 # Restart the agent on HENDRIK (in the existing 'agent' async session)
-#  (in the agent shell: Ctrl+C, then `dotnet run --project src/Clawpilot.Agent`)
+#  (in the agent shell: Ctrl+C, then `dotnet run --project src/Magpilot.Agent`)
 
-# Check NPM proxy host config for clawpilot
+# Check NPM proxy host config for magpilot
 $tok = (Invoke-RestMethod -Uri http://192.168.1.239:81/api/tokens -Method Post `
         -ContentType application/json `
         -Body (@{identity="<email>"; secret="<pwd>"}|ConvertTo-Json)).token
@@ -233,7 +233,7 @@ Invoke-RestMethod -Uri http://192.168.1.239:81/api/nginx/proxy-hosts/7 `
 ## What is NOT yet built (don't assume it exists)
 
 - The `CopilotChat.Maui` Android shell — no project yet, but the
-  shared `Clawpilot.UI` is designed to drop into a MAUI Blazor Hybrid
+  shared `Magpilot.UI` is designed to drop into a MAUI Blazor Hybrid
   WebView later.
 - Real FCM push and Web Push (VAPID) delivery.
 - TLS between hub and per-host agents (currently plaintext over LAN +

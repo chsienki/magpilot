@@ -12,9 +12,9 @@ local.properties
 appsettings.Local.json
 *.fcm-service-account.json
 # Built SPA bundle copied into hub at build time
-src/Clawpilot.Hub/wwwroot/
+src/Magpilot.Hub/wwwroot/
 # Hub runtime data
-src/Clawpilot.Hub/data/
+src/Magpilot.Hub/data/
 hub-data/
 
 spikes/node_modules/

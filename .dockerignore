@@ -5,9 +5,9 @@
 **/obj/
 
 # Hub's wwwroot is build output (Web SPA gets published into it).
-# IMPORTANT: do NOT exclude **/wwwroot blanket-style — Clawpilot.Web/wwwroot
+# IMPORTANT: do NOT exclude **/wwwroot blanket-style — Magpilot.Web/wwwroot
 # is real source.
-src/Clawpilot.Hub/wwwroot/
+src/Magpilot.Hub/wwwroot/
 
 .git/
 .vs/

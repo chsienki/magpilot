@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Magpilot.Agent/Magpilot.Agent.csproj" />
+    <Project Path="src/Magpilot.Hub/Magpilot.Hub.csproj" />
+    <Project Path="src/Magpilot.Shared/Magpilot.Shared.csproj" />
+    <Project Path="src/Magpilot.UI/Magpilot.UI.csproj" />
+    <Project Path="src/Magpilot.Web/Magpilot.Web.csproj" />
+  </Folder>
+</Solution>

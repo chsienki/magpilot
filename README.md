@@ -1,14 +1,18 @@
-# clawpilot
+# MagPilot
+
+<p align="center">
+  <img src="assets/magpilot-logo.png" alt="MagPilot mascot: a magpie pilot perched on a vintage CRT terminal" width="300" />
+</p>
 
 > Bring the GitHub Copilot CLI experience to your phone.
 
-`clawpilot` is a small system that lets you drive `copilot` (the GitHub
+`magpilot` is a small system that lets you drive `copilot` (the GitHub
 Copilot CLI) from your phone, against any of your computers, over your
 home VPN.
 
 It is **not** another agent platform. It does not have plugins, cron
 jobs, web dashboards, or a smart-home integration. (For that, see
-[openclaw](https://github.com/openclaw/openclaw).) Clawpilot's only
+[openclaw](https://github.com/openclaw/openclaw).) MagPilot's only
 goal is "I want a chat client on my phone that talks to Copilot CLI
 running on one of my real computers."
 
@@ -50,7 +54,7 @@ exposes a tiny HTTP+SSE API to the LAN.
 A central **hub** daemon runs on the docker LXC. It auto-discovers
 agents via UDP broadcast, aggregates their sessions, proxies
 streams, and is the single endpoint clients talk to. This makes
-the WireGuard story simple: one address (`https://clawpilot.home.sienkiewi.cz`)
+the WireGuard story simple: one address (`https://magpilot.home.sienkiewi.cz`)
 forever, hub deals with finding and routing to the actual hosts.
 
 Two clients consume the hub's API and share **a single Blazor UI
@@ -58,7 +62,7 @@ codebase** (MAUI Blazor Hybrid):
 
 - A **.NET MAUI Android app** on the Pixel that hosts the Blazor UI
   in a WebView. Bearer-token auth, FCM push.
-- A **Blazor WebAssembly SPA** at `https://clawpilot.home.sienkiewi.cz`
+- A **Blazor WebAssembly SPA** at `https://magpilot.home.sienkiewi.cz`
   for any browser. GitHub OAuth login (allowlisted to a single user),
   Web Push notifications.
 
@@ -68,8 +72,8 @@ codebase** (MAUI Blazor Hybrid):
 |------------------|----------------------------------------------------------|----------------------------|
 | `copilot-agent`  | ACP-to-HTTP/SSE adapter, one per machine                 | HENDRIK, Mac, etc.         |
 | `copilot-hub`    | Aggregator, discovery, push, OAuth, serves the web SPA   | docker LXC (CT 102)        |
-| `Clawpilot.UI`   | Shared Blazor UI library (chat, sessions tree, modals)   | Phone WebView + browser    |
-| `Clawpilot.Web`  | Blazor WASM shell for browsers                           | Browser, served by hub     |
+| `Magpilot.UI`   | Shared Blazor UI library (chat, sessions tree, modals)   | Phone WebView + browser    |
+| `Magpilot.Web`  | Blazor WASM shell for browsers                           | Browser, served by hub     |
 | `CopilotChat.Maui` | MAUI Blazor Hybrid shell for the phone                 | Pixel (later: iOS, macOS)  |
 
 ## Status
@@ -86,17 +90,17 @@ delivery, TLS for hub<->agents, and the LXC compose deployment. See
 ## Repository layout
 
 ```
-clawpilot/
-   Clawpilot.sln
+magpilot/
+   Magpilot.sln
    docs/plan.md              <- design doc (start here)
    spikes/acp-smoke/         <- standalone ACP smoke test
    scripts/build-hub.ps1     <- builds web SPA + copies into hub wwwroot
    src/
-      Clawpilot.Shared/      <- DTOs, SSE event types
-      Clawpilot.Agent/       <- per-host daemon (ACP wrapper + HTTP/SSE API)
-      Clawpilot.Hub/         <- central daemon (proxy, OAuth, SPA host)
-      Clawpilot.UI/          <- shared Blazor components (chat, sessions)
-      Clawpilot.Web/         <- Blazor WASM shell
+      Magpilot.Shared/      <- DTOs, SSE event types
+      Magpilot.Agent/       <- per-host daemon (ACP wrapper + HTTP/SSE API)
+      Magpilot.Hub/         <- central daemon (proxy, OAuth, SPA host)
+      Magpilot.UI/          <- shared Blazor components (chat, sessions)
+      Magpilot.Web/         <- Blazor WASM shell
       CopilotChat.Maui/      <- MAUI Blazor Hybrid shell (TBD)
 ```
 
@@ -107,18 +111,18 @@ clawpilot/
 dotnet build
 
 # Run the agent (in one terminal)
-$env:CLAWPILOT_AGENT_TOKEN = "dev-token"
+$env:MAGPILOT_AGENT_TOKEN = "dev-token"
 $env:ASPNETCORE_URLS       = "http://localhost:5099"
-dotnet run --project src/Clawpilot.Agent
+dotnet run --project src/Magpilot.Agent
 
 # Build the SPA + copy it into the hub's wwwroot
 ./scripts/build-hub.ps1
 
 # Run the hub (in another terminal)
-$env:CLAWPILOT_HUB_BEARER  = "dev-bearer"
-$env:CLAWPILOT_AGENT_TOKEN = "dev-token"
+$env:MAGPILOT_HUB_BEARER  = "dev-bearer"
+$env:MAGPILOT_AGENT_TOKEN = "dev-token"
 $env:ASPNETCORE_URLS       = "http://localhost:7088"
-dotnet run --project src/Clawpilot.Hub
+dotnet run --project src/Magpilot.Hub
 
 # Open http://localhost:7088/  (web SPA, will require GitHub OAuth in prod)
 # Or curl with bearer:
@@ -128,6 +132,6 @@ dotnet run --project src/Clawpilot.Hub
 ## Related context
 
 - The home-network and openclaw task-context docs live in a separate
-  repo at `chsienki/copilot-context`. Clawpilot intentionally lives
+  repo at `chsienki/copilot-context`. Magpilot intentionally lives
   on its own so the codebase, issues, and history are all in one
   place once implementation starts.
