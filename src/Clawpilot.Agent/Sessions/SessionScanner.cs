@@ -56,14 +56,14 @@ public sealed class SessionScanner
         }
 
         var state = lockFile is null
-            ? SessionState.Past
-            : (owned.Contains(id) ? SessionState.LiveOwned : SessionState.LiveOrphan);
+            ? SessionState.Dormant
+            : (owned.Contains(id) ? SessionState.Owned : SessionState.Locked);
 
-        // Sanity: if PID is recorded but the process no longer exists, treat as Past.
-        if (state != SessionState.Past && ownerPid is int p)
+        // Sanity: if PID is recorded but the process no longer exists, treat as dormant.
+        if (state != SessionState.Dormant && ownerPid is int p)
         {
             try { _ = Process.GetProcessById(p); }
-            catch { state = SessionState.Past; }
+            catch { state = SessionState.Dormant; }
         }
 
         var (cwd, repository, branch, summary, createdAt, updatedAt) = ParseWorkspaceYaml(Path.Combine(dir, "workspace.yaml"));

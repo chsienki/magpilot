@@ -148,7 +148,7 @@
     private List<string> _cwdSuggestions = new();
 
     // Per-session in-memory snapshot of messages, keyed by "{Agent}/{SessionId}".
-    // We keep this so switching back to a LiveOwned session restores its
+    // We keep this so switching back to an Owned session restores its
     // chat history without re-issuing session/load (ACP rejects double-load
     // with -32602 "already loaded"). Snapshots are written when leaving a
     // session and refreshed on every Apply() while viewing it.
@@ -194,7 +194,7 @@
             _pendingOrphan = null;
 
             var info = _sessions?.FirstOrDefault(s => s.Id == SessionId);
-            if (info?.State == SessionState.LiveOrphan)
+            if (info?.State == SessionState.Locked)
             {
                 // Show confirmation; user must click "Adopt" to proceed.
                 _pendingOrphan = info;
@@ -204,13 +204,13 @@
             }
 
             // If we have a cached snapshot AND the session is still loaded
-            // into ACP (LiveOwned), restore the snapshot and connect WITHOUT
+            // into ACP (Owned), restore the snapshot and connect WITHOUT
             // requesting a load -- ACP would reject session/load on an
-            // already-loaded session. For Past sessions (or first visit
+            // already-loaded session. For Dormant sessions (or first visit
             // when no cache exists), request load=true so ACP replays history.
             var key = $"{Agent}/{SessionId}";
             var hasCache = _msgCache.TryGetValue(key, out var cached);
-            var canRehydrate = hasCache && info?.State == SessionState.LiveOwned;
+            var canRehydrate = hasCache && info?.State == SessionState.Owned;
             await StartStreamingAsync(load: !canRehydrate, force: false, restoreFrom: canRehydrate ? cached : null);
         }
     }

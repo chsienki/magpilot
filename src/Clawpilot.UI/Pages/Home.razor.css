@@ -10,8 +10,8 @@
 .dot.off { background: #aaa; }
 .sess-title { font-weight: 500; }
 .sess-meta { font-size: 0.75rem; color: #888; }
-.sess-liveorphan .sess-title::before { content: "warn "; }
-.sess-past .sess-title { color: #888; }
+.sess-locked .sess-title::before { content: "warn "; }
+.sess-dormant .sess-title { color: #888; }
 .new { margin: 0.5rem 0; padding: 0.5rem; width: 100%; border: 1px dashed #999; background: none; cursor: pointer; }
 .chat-pane { display: flex; flex-direction: column; height: 100vh; }
 .muted { color: #999; }

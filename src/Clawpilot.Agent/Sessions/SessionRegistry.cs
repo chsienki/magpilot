@@ -8,7 +8,7 @@ namespace Clawpilot.Agent.Sessions;
 /// <summary>
 /// Bridges on-disk Copilot CLI sessions with the live ACP process.
 /// Maintains the set of "owned" sessionIds (those currently loaded into
-/// our ACP child) and orchestrates orphan adoption.
+/// our ACP child) and orchestrates adoption of locked sessions.
 /// </summary>
 public sealed class SessionRegistry
 {
@@ -36,7 +36,7 @@ public sealed class SessionRegistry
         var sid = await _acp.NewSessionAsync(cwd, ct);
         _owned.TryAdd(sid, 0);
         return _scanner.Get(sid, Owned)
-            ?? new SessionInfo(sid, SessionState.LiveOwned, cwd, null, null, null, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+            ?? new SessionInfo(sid, SessionState.Owned, cwd, null, null, null, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
     }
 
     /// <summary>
@@ -48,10 +48,10 @@ public sealed class SessionRegistry
         var info = _scanner.Get(sessionId, Owned)
             ?? throw new FileNotFoundException($"Session {sessionId} not on disk");
 
-        if (info.State == SessionState.LiveOwned)
+        if (info.State == SessionState.Owned)
             return info;
 
-        if (info.State == SessionState.LiveOrphan)
+        if (info.State == SessionState.Locked)
         {
             if (!force) throw new InvalidOperationException("Session is held by another process; pass force=true to take over.");
             if (info.OwnerPid is int pid)
@@ -69,7 +69,7 @@ public sealed class SessionRegistry
             for (var i = 0; i < 20; i++)
             {
                 var refreshed = _scanner.Get(sessionId, Owned);
-                if (refreshed?.State == SessionState.Past) break;
+                if (refreshed?.State == SessionState.Dormant) break;
                 await Task.Delay(100, ct);
             }
         }
@@ -77,7 +77,7 @@ public sealed class SessionRegistry
         var cwd = info.Cwd ?? Environment.CurrentDirectory;
         await _acp.LoadSessionAsync(sessionId, cwd, ct);
         _owned.TryAdd(sessionId, 0);
-        return _scanner.Get(sessionId, Owned) ?? info with { State = SessionState.LiveOwned };
+        return _scanner.Get(sessionId, Owned) ?? info with { State = SessionState.Owned };
     }
 
     public async Task DetachAsync(string sessionId, CancellationToken ct)
