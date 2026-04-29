@@ -29,7 +29,7 @@ src/
   Clawpilot.Agent/    <- per-host daemon: ACP client + minimal HTTP/SSE API
     Acp/AcpSessionManager.cs       <- the heart; ACP <-> SSE translation
     Api/AgentEndpoints.cs          <- HTTP endpoints (sessions, /messages, SSE)
-    Sessions/SessionScanner.cs     <- discovers Past/LiveOwned/LiveOrphan sessions
+    Sessions/SessionScanner.cs     <- discovers Owned/Locked/Dormant sessions
   Clawpilot.Hub/      <- central daemon: agent registry, proxy, SPA host, auth
   Clawpilot.UI/       <- shared Blazor components
     Pages/Home.razor               <- main chat page (per-session message cache, SSE consumer)
@@ -131,11 +131,31 @@ them by breaking them.
 A copilot session on disk has an `inuse.<PID>.lock` file when held by
 a live process. We classify into:
 
-- **LiveOwned** — lock PID is one we (this agent) spawned. We own it.
-- **LiveOrphan** — lock PID is alive but is some other copilot
+- **Owned** — lock PID is one we (this agent) spawned. We own it.
+- **Locked** — lock PID is alive but is some other copilot
   process (e.g. a terminal session the user opened). To adopt, we
   must `Stop-Process -Id <PID>` it then `session/load` ourselves.
-- **Past** — no lock, or the lock PID is dead. Free to `session/load`.
+- **Dormant** — no lock, or the lock PID is dead. Free to `session/load`.
+
+(Wire format is the integer ordinal of `SessionState`. Order matters:
+Owned=0, Locked=1, Dormant=2.)
+
+> **⚠️ Known leak: copilot's lock file is advisory.** A live
+> `copilot.exe` (especially via `--resume`) can keep appending to a
+> session's `events.jsonl` *without* refreshing or owning an
+> `inuse.<PID>.lock`. The result: the scanner sees no live lock,
+> classifies the session as `Dormant`, and the agent will happily
+> `session/load` it into our ACP child — silently sharing the session
+> with a still-running CLI. Both processes then write the same
+> `events.jsonl` with no mutual exclusion. Observed on 2026-04-28
+> with this very session: original CLI (pid 165200) died, a `--resume`
+> CLI took over without re-locking, agent loaded the session into ACP
+> (pid 100916), and the web UI offered to drive a session that was
+> already live in a terminal. **If this becomes a recurring problem,
+> fix by treating a fresh `events.jsonl` mtime (e.g. modified within
+> the last 30s) as a liveness signal in addition to the lock file —
+> classify as `Locked` and refuse silent adoption.** For now, just
+> be aware.
 
 `UpdatedAt` is derived from the latest mtime between `events.jsonl`
 and `workspace.yaml`. **Do NOT** trust the `updated_at` field inside
@@ -147,14 +167,14 @@ and `workspace.yaml`. **Do NOT** trust the `updated_at` field inside
 The SPA keeps a per-session message cache (`_msgCache:
 Dictionary<sessionKey, List<ChatMessage>>`). On switch:
 
-- **LiveOwned + cache present**: restore from cache, call
+- **Owned + cache present**: restore from cache, call
   `AdoptAsync(load: false)`. **Never** call `session/load` here.
-- **Past or LiveOrphan**: call `AdoptAsync(load: true)` to replay
+- **Dormant or Locked**: call `AdoptAsync(load: true)` to replay
   history; that history is then authoritative.
 
 The SPA is the only producer of new visible messages while the user
-is connected, so the cache is safe as last-word for `LiveOwned`.
-When the agent restarts, *all* sessions become Past/LiveOrphan and
+is connected, so the cache is safe as last-word for `Owned`.
+When the agent restarts, *all* sessions become Dormant/Locked and
 get a fresh `session/load` on next visit.
 
 ### The "input never re-enables" pitfall
