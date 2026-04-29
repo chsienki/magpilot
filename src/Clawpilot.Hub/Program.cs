@@ -10,7 +10,11 @@ builder.Services.AddSingleton<AgentRegistry>();
 builder.Services.AddSingleton<AgentHttpClient>();
 builder.Services.AddSingleton<DiscoveryProber>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<DiscoveryProber>());
-builder.Services.AddHttpClient("agent");
+// Short timeout for control-plane calls so a single dead agent can't stall
+// SPA aggregation. SSE proxy uses a separate client with no timeout.
+var agentTimeoutSec = builder.Configuration.GetValue("Hub:AgentHttpTimeoutSec", 10);
+builder.Services.AddHttpClient("agent", c => c.Timeout = TimeSpan.FromSeconds(agentTimeoutSec));
+builder.Services.AddHttpClient("agent-stream", c => c.Timeout = Timeout.InfiniteTimeSpan);
 builder.Services.AddHttpClient("oauth");
 builder.Services.AddHubAuth(builder.Configuration);
 

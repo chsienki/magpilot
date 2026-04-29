@@ -14,6 +14,7 @@ public sealed class AgentRegistry
     private readonly Dictionary<string, AgentInfo> _agents = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _tokens = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _lock = new();
+    private readonly TimeSpan _staleAfter;
 
     public AgentRegistry(IConfiguration config, ILogger<AgentRegistry> logger)
     {
@@ -23,6 +24,9 @@ public sealed class AgentRegistry
             ?? Path.Combine(AppContext.BaseDirectory, "data");
         Directory.CreateDirectory(dataDir);
         _dbPath = Path.Combine(dataDir, "hub.db");
+        // Default: ~3x the discovery interval (60s) gives slack for one missed sweep.
+        var staleSec = config.GetValue("Hub:AgentStaleSec", 180);
+        _staleAfter = TimeSpan.FromSeconds(staleSec);
         InitDb();
         Load();
     }
@@ -76,7 +80,15 @@ public sealed class AgentRegistry
 
     public IReadOnlyList<AgentInfo> List()
     {
-        lock (_lock) return _agents.Values.ToList();
+        lock (_lock)
+        {
+            // Reflect freshness: an agent we haven't heard from in _staleAfter
+            // is presumed offline regardless of its last persisted Online flag.
+            var now = DateTimeOffset.UtcNow;
+            return _agents.Values
+                .Select(a => a with { Online = a.Online && a.LastSeen is { } ls && (now - ls) <= _staleAfter })
+                .ToList();
+        }
     }
 
     public AgentInfo? Get(string name)
@@ -87,6 +99,24 @@ public sealed class AgentRegistry
     public string? GetToken(string name)
     {
         lock (_lock) return _tokens.GetValueOrDefault(name);
+    }
+
+    public void MarkOnline(string name)
+    {
+        lock (_lock)
+        {
+            if (_agents.TryGetValue(name, out var a))
+                _agents[name] = a with { Online = true, LastSeen = DateTimeOffset.UtcNow };
+        }
+    }
+
+    public void MarkOffline(string name)
+    {
+        lock (_lock)
+        {
+            if (_agents.TryGetValue(name, out var a))
+                _agents[name] = a with { Online = false };
+        }
     }
 
     public void Upsert(string name, string url, string? token, bool online)

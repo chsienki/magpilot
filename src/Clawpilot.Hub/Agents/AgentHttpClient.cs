@@ -15,11 +15,11 @@ public sealed class AgentHttpClient
         _registry = registry;
     }
 
-    public HttpClient ClientFor(string agentName)
+    public HttpClient ClientFor(string agentName, bool streaming = false)
     {
         var info = _registry.Get(agentName)
             ?? throw new KeyNotFoundException($"Unknown agent {agentName}");
-        var client = _factory.CreateClient("agent");
+        var client = _factory.CreateClient(streaming ? "agent-stream" : "agent");
         client.BaseAddress = new Uri(info.Url.TrimEnd('/') + "/");
         var token = _registry.GetToken(agentName);
         if (token is not null)

@@ -30,7 +30,10 @@ internal sealed class IncludeCredentialsHandler(IJSRuntime js) : DelegatingHandl
             && u.AbsolutePath.StartsWith("/api", StringComparison.Ordinal)
             && Interlocked.Exchange(ref _redirected, 1) == 0)
         {
-            var ret = u.PathAndQuery;
+            // ReturnUrl must point at the SPA route the user is on, NOT the API
+            // path that 401'd — otherwise OAuth bounces them back to a JSON endpoint.
+            var ret = await js.InvokeAsync<string>("eval", "location.pathname + location.search");
+            if (string.IsNullOrEmpty(ret)) ret = "/";
             var nav = $"/login?ReturnUrl={Uri.EscapeDataString(ret)}";
             // Fire-and-forget; we still return the 401 to the caller.
             _ = js.InvokeVoidAsync("location.assign", nav).AsTask();

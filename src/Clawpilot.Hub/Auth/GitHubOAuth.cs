@@ -104,7 +104,12 @@ public static class GitHubOAuth
                 new ClaimsPrincipal(claims),
                 new AuthenticationProperties { IsPersistent = true, ExpiresUtc = DateTimeOffset.UtcNow.AddDays(1) });
             var ret = ctx.Request.Query["ReturnUrl"].ToString();
-            return Results.Redirect(string.IsNullOrEmpty(ret) ? "/" : ret);
+            // Refuse non-SPA targets (must be a relative path that isn't /api/...)
+            // so a stale link can't dump the user on a JSON endpoint.
+            if (string.IsNullOrEmpty(ret) || !ret.StartsWith('/') || ret.StartsWith("//", StringComparison.Ordinal)
+                || ret.StartsWith("/api", StringComparison.OrdinalIgnoreCase))
+                ret = "/";
+            return Results.Redirect(ret);
         });
     }
 
