@@ -29,10 +29,79 @@ public static class AgentEndpoints
             return info is null ? Results.NotFound() : Results.Ok(info);
         });
 
-        api.MapPost("/sessions", async (NewSessionRequest req, SessionRegistry reg, CancellationToken ct) =>
+        api.MapPost("/sessions", async (NewSessionRequest req, SessionRegistry reg, AcpSessionManager acp, CancellationToken ct) =>
         {
             var info = await reg.CreateAsync(req.Cwd, ct);
+
+            // If the caller provided an initial prompt, fire-and-forget it so the
+            // response returns immediately. The caller can subscribe to the SSE
+            // stream to watch it run, or hand the user off to the SPA.
+            if (!string.IsNullOrEmpty(req.InitialPrompt))
+            {
+                _ = Task.Run(() => acp.PromptAsync(info.Id, req.InitialPrompt, CancellationToken.None));
+            }
+
             return Results.Ok(info);
+        });
+
+        // Synchronous "ask and answer" convenience endpoint. Creates an ephemeral
+        // session, sends the prompt, accumulates assistant deltas until the turn
+        // completes, and returns the result as a single JSON response. External
+        // clients (Preflight, integration tests, scripts) can use this without
+        // having to consume the SSE wire format.
+        api.MapPost("/quick-prompt", async (
+            QuickPromptRequest req, SessionRegistry reg, AcpSessionManager acp,
+            ILoggerFactory loggerFactory, CancellationToken ct) =>
+        {
+            var log = loggerFactory.CreateLogger("QuickPrompt");
+            var timeoutSec = req.TimeoutSeconds ?? 60;
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
+
+            var info = await reg.CreateAsync(req.Cwd, cts.Token);
+            var sid = info.Id;
+            log.LogInformation("QuickPrompt: created ephemeral session {Sid}", sid);
+
+            // Subscribe BEFORE sending the prompt so we don't race the first delta.
+            var reader = acp.Subscribe(sid);
+            var responseText = new System.Text.StringBuilder();
+            var stopReason = "unknown";
+            string? errorMessage = null;
+            try
+            {
+                // Fire the prompt; PromptAsync resolves when the turn ends.
+                _ = Task.Run(() => acp.PromptAsync(sid, req.Prompt, cts.Token), cts.Token);
+
+                // Drain events until TurnComplete or ErrorEvent.
+                await foreach (var evt in reader.ReadAllAsync(cts.Token))
+                {
+                    if (evt is AssistantDelta ad) responseText.Append(ad.Text);
+                    else if (evt is TurnComplete tc) { stopReason = tc.StopReason; break; }
+                    else if (evt is ErrorEvent ee) { errorMessage = ee.Message; break; }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                errorMessage ??= $"timed out after {timeoutSec}s";
+            }
+            finally
+            {
+                acp.Unsubscribe(sid, reader);
+                if (!req.KeepSession)
+                {
+                    try { await reg.DetachAsync(sid, CancellationToken.None); }
+                    catch (Exception ex) { log.LogWarning(ex, "QuickPrompt: detach failed for {Sid}", sid); }
+                }
+            }
+
+            if (errorMessage is not null)
+            {
+                return Results.Json(
+                    new { error = errorMessage, sessionId = sid, partial_text = responseText.ToString() },
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
+
+            return Results.Ok(new QuickPromptResponse(responseText.ToString(), stopReason, sid));
         });
 
         api.MapPost("/sessions/{id}/adopt", async (string id, AdoptRequest req, SessionRegistry reg, CancellationToken ct) =>

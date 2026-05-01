@@ -96,6 +96,19 @@ public static class HubEndpoints
                     return await Forward(resp);
                 }));
 
+        // Synchronous "ask and answer" endpoint for external clients. The agent
+        // creates an ephemeral session, sends the prompt, accumulates assistant
+        // deltas until TurnComplete, and returns the result as a single JSON
+        // response. Uses the streaming HttpClient because a turn can take 60s+.
+        api.MapPost("/agents/{name}/quick-prompt",
+            (string name, QuickPromptRequest req, AgentHttpClient http, AgentRegistry reg, CancellationToken ct) =>
+                Proxy(name, reg, async () =>
+                {
+                    var client = http.ClientFor(name, streaming: true);
+                    var resp = await client.PostAsJsonAsync("api/quick-prompt", req, ct);
+                    return await Forward(resp);
+                }));
+
         // ---- SSE proxy ---------------------------------------------------------
         api.MapGet("/agents/{name}/sessions/{id}/stream",
             async (string name, string id, AgentHttpClient http, AgentRegistry reg, HttpContext ctx, CancellationToken ct) =>
