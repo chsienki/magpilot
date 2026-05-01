@@ -47,8 +47,7 @@ public static class AgentEndpoints
         // Synchronous "ask and answer" convenience endpoint. Creates an ephemeral
         // session, sends the prompt, accumulates assistant deltas until the turn
         // completes, and returns the result as a single JSON response. External
-        // clients (Preflight, integration tests, scripts) can use this without
-        // having to consume the SSE wire format.
+        // clients can use this without having to consume the SSE wire format.
         api.MapPost("/quick-prompt", async (
             QuickPromptRequest req, SessionRegistry reg, AcpSessionManager acp,
             ILoggerFactory loggerFactory, CancellationToken ct) =>
