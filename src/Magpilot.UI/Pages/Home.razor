@@ -39,21 +39,41 @@
         else
         {
             <button class="new" @onclick="OpenNewSessionDialog">+ New chat</button>
-            <ul class="sessions">
-                @foreach (var s in _sessions)
+            @foreach (var (state, label, group) in EnumerateGroups(_sessions))
+            {
+                var expanded = _expandedGroups.Contains(state);
+                var visible = expanded ? group : group.Take(CollapsedLimit).ToList();
+                var hidden = group.Count - visible.Count;
+
+                <h4 class="sess-group-header">@label <span class="sess-group-count">@group.Count</span></h4>
+                <ul class="sessions">
+                    @foreach (var s in visible)
+                    {
+                        <li class="sess sess-@s.State.ToString().ToLowerInvariant() @(s.Id == SessionId ? "active" : "")">
+                            <button class="link" @onclick="() => OpenSession(s)">
+                                <div class="sess-title">@(s.Summary ?? s.Id[..8])</div>
+                                <div class="sess-meta">@s.State @(s.Repository ?? "") @(s.Branch ?? "")</div>
+                                @if (!string.IsNullOrWhiteSpace(s.Cwd))
+                                {
+                                    <div class="sess-cwd" title="@s.Cwd">@s.Cwd</div>
+                                }
+                            </button>
+                        </li>
+                    }
+                </ul>
+                @if (hidden > 0)
                 {
-                    <li class="sess sess-@s.State.ToString().ToLowerInvariant() @(s.Id == SessionId ? "active" : "")">
-                        <button class="link" @onclick="() => OpenSession(s)">
-                            <div class="sess-title">@(s.Summary ?? s.Id[..8])</div>
-                            <div class="sess-meta">@s.State @(s.Repository ?? "") @(s.Branch ?? "")</div>
-                            @if (!string.IsNullOrWhiteSpace(s.Cwd))
-                            {
-                                <div class="sess-cwd" title="@s.Cwd">@s.Cwd</div>
-                            }
-                        </button>
-                    </li>
+                    <button class="load-more" @onclick="() => ToggleGroup(state)">
+                        Load @hidden more
+                    </button>
                 }
-            </ul>
+                else if (expanded && group.Count > CollapsedLimit)
+                {
+                    <button class="load-more" @onclick="() => ToggleGroup(state)">
+                        Show less
+                    </button>
+                }
+            }
         }
     </aside>
     <main class="chat-pane">
@@ -140,6 +160,7 @@
 
     private List<AgentInfo>? _agents;
     private List<SessionInfo>? _sessions;
+    private readonly HashSet<SessionState> _expandedGroups = new();
     private readonly ObservableCollection<ChatMessage> _messages = new();
     private ChatMessage? _streamingAssistant;
     private ChatMessage? _streamingThought;
@@ -243,6 +264,44 @@
     private void SelectAgent(string name)
     {
         Nav.NavigateTo($"/agents/{name}");
+    }
+
+    private void ToggleGroup(SessionState state)
+    {
+        if (!_expandedGroups.Add(state))
+        {
+            _expandedGroups.Remove(state);
+        }
+    }
+
+    /// <summary>
+    /// Cap on items shown per group before "Load more" is required.
+    /// </summary>
+    private const int CollapsedLimit = 5;
+
+    /// <summary>
+    /// Group the server-sorted (UpdatedAt DESC) session list by SessionState
+    /// and return them in display order. Most-actionable group first:
+    /// Active (we own it) -> Locked (held by someone else) -> Past.
+    /// Empty groups are skipped.
+    /// </summary>
+    private static IEnumerable<(SessionState State, string Label, List<SessionInfo> Group)>
+        EnumerateGroups(IEnumerable<SessionInfo> sessions)
+    {
+        var byState = sessions.GroupBy(s => s.State).ToDictionary(g => g.Key, g => g.ToList());
+        var ordered = new (SessionState State, string Label)[]
+        {
+            (SessionState.Owned,   "Active"),
+            (SessionState.Locked,  "Locked"),
+            (SessionState.Dormant, "Past"),
+        };
+        foreach (var (state, label) in ordered)
+        {
+            if (byState.TryGetValue(state, out var group) && group.Count > 0)
+            {
+                yield return (state, label, group);
+            }
+        }
     }
 
     private void GoBackToSidebar()
