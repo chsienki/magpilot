@@ -7,7 +7,7 @@
 @implements IAsyncDisposable
 @using System.Collections.ObjectModel
 
-<div class="app-layout">
+<div class="app-layout @(SessionId is not null ? "session-active" : "")">
     <aside class="sidebar">
         <h3>Hosts</h3>
         @if (_agents is null)
@@ -57,6 +57,15 @@
         }
     </aside>
     <main class="chat-pane">
+        @if (Agent is not null && SessionId is not null)
+        {
+            <div class="mobile-back-bar">
+                <button class="mobile-back" @onclick="GoBackToSidebar" title="Back to sessions">
+                    <span aria-hidden="true">&larr;</span>
+                    <span class="mobile-back-label">@(_currentSessionTitle ?? "Sessions")</span>
+                </button>
+            </div>
+        }
         @if (Agent is not null && SessionId is not null && _pendingOrphan is null && !_newSessionOpen)
         {
             <div class="chat-toolbar">
@@ -235,6 +244,25 @@
     {
         Nav.NavigateTo($"/agents/{name}");
     }
+
+    private void GoBackToSidebar()
+    {
+        // Mobile: navigate "up" from a session to the agent's session list,
+        // which on narrow viewports renders as the full-width sidebar page.
+        if (Agent is not null)
+        {
+            Nav.NavigateTo($"/agents/{Agent}");
+        }
+        else
+        {
+            Nav.NavigateTo("/");
+        }
+    }
+
+    private string? _currentSessionTitle =>
+        _sessions?.FirstOrDefault(s => s.Id == SessionId) is { } s
+            ? (s.Summary ?? s.Id[..8])
+            : null;
 
     private void OpenSession(SessionInfo s)
     {

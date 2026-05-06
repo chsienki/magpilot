@@ -13,6 +13,49 @@
 .sess-locked .sess-title::before { content: "warn "; }
 .sess-dormant .sess-title { color: #888; }
 .new { margin: 0.5rem 0; padding: 0.5rem; width: 100%; border: 1px dashed #999; background: none; cursor: pointer; }
-.chat-pane { display: flex; flex-direction: column; height: 100vh; }
+.chat-pane { display: flex; flex-direction: column; height: 100vh; min-width: 0; }
 .muted { color: #999; }
 .welcome { padding: 2rem; text-align: center; color: #666; }
+
+/* Mobile back-bar -- hidden on wide viewports; shown by the @@media block below
+   when the user is inside a session (the chat pane is the "page"). */
+.mobile-back-bar { display: none; }
+.mobile-back {
+    background: none;
+    border: none;
+    border-bottom: 1px solid #ddd;
+    padding: 0.6rem 0.75rem;
+    width: 100%;
+    text-align: left;
+    font-size: 0.95rem;
+    cursor: pointer;
+    color: #2563eb;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+.mobile-back:hover { background: #f3f4f6; }
+.mobile-back-label {
+    color: #111;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Phone / narrow viewport: become a single column and treat sidebar +
+   chat pane as two separate "pages". The .session-active class on
+   .app-layout (set when the URL includes a sessionId) decides which
+   pane is visible. */
+@media (max-width: 720px) {
+    .app-layout { grid-template-columns: 1fr; }
+    .sidebar {
+        border-right: none;
+        height: 100vh;
+    }
+    .chat-pane { display: none; }
+
+    .app-layout.session-active .sidebar { display: none; }
+    .app-layout.session-active .chat-pane { display: flex; }
+    .app-layout.session-active .mobile-back-bar { display: block; }
+}
