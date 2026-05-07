@@ -250,3 +250,9 @@ If you implement any of these, update `docs/plan.md` and this file.
    agent — only the user's local machine).
 3. Don't commit without explicit user permission. The user prefers
    to review changes before they hit `main`.
+
+## Ideas backlog
+
+<!-- Mirrored from copilot-context/ideas/inbox.md. Newest at the bottom. -->
+
+- 2026-05-07: magnus (part of magpilot) should support voice to text
