@@ -5,3 +5,13 @@
 ::deep .chat-toolbar-mud {
     border-bottom: 1px solid var(--mud-palette-divider);
 }
+
+/* App bar brand mark: the magpie SVG has no background, so on the
+   primary-coloured app bar he can disappear into the navy. A soft warm
+   halo (matching the page background cream) lifts him off the bar. */
+::deep .magpilot-brand-mark {
+    filter:
+        drop-shadow(0 0 2px rgba(246, 242, 230, 0.85))
+        drop-shadow(0 0 4px rgba(246, 242, 230, 0.55))
+        drop-shadow(0 0 8px rgba(246, 242, 230, 0.35));
+}

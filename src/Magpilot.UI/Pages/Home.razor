@@ -15,7 +15,10 @@
                        OnClick="@ToggleDrawer"
                        Class="d-md-none"
                        aria-label="Toggle navigation" />
-        <MudText Typo="Typo.h6" Class="ml-2 mr-4">Magpilot</MudText>
+        <img src="favicon-mark.svg" alt="" width="32" height="32"
+             class="ml-1 mr-2"
+             style="display:block; filter: drop-shadow(0 0 3px #FFFFFF) drop-shadow(0 0 6px #FFFFFFAA) drop-shadow(0 0 12px #F6F2E680);" />
+        <MudText Typo="Typo.h6" Class="mr-4">Magpilot</MudText>
         @if (Agent is not null)
         {
             <MudChip T="string" Size="Size.Small" Color="Color.Secondary" Variant="Variant.Filled"
@@ -315,6 +318,8 @@
 </MudLayout>
 
 @code {
+    [Inject] private ISnackbar Snackbar { get; set; } = default!;
+
     [Parameter] public string? Agent { get; set; }
     [Parameter] public string? SessionId { get; set; }
 
@@ -359,7 +364,12 @@
     protected override async Task OnInitializedAsync()
     {
         try { _agents = await Hub.ListAgentsAsync(); }
-        catch (Exception ex) { _agents = []; Console.Error.WriteLine($"ListAgentsAsync failed: {ex.Message}"); }
+        catch (Exception ex)
+        {
+            _agents = [];
+            Console.Error.WriteLine($"ListAgentsAsync failed: {ex.Message}");
+            Snackbar.Add($"Could not load hosts: {ex.Message}", Severity.Error);
+        }
 
         try
         {
@@ -438,7 +448,12 @@
         if (Agent is not null)
         {
             try { _sessions = await Hub.ListSessionsAsync(Agent); }
-            catch (Exception ex) { Console.Error.WriteLine(ex.Message); _sessions = []; }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(ex.Message);
+                _sessions = [];
+                Snackbar.Add($"Could not load sessions on {Agent}: {ex.Message}", Severity.Error);
+            }
         }
 
         if (Agent is not null && SessionId is not null && _streamingFor != $"{Agent}/{SessionId}")
@@ -775,7 +790,12 @@
         _busy = true;
         _thinking = true;
         try { await Hub.SendPromptAsync(Agent, SessionId, text); }
-        catch (Exception ex) { _messages.Add(new ChatMessage { Role = "tool", Text = $"send failed: {ex.Message}" }); _busy = false; _thinking = false; }
+        catch (Exception ex)
+        {
+            _messages.Add(new ChatMessage { Role = "tool", Text = $"send failed: {ex.Message}" });
+            _busy = false; _thinking = false;
+            Snackbar.Add($"Send failed: {ex.Message}", Severity.Error);
+        }
         StateHasChanged();
     }
 

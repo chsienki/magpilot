@@ -35,6 +35,15 @@
     </div>
     <script src="_framework/blazor.webassembly.js"></script>
     <script src="_content/MudBlazor/MudBlazor.min.js"></script>
+    <script>
+        window.magpilot = window.magpilot || {};
+        window.magpilot.scrollToBottom = function (el) {
+            if (!el) return;
+            // requestAnimationFrame so the DOM has a chance to lay out the
+            // newly-added message before we measure scrollHeight.
+            requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
+        };
+    </script>
 </body>
 
 </html>

@@ -5,7 +5,7 @@
 @implements IAsyncDisposable
 
 <div class="chat-view-mud">
-    <div class="messages-mud">
+    <div class="messages-mud" @ref="_messagesEl">
         @foreach (var m in Messages)
         {
             var isThought = m.Role.Equals("thought", StringComparison.OrdinalIgnoreCase);
@@ -132,7 +132,9 @@
 
     private string _draft = "";
     private ElementReference _textarea;
+    private ElementReference _messagesEl;
     private IJSObjectReference? _composerModule;
+    private int _lastMessageCount;
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -141,6 +143,18 @@
             _composerModule = await JS.InvokeAsync<IJSObjectReference>(
                 "import", "./js/composer.js");
             await _composerModule.InvokeVoidAsync("preventBareEnterNewline", _textarea);
+            Messages.CollectionChanged += (_, _) => InvokeAsync(StateHasChanged);
+        }
+
+        // Auto-scroll on every render where the message count grew. Cheap;
+        // covers both adds and incremental streaming because Apply() in
+        // Home.razor calls StateHasChanged on each delta.
+        var current = Messages.Count;
+        if (current != _lastMessageCount)
+        {
+            _lastMessageCount = current;
+            try { await JS.InvokeVoidAsync("magpilot.scrollToBottom", _messagesEl); }
+            catch { /* JS not ready yet on first paint */ }
         }
     }
 
