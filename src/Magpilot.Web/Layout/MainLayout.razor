@@ -1,4 +1,41 @@
 @inherits LayoutComponentBase
-<main class="full">
-    @Body
-</main>
+
+<MudThemeProvider Theme="MagpilotTheme.Default" @bind-IsDarkMode="_isDarkMode" />
+<MudPopoverProvider />
+<MudDialogProvider />
+<MudSnackbarProvider />
+
+<CascadingValue Value="@(new ThemeState(_isDarkMode, EventCallback.Factory.Create<bool>(this, SetDarkMode)))">
+    <main class="full">
+        @Body
+    </main>
+</CascadingValue>
+
+@code {
+    [Inject] private IJSRuntime JS { get; set; } = default!;
+
+    private bool _isDarkMode = false;
+    private const string DarkModeKey = "magpilot.darkMode";
+
+    private async Task SetDarkMode(bool value)
+    {
+        _isDarkMode = value;
+        try { await JS.InvokeVoidAsync("localStorage.setItem", DarkModeKey, value ? "true" : "false"); } catch { }
+        StateHasChanged();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        try
+        {
+            var stored = await JS.InvokeAsync<string?>("localStorage.getItem", DarkModeKey);
+            if (stored == "true" && !_isDarkMode)
+            {
+                _isDarkMode = true;
+                StateHasChanged();
+            }
+        }
+        catch { }
+    }
+}

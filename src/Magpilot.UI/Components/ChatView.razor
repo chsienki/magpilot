@@ -3,66 +3,122 @@
 @using Microsoft.JSInterop
 @inject IJSRuntime JS
 @implements IAsyncDisposable
-<div class="chat-view">
-    <div class="messages">
+
+<div class="chat-view-mud">
+    <div class="messages-mud">
         @foreach (var m in Messages)
         {
             var isThought = m.Role.Equals("thought", StringComparison.OrdinalIgnoreCase);
             if (isThought && !ShowThoughts) { continue; }
-            <div class="msg msg-@m.Role.ToLowerInvariant()">
-                <div class="role">@(isThought ? "thinking" : m.Role)</div>
-                @if (isThought)
-                {
-                    <details class="thought" open>
-                        <summary>thought</summary>
-                        <MarkdownView Text="@m.Text" />
-                    </details>
-                }
-                else if (m.Role.Equals("assistant", StringComparison.OrdinalIgnoreCase))
-                {
-                    <MarkdownView Text="@m.Text" />
-                }
-                else
-                {
-                    <pre class="text">@m.Text</pre>
-                }
-            </div>
+            var roleLower = m.Role.ToLowerInvariant();
+
+            @switch (roleLower)
+            {
+                case "user":
+                    <div class="msg-row msg-row-user">
+                        <MudPaper Elevation="0" Class="msg-bubble msg-bubble-user pa-3"
+                                  Style="background-color: var(--mud-palette-primary); color: var(--mud-palette-primary-text);">
+                            <pre class="msg-text">@m.Text</pre>
+                        </MudPaper>
+                        <MudAvatar Size="Size.Small" Color="Color.Primary" Class="msg-avatar">
+                            <MudIcon Icon="@Icons.Material.Filled.Person" Size="Size.Small" />
+                        </MudAvatar>
+                    </div>
+                    break;
+                case "assistant":
+                    <div class="msg-row msg-row-assistant">
+                        <MudAvatar Size="Size.Small" Color="Color.Secondary" Class="msg-avatar">
+                            <MudIcon Icon="@Icons.Material.Filled.SmartToy" Size="Size.Small" />
+                        </MudAvatar>
+                        <MudPaper Elevation="0" Outlined="true" Class="msg-bubble msg-bubble-assistant pa-3">
+                            <MarkdownView Text="@m.Text" />
+                        </MudPaper>
+                    </div>
+                    break;
+                case "thought":
+                    <div class="msg-row msg-row-assistant">
+                        <MudAvatar Size="Size.Small" Color="Color.Tertiary" Variant="Variant.Outlined" Class="msg-avatar">
+                            <MudIcon Icon="@Icons.Material.Filled.Lightbulb" Size="Size.Small" />
+                        </MudAvatar>
+                        <MudPaper Elevation="0" Outlined="true" Class="msg-bubble msg-bubble-thought pa-2">
+                            <MudText Typo="Typo.caption" Color="Color.Default" Class="thought-label">thinking</MudText>
+                            <div class="thought-body">
+                                <MarkdownView Text="@m.Text" />
+                            </div>
+                        </MudPaper>
+                    </div>
+                    break;
+                case "tool":
+                    <div class="msg-row msg-row-assistant">
+                        <MudAvatar Size="Size.Small" Variant="Variant.Outlined" Color="Color.Default" Class="msg-avatar">
+                            <MudIcon Icon="@Icons.Material.Filled.Terminal" Size="Size.Small" />
+                        </MudAvatar>
+                        <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
+                                 Color="@(m.Text.StartsWith("[end] fail") ? Color.Error : (m.Text.StartsWith("[end]") ? Color.Success : Color.Default))"
+                                 Icon="@(m.Text.StartsWith("[end] fail") ? Icons.Material.Filled.ErrorOutline : (m.Text.StartsWith("[end]") ? Icons.Material.Filled.CheckCircleOutline : Icons.Material.Filled.PlayArrow))"
+                                 Class="msg-tool-chip">@m.Text</MudChip>
+                    </div>
+                    break;
+                default:
+                    <div class="msg-row msg-row-assistant">
+                        <MudPaper Elevation="0" Outlined="true" Class="msg-bubble msg-bubble-assistant pa-3">
+                            <pre class="msg-text">@m.Text</pre>
+                        </MudPaper>
+                    </div>
+                    break;
+            }
         }
         @if (Thinking)
         {
-            <div class="msg msg-assistant thinking-row">
-                <div class="role">assistant</div>
-                <div class="thinking" aria-label="thinking"><span></span><span></span><span></span></div>
+            <div class="msg-row msg-row-assistant">
+                <MudAvatar Size="Size.Small" Color="Color.Secondary" Class="msg-avatar">
+                    <MudIcon Icon="@Icons.Material.Filled.SmartToy" Size="Size.Small" />
+                </MudAvatar>
+                <MudPaper Elevation="0" Outlined="true" Class="msg-bubble msg-bubble-assistant pa-3 d-flex align-center">
+                    <span class="thinking-dots" aria-label="thinking"><span></span><span></span><span></span></span>
+                </MudPaper>
             </div>
         }
         @if (PendingApproval is not null)
         {
-            <div class="approval">
-                <strong>Permission required:</strong> @PendingApproval.Title
-                <div class="options">
+            <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Class="my-2">
+                <MudText Typo="Typo.subtitle2" Class="mb-1">Permission required</MudText>
+                <MudText Typo="Typo.body2" Class="mb-3">@PendingApproval.Title</MudText>
+                @if (!string.IsNullOrWhiteSpace(PendingApproval.Detail))
+                {
+                    <MudPaper Elevation="0" Outlined="true" Class="pa-2 mb-3">
+                        <pre class="msg-text" style="font-size: 0.85em;">@PendingApproval.Detail</pre>
+                    </MudPaper>
+                }
+                <MudStack Row="true" Spacing="2" Wrap="Wrap.Wrap">
                     @foreach (var o in PendingApproval.Options)
                     {
-                        <button @onclick="() => OnApproval.InvokeAsync((PendingApproval.ApprovalId, o.OptionId))">
+                        <MudButton Variant="Variant.Outlined" Color="Color.Warning"
+                                   OnClick="@(() => OnApproval.InvokeAsync((PendingApproval.ApprovalId, o.OptionId)))">
                             @o.Label
-                        </button>
+                        </MudButton>
                     }
-                </div>
-            </div>
+                </MudStack>
+            </MudAlert>
         }
     </div>
-    <div class="composer">
-        @* Enter sends, Shift+Enter inserts a newline. The actual
-           preventDefault for bare-Enter happens in JS (composer.js) hooked
-           up after first render. The Blazor @onkeydown handler then runs
-           Send(). *@
-        <textarea @ref="_textarea" @bind="_draft" @bind:event="oninput"
-                  @onkeydown="OnKeyDown"
-                  placeholder="Message... (Enter to send, Shift+Enter for newline)"
-                  rows="3" disabled="@Disabled"></textarea>
-        <button class="send" @onclick="Send" disabled="@(Disabled || string.IsNullOrWhiteSpace(_draft))">
-            Send
-        </button>
-    </div>
+
+    <MudPaper Elevation="0" Square="true" Class="composer-mud pa-2">
+        <MudStack Row="true" Spacing="1" AlignItems="AlignItems.End">
+            <textarea @ref="_textarea" @bind="_draft" @bind:event="oninput"
+                      @onkeydown="OnKeyDown"
+                      class="composer-textarea"
+                      placeholder="Message... (Enter to send, Shift+Enter for newline)"
+                      rows="2" disabled="@Disabled"></textarea>
+            <MudIconButton Icon="@Icons.Material.Filled.Send"
+                           Color="Color.Primary"
+                           Variant="Variant.Filled"
+                           Size="Size.Medium"
+                           Disabled="@(Disabled || string.IsNullOrWhiteSpace(_draft))"
+                           OnClick="@Send"
+                           aria-label="Send message" />
+        </MudStack>
+    </MudPaper>
 </div>
 
 @code {
@@ -98,9 +154,6 @@
 
     private async Task OnKeyDown(KeyboardEventArgs e)
     {
-        // Enter sends; Shift+Enter inserts a newline. ChatView.razor.js has
-        // already preventDefault'd the bare-Enter newline insertion before
-        // we reach here.
         if (e.Key == "Enter" && !e.ShiftKey && !e.CtrlKey && !e.AltKey && !e.MetaKey)
         {
             await Send();

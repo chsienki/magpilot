@@ -7,142 +7,292 @@
 @implements IAsyncDisposable
 @using System.Collections.ObjectModel
 
-<div class="app-layout @(SessionId is not null ? "session-active" : "")">
-    <aside class="sidebar">
-        <h3>Hosts</h3>
+<MudLayout>
+    <MudAppBar Elevation="1" Dense="true">
+        <MudIconButton Icon="@Icons.Material.Filled.Menu"
+                       Color="Color.Inherit"
+                       Edge="Edge.Start"
+                       OnClick="@ToggleDrawer"
+                       Class="d-md-none"
+                       aria-label="Toggle navigation" />
+        <MudText Typo="Typo.h6" Class="ml-2 mr-4">Magpilot</MudText>
+        @if (Agent is not null)
+        {
+            <MudChip T="string" Size="Size.Small" Color="Color.Secondary" Variant="Variant.Filled"
+                     Icon="@Icons.Material.Filled.Computer">@Agent</MudChip>
+            @if (_currentSessionTitle is not null)
+            {
+                <MudIcon Icon="@Icons.Material.Filled.ChevronRight" Size="Size.Small" Class="mx-1" />
+                <MudText Typo="Typo.body2" Class="text-truncate" Style="max-width: 40vw;">@_currentSessionTitle</MudText>
+            }
+        }
+        <MudSpacer />
+        <MudTooltip Text="@((Theme?.IsDark ?? false) ? "Switch to light mode" : "Switch to dark mode")">
+            <MudIconButton Icon="@((Theme?.IsDark ?? false) ? Icons.Material.Filled.LightMode : Icons.Material.Filled.DarkMode)"
+                           Color="Color.Inherit"
+                           OnClick="@OnToggleDarkMode" />
+        </MudTooltip>
+        @if (_agents is { Count: > 0 })
+        {
+            <MudTooltip Text="@($"{_agents.Count} host{(_agents.Count == 1 ? string.Empty : "s")} online")">
+                <MudIcon Icon="@Icons.Material.Filled.Cloud" Size="Size.Small" Class="ml-2" />
+            </MudTooltip>
+        }
+    </MudAppBar>
+
+    <MudDrawer @bind-Open="_drawerOpen"
+               ClipMode="DrawerClipMode.Always"
+               Variant="DrawerVariant.Responsive"
+               Breakpoint="Breakpoint.Md"
+               Elevation="1"
+               Color="Color.Surface">
+        <MudDrawerHeader>
+            <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
+                <MudAvatar Color="Color.Primary" Size="Size.Small">
+                    <MudIcon Icon="@Icons.Material.Filled.Hub" Size="Size.Small" />
+                </MudAvatar>
+                <MudText Typo="Typo.subtitle1">Hosts</MudText>
+            </MudStack>
+        </MudDrawerHeader>
+
         @if (_agents is null)
         {
-            <p>Loading...</p>
+            <MudList T="string" Dense="true">
+                @for (var i = 0; i < 3; i++)
+                {
+                    <MudListItem T="string" Disabled="true">
+                        <MudSkeleton Width="80%" Height="20px" />
+                    </MudListItem>
+                }
+            </MudList>
+        }
+        else if (_agents.Count == 0)
+        {
+            <MudAlert Severity="Severity.Info" Dense="true" Class="mx-3 my-2">
+                No hosts discovered yet.
+            </MudAlert>
         }
         else
         {
-            <ul class="hosts">
+            <MudList T="string" Dense="true" SelectedValue="@Agent" SelectedValueChanged="@OnAgentSelected">
                 @foreach (var a in _agents)
                 {
-                    <li class="host @(a.Name == Agent ? "active" : "")">
-                        <button class="link" @onclick="() => SelectAgent(a.Name)">
-                            <span class="dot @(a.Online ? "on" : "off")"></span>@a.Name
-                        </button>
-                    </li>
+                    <MudListItem T="string" Value="@a.Name">
+                        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
+                            <MudIcon Icon="@(a.Online ? Icons.Material.Filled.RadioButtonChecked : Icons.Material.Filled.RadioButtonUnchecked)"
+                                     Color="@(a.Online ? Color.Success : Color.Default)"
+                                     Size="Size.Small" />
+                            <MudText Typo="Typo.body1">@a.Name</MudText>
+                            @if (a.Flavors is { Count: > 0 } flavors && flavors.Any(f => f != "default"))
+                            {
+                                <MudSpacer />
+                                @foreach (var f in flavors.Where(f => f != "default"))
+                                {
+                                    <MudChip T="string" Size="Size.Small" Color="Color.Tertiary" Variant="Variant.Outlined">@f</MudChip>
+                                }
+                            }
+                        </MudStack>
+                    </MudListItem>
                 }
-            </ul>
+            </MudList>
         }
-        <h3>Sessions</h3>
+
+        <MudDivider Class="my-2" />
+
         @if (Agent is null)
         {
-            <p class="muted">Pick a host</p>
+            <MudText Typo="Typo.caption" Class="px-4 py-2" Color="Color.Default">Pick a host to see its sessions.</MudText>
         }
         else if (_sessions is null)
         {
-            <p>Loading...</p>
+            <MudList T="string" Dense="true">
+                @for (var i = 0; i < 4; i++)
+                {
+                    <MudListItem T="string" Disabled="true">
+                        <MudSkeleton Width="90%" Height="20px" />
+                        <MudSkeleton Width="50%" Height="14px" />
+                    </MudListItem>
+                }
+            </MudList>
         }
         else
         {
-            <button class="new" @onclick="OpenNewSessionDialog">+ New chat</button>
+            <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="0" Class="px-4 py-1">
+                <MudText Typo="Typo.subtitle2">Sessions</MudText>
+                <MudSpacer />
+                <MudTooltip Text="New chat">
+                    <MudIconButton Icon="@Icons.Material.Filled.Add"
+                                   Size="Size.Small"
+                                   Color="Color.Primary"
+                                   OnClick="@OpenNewSessionDialog" />
+                </MudTooltip>
+            </MudStack>
+
+            @if (_sessions.Count == 0)
+            {
+                <MudPaper Class="mx-3 my-2 pa-3 d-flex flex-column align-center" Elevation="0">
+                    <MudIcon Icon="@Icons.Material.Filled.ChatBubbleOutline" Size="Size.Large" Color="Color.Default" />
+                    <MudText Typo="Typo.body2" Class="my-2" Color="Color.Default">No sessions on @Agent yet</MudText>
+                    <MudButton Variant="Variant.Filled" Color="Color.Primary"
+                               StartIcon="@Icons.Material.Filled.Add" OnClick="@OpenNewSessionDialog">
+                        Start one
+                    </MudButton>
+                </MudPaper>
+            }
+
             @foreach (var (state, label, group) in EnumerateGroups(_sessions))
             {
                 var expanded = _expandedGroups.Contains(state);
                 var visible = expanded ? group : group.Take(CollapsedLimit).ToList();
                 var hidden = group.Count - visible.Count;
+                var (chipColor, chipIcon) = GroupVisuals(state);
 
-                <h4 class="sess-group-header">@label <span class="sess-group-count">@group.Count</span></h4>
-                <ul class="sessions">
+                <MudListSubheader Class="d-flex align-center gap-1 px-4">
+                    <MudIcon Icon="@chipIcon" Size="Size.Small" Color="@chipColor" />
+                    <MudText Typo="Typo.overline" Class="ml-1">@label</MudText>
+                    <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="Color.Default" Class="ml-1">@group.Count</MudChip>
+                </MudListSubheader>
+
+                <MudList T="string" Dense="true" SelectedValue="@SessionId" SelectedValueChanged="@OnSessionSelected">
                     @foreach (var s in visible)
                     {
-                        <li class="sess sess-@s.State.ToString().ToLowerInvariant() @(s.Id == SessionId ? "active" : "")">
-                            <button class="link" @onclick="() => OpenSession(s)">
-                                <div class="sess-title">@(s.Summary ?? s.Id[..8])</div>
-                                <div class="sess-meta">@s.State @(s.Repository ?? "") @(s.Branch ?? "")</div>
-                                @if (!string.IsNullOrWhiteSpace(s.Cwd))
-                                {
-                                    <div class="sess-cwd" title="@s.Cwd">@s.Cwd</div>
-                                }
-                            </button>
-                        </li>
+                        <MudListItem T="string" Value="@s.Id" Class="py-2">
+                            <MudStack Spacing="0">
+                                <MudText Typo="Typo.body2" Class="text-truncate" Style="font-weight: 500;">
+                                    @(s.Summary ?? s.Id[..8])
+                                </MudText>
+                                <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center" Class="mt-1">
+                                    @if (!string.IsNullOrWhiteSpace(s.Repository))
+                                    {
+                                        <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Default" Icon="@Icons.Material.Filled.FolderOpen">
+                                            @s.Repository@(string.IsNullOrWhiteSpace(s.Branch) ? string.Empty : $"@{s.Branch}")
+                                        </MudChip>
+                                    }
+                                    else if (!string.IsNullOrWhiteSpace(s.Cwd))
+                                    {
+                                        <MudText Typo="Typo.caption" Color="Color.Default" Class="text-truncate" Style="max-width: 200px;" title="@s.Cwd">
+                                            @ShortPath(s.Cwd)
+                                        </MudText>
+                                    }
+                                    @if (s.UpdatedAt is { } ua)
+                                    {
+                                        <MudSpacer />
+                                        <MudText Typo="Typo.caption" Color="Color.Default">@RelativeTime(ua)</MudText>
+                                    }
+                                </MudStack>
+                            </MudStack>
+                        </MudListItem>
                     }
-                </ul>
+                </MudList>
+
                 @if (hidden > 0)
                 {
-                    <button class="load-more" @onclick="() => ToggleGroup(state)">
-                        Load @hidden more
-                    </button>
+                    <div class="px-4 pb-2">
+                        <MudButton Variant="Variant.Text" Size="Size.Small" Color="Color.Primary"
+                                   StartIcon="@Icons.Material.Filled.ExpandMore"
+                                   OnClick="@(() => ToggleGroup(state))">
+                            Show @hidden more
+                        </MudButton>
+                    </div>
                 }
                 else if (expanded && group.Count > CollapsedLimit)
                 {
-                    <button class="load-more" @onclick="() => ToggleGroup(state)">
-                        Show less
-                    </button>
+                    <div class="px-4 pb-2">
+                        <MudButton Variant="Variant.Text" Size="Size.Small" Color="Color.Default"
+                                   StartIcon="@Icons.Material.Filled.ExpandLess"
+                                   OnClick="@(() => ToggleGroup(state))">
+                            Show less
+                        </MudButton>
+                    </div>
                 }
             }
         }
-    </aside>
-    <main class="chat-pane">
-        @if (Agent is not null && SessionId is not null)
-        {
-            <div class="mobile-back-bar">
-                <button class="mobile-back" @onclick="GoBackToSidebar" title="Back to sessions">
-                    <span aria-hidden="true">&larr;</span>
-                    <span class="mobile-back-label">@(_currentSessionTitle ?? "Sessions")</span>
-                </button>
-            </div>
-        }
-        @if (Agent is not null && SessionId is not null && _pendingOrphan is null && !_newSessionOpen)
-        {
-            <div class="chat-toolbar">
-                <label class="toggle">
-                    <input type="checkbox" checked="@_showThoughts" @onchange="ToggleShowThoughts" />
-                    Show thinking
-                </label>
-            </div>
-        }
+    </MudDrawer>
+
+    <MudMainContent Class="d-flex flex-column" Style="height: 100vh;">
         @if (_newSessionOpen)
         {
-            <div class="orphan-confirm">
-                <h3>New chat on @Agent</h3>
-                <p>Working directory:</p>
-                <input class="cwd-input" type="text" @bind="_newSessionCwd" @bind:event="oninput"
-                       list="cwd-suggestions" placeholder="(leave blank to use agent default)" />
-                <datalist id="cwd-suggestions">
-                    @foreach (var c in _cwdSuggestions)
+            <MudContainer MaxWidth="MaxWidth.Small" Class="my-8">
+                <MudPaper Class="pa-6" Elevation="2">
+                    <MudText Typo="Typo.h5" Class="mb-2">New chat on @Agent</MudText>
+                    <MudText Typo="Typo.body2" Color="Color.Default" Class="mb-4">
+                        Pick a working directory for the conversation. Leave blank to use the agent's default.
+                    </MudText>
+                    <MudAutocomplete T="string" Label="Working directory"
+                                     @bind-Value="_newSessionCwd"
+                                     SearchFunc="@SearchCwds"
+                                     Variant="Variant.Outlined"
+                                     CoerceValue="true"
+                                     ResetValueOnEmptyText="false"
+                                     Placeholder="(leave blank for agent default)"
+                                     Class="mb-4" />
+                    @if (_currentAgentSupportsAgency)
                     {
-                        <option value="@c"></option>
+                        <MudCheckBox T="bool" @bind-Value="_newSessionUseAgency" Color="Color.Primary"
+                                     Label="Wrap with agency (extra MCP servers)"
+                                     Class="mb-4" />
                     }
-                </datalist>
-                @if (_currentAgentSupportsAgency)
-                {
-                    <label class="toggle agency-toggle" title="Run via the agency CLI for extra MCP servers (Microsoft-internal tools)">
-                        <input type="checkbox" @bind="_newSessionUseAgency" />
-                        Wrap with agency (extra MCPs)
-                    </label>
-                }
-                @if (_newSessionError is not null)
-                {
-                    <p class="muted" style="color:#f87171">@_newSessionError</p>
-                }
-                <div class="actions">
-                    <button class="primary" disabled="@_newSessionBusy" @onclick="ConfirmNewSession">@(_newSessionBusy ? "Creating…" : "Create")</button>
-                    <button disabled="@_newSessionBusy" @onclick="CancelNewSession">Cancel</button>
-                </div>
-            </div>
+                    @if (_newSessionError is not null)
+                    {
+                        <MudAlert Severity="Severity.Error" Class="mb-4">@_newSessionError</MudAlert>
+                    }
+                    <MudStack Row="true" Spacing="2" Justify="Justify.FlexEnd">
+                        <MudButton Variant="Variant.Text" Disabled="@_newSessionBusy" OnClick="@CancelNewSession">Cancel</MudButton>
+                        <MudButton Variant="Variant.Filled" Color="Color.Primary"
+                                   Disabled="@_newSessionBusy"
+                                   OnClick="@ConfirmNewSession"
+                                   StartIcon="@(_newSessionBusy ? null : Icons.Material.Filled.Send)">
+                            @if (_newSessionBusy)
+                            {
+                                <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="mr-2" />
+                                <span>Creating...</span>
+                            }
+                            else
+                            {
+                                <span>Create</span>
+                            }
+                        </MudButton>
+                    </MudStack>
+                </MudPaper>
+            </MudContainer>
         }
         else if (_pendingOrphan is not null)
         {
-            <div class="orphan-confirm">
-                <h3>Adopt running session?</h3>
-                <p>This session is held by another process (PID <strong>@_pendingOrphan.OwnerPid</strong>). Adopting will <em>kill</em> that process and load the session under magpilot.</p>
-                <p class="muted">@(_pendingOrphan.Summary ?? _pendingOrphan.Id)</p>
-                <div class="actions">
-                    <button class="primary" @onclick="ConfirmOrphanAdopt">Kill PID @_pendingOrphan.OwnerPid and adopt</button>
-                    <button @onclick="CancelOrphanAdopt">Cancel</button>
-                </div>
-            </div>
+            <MudContainer MaxWidth="MaxWidth.Small" Class="my-8">
+                <MudPaper Class="pa-6" Elevation="2">
+                    <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center" Class="mb-3">
+                        <MudIcon Icon="@Icons.Material.Filled.Warning" Color="Color.Warning" />
+                        <MudText Typo="Typo.h6">Adopt running session?</MudText>
+                    </MudStack>
+                    <MudText Typo="Typo.body2" Class="mb-2">
+                        This session is held by another process (PID <strong>@_pendingOrphan.OwnerPid</strong>).
+                        Adopting will <em>kill</em> that process and load the session under magpilot.
+                    </MudText>
+                    <MudPaper Class="pa-3 my-3" Elevation="0" Outlined="true">
+                        <MudText Typo="Typo.caption" Color="Color.Default">@(_pendingOrphan.Summary ?? _pendingOrphan.Id)</MudText>
+                    </MudPaper>
+                    <MudStack Row="true" Spacing="2" Justify="Justify.FlexEnd">
+                        <MudButton Variant="Variant.Text" OnClick="@CancelOrphanAdopt">Cancel</MudButton>
+                        <MudButton Variant="Variant.Filled" Color="Color.Warning"
+                                   StartIcon="@Icons.Material.Filled.SwapHoriz"
+                                   OnClick="@ConfirmOrphanAdopt">
+                            Kill PID @_pendingOrphan.OwnerPid and adopt
+                        </MudButton>
+                    </MudStack>
+                </MudPaper>
+            </MudContainer>
         }
         else if (Agent is not null && SessionId is not null)
         {
             @if (_loading)
             {
-                <div class="loading-banner">Loading history…</div>
+                <MudProgressLinear Indeterminate="true" Color="Color.Primary" Size="Size.Small" />
             }
+            <div class="chat-toolbar-mud px-3 py-1 d-flex align-center">
+                <MudSwitch T="bool" Color="Color.Primary" Size="Size.Small"
+                           Value="_showThoughts" ValueChanged="@SetShowThoughts"
+                           Label="Show thinking" />
+            </div>
             <ChatView Messages="@_messages"
                       PendingApproval="@_pendingApproval"
                       Disabled="@(_busy || _loading)"
@@ -153,20 +303,32 @@
         }
         else
         {
-            <div class="welcome">
-                <h2>magpilot</h2>
-                <p>Pick a host on the left to see its sessions.</p>
-            </div>
+            <MudContainer MaxWidth="MaxWidth.Small" Class="d-flex flex-column align-center justify-center" Style="flex: 1;">
+                <MudIcon Icon="@Icons.Material.Filled.Hub" Color="Color.Primary" Size="Size.Large" Style="font-size: 4rem;" />
+                <MudText Typo="Typo.h4" Class="mt-3 mb-2">Magpilot</MudText>
+                <MudText Typo="Typo.body1" Color="Color.Default" Align="Align.Center">
+                    Pick a host on the left to see its sessions, or start a new chat.
+                </MudText>
+            </MudContainer>
         }
-    </main>
-</div>
+    </MudMainContent>
+</MudLayout>
 
 @code {
     [Parameter] public string? Agent { get; set; }
     [Parameter] public string? SessionId { get; set; }
 
+    [CascadingParameter] public ThemeState? Theme { get; set; }
+
+    private async Task OnToggleDarkMode()
+    {
+        if (Theme is null) return;
+        await Theme.Set.InvokeAsync(!Theme.IsDark);
+    }
+
     private List<AgentInfo>? _agents;
     private List<SessionInfo>? _sessions;
+    private bool _drawerOpen = true;
     private readonly HashSet<SessionState> _expandedGroups = new();
     private readonly ObservableCollection<ChatMessage> _messages = new();
     private ChatMessage? _streamingAssistant;
@@ -212,6 +374,63 @@
         _showThoughts = e.Value is bool b ? b : bool.TryParse(e.Value?.ToString(), out var p) && p;
         try { await JS.InvokeVoidAsync("localStorage.setItem", ShowThoughtsKey, _showThoughts ? "true" : "false"); }
         catch { }
+    }
+
+    private async Task SetShowThoughts(bool value)
+    {
+        _showThoughts = value;
+        try { await JS.InvokeVoidAsync("localStorage.setItem", ShowThoughtsKey, value ? "true" : "false"); }
+        catch { }
+    }
+
+    private void ToggleDrawer() => _drawerOpen = !_drawerOpen;
+
+    private void OnAgentSelected(string? name)
+    {
+        if (string.IsNullOrEmpty(name) || name == Agent) return;
+        Nav.NavigateTo($"/agents/{name}");
+    }
+
+    private void OnSessionSelected(string? id)
+    {
+        if (string.IsNullOrEmpty(id) || id == SessionId) return;
+        Nav.NavigateTo($"/agents/{Agent}/sessions/{id}");
+    }
+
+    private Task<IEnumerable<string>> SearchCwds(string? value, CancellationToken ct)
+    {
+        IEnumerable<string> results = string.IsNullOrWhiteSpace(value)
+            ? _cwdSuggestions
+            : _cwdSuggestions.Where(c => c.Contains(value, StringComparison.OrdinalIgnoreCase));
+        return Task.FromResult(results);
+    }
+
+    private static (Color color, string icon) GroupVisuals(SessionState state) => state switch
+    {
+        SessionState.Owned   => (Color.Success, Icons.Material.Filled.RadioButtonChecked),
+        SessionState.Locked  => (Color.Warning, Icons.Material.Filled.Lock),
+        SessionState.Dormant => (Color.Default, Icons.Material.Filled.History),
+        _                    => (Color.Default, Icons.Material.Filled.HelpOutline),
+    };
+
+    private static string RelativeTime(DateTimeOffset when)
+    {
+        var delta = DateTimeOffset.UtcNow - when;
+        if (delta.TotalSeconds < 60)  return "just now";
+        if (delta.TotalMinutes < 60)  return $"{(int)delta.TotalMinutes}m";
+        if (delta.TotalHours < 24)    return $"{(int)delta.TotalHours}h";
+        if (delta.TotalDays < 7)      return $"{(int)delta.TotalDays}d";
+        if (delta.TotalDays < 30)     return $"{(int)(delta.TotalDays / 7)}w";
+        if (delta.TotalDays < 365)    return $"{(int)(delta.TotalDays / 30)}mo";
+        return $"{(int)(delta.TotalDays / 365)}y";
+    }
+
+    private static string ShortPath(string cwd)
+    {
+        // Compress home prefix and keep tail readable in narrow chips.
+        var compressed = cwd.Replace("/home/magnus/", "~/").Replace("/home/node/", "~/");
+        if (compressed.Length <= 28) return compressed;
+        return "..." + compressed[^25..];
     }
 
     protected override async Task OnParametersSetAsync()
