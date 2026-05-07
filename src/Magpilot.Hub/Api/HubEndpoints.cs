@@ -1,3 +1,4 @@
+using System.Net.Http.Json;
 using Magpilot.Hub.Agents;
 using Magpilot.Hub.Discovery;
 using Magpilot.Shared.Models;
@@ -15,9 +16,31 @@ public static class HubEndpoints
 
         api.MapGet("/agents", (AgentRegistry reg) => reg.List());
 
-        api.MapPost("/agents", (AgentRegistrationRequest req, AgentRegistry reg) =>
+        api.MapPost("/agents", async (AgentRegistrationRequest req, AgentRegistry reg, AgentHttpClient http, ILoggerFactory lf) =>
         {
+            // Initial register so GetToken works for the probe below.
             reg.Upsert(req.Name, req.Url, req.Token, online: true);
+
+            // Best-effort: ask the agent for its capabilities so the SPA can
+            // surface flavor-gated UI. We don't fail registration if this
+            // doesn't work -- the agent is still usable, just without flavor
+            // metadata until the next discovery sweep populates it.
+            var log = lf.CreateLogger("AgentRegister");
+            try
+            {
+                var info = await http.ClientFor(req.Name).GetFromJsonAsync<AgentInfoReply>("api/info");
+                if (info?.Flavors is { Count: > 0 } flavors)
+                {
+                    reg.Upsert(req.Name, req.Url, req.Token, online: true, flavors: flavors);
+                    log.LogInformation("Registered {Name} with flavors: {Flavors}",
+                        req.Name, string.Join(", ", flavors));
+                }
+            }
+            catch (Exception ex)
+            {
+                log.LogWarning(ex, "Could not fetch /api/info from {Name} during registration", req.Name);
+            }
+
             return Results.NoContent();
         });
 
@@ -200,3 +223,6 @@ public static class HubEndpoints
 public sealed record PushSubscriptionDto(string Kind, string Endpoint, string? KeysJson, string? UserAgent);
 
 public sealed record AgentRegistrationRequest(string Name, string Url, string? Token);
+
+/// <summary>Minimal projection of the agent's <c>/api/info</c> response we need.</summary>
+internal sealed record AgentInfoReply(string? Name, string? Os, IReadOnlyList<string>? Flavors);
