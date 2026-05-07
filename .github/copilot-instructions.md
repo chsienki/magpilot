@@ -256,3 +256,4 @@ If you implement any of these, update `docs/plan.md` and this file.
 <!-- Mirrored from copilot-context/ideas/inbox.md. Newest at the bottom. -->
 
 - 2026-05-07: magnus (part of magpilot) should support voice to text
+- 2026-05-07: Rename the clawd folder on the magnus server to be magnus
