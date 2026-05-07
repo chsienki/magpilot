@@ -478,12 +478,43 @@
             // If we have a cached snapshot AND the session is still loaded
             // into ACP (Owned), restore the snapshot and connect WITHOUT
             // requesting a load -- ACP would reject session/load on an
-            // already-loaded session. For Dormant sessions (or first visit
-            // when no cache exists), request load=true so ACP replays history.
+            // already-loaded session.
+            //
+            // For Dormant sessions, request load=true so ACP replays
+            // history through the live stream.
+            //
+            // For Owned-without-cache (a fresh browser tab opening a
+            // session that was loaded into ACP by another client, e.g.
+            // the WhatsApp sidecar), neither path works: we can't
+            // load=true (ACP rejects double-load) and we have no in-tab
+            // cache. Fall back to reading the on-disk events.jsonl via
+            // the agent's /history endpoint.
             var key = $"{Agent}/{SessionId}";
             var hasCache = _msgCache.TryGetValue(key, out var cached);
-            var canRehydrate = hasCache && info?.State == SessionState.Owned;
-            await StartStreamingAsync(load: !canRehydrate, force: false, restoreFrom: canRehydrate ? cached : null);
+            if (hasCache && info?.State == SessionState.Owned)
+            {
+                await StartStreamingAsync(load: false, force: false, restoreFrom: cached);
+            }
+            else if (!hasCache && info?.State == SessionState.Owned)
+            {
+                List<ChatMessage>? fromDisk = null;
+                try
+                {
+                    var rows = await Hub.GetHistoryAsync(Agent, SessionId);
+                    if (rows is not null)
+                    {
+                        fromDisk = rows
+                            .Select(r => new ChatMessage { Role = r.Role, Text = r.Text, ToolCallId = r.ToolCallId })
+                            .ToList();
+                    }
+                }
+                catch (Exception ex) { Console.Error.WriteLine($"GetHistoryAsync: {ex.Message}"); }
+                await StartStreamingAsync(load: false, force: false, restoreFrom: fromDisk);
+            }
+            else
+            {
+                await StartStreamingAsync(load: true, force: false);
+            }
         }
     }
 

@@ -30,6 +30,14 @@ public static class AgentEndpoints
             return info is null ? Results.NotFound() : Results.Ok(info);
         });
 
+        // Read the session's events.jsonl directly and project it into a
+        // flat role/text/toolCallId list. This is the SPA's escape hatch
+        // for hydrating an Owned session that another client (e.g. the WA
+        // sidecar) loaded into ACP first -- ACP refuses to load again, so
+        // we bypass it entirely.
+        api.MapGet("/sessions/{id}/history", (string id, HistoryReader reader) =>
+            Results.Ok(reader.Read(id)));
+
         api.MapPost("/sessions", async (NewSessionRequest req, SessionRegistry reg, AcpSessionManager acp, CancellationToken ct) =>
         {
             var info = await reg.CreateAsync(req.Cwd, req.UseAgency, ct);

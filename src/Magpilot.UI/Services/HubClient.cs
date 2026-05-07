@@ -26,6 +26,17 @@ public sealed class HubClient
     public Task<List<SessionInfo>?> ListSessionsAsync(string agent, CancellationToken ct = default) =>
         _http.GetFromJsonAsync<List<SessionInfo>>($"api/agents/{agent}/sessions", ct);
 
+    /// <summary>
+    /// Read the persisted message history for a session straight from the
+    /// agent's events.jsonl projection. Used to rehydrate an Owned session
+    /// in a fresh browser tab when the in-memory cache is empty (we can't
+    /// re-trigger ACP's session/load to replay it).
+    /// </summary>
+    public Task<List<HistoryEntry>?> GetHistoryAsync(string agent, string sessionId, CancellationToken ct = default) =>
+        _http.GetFromJsonAsync<List<HistoryEntry>>($"api/agents/{agent}/sessions/{sessionId}/history", ct);
+
+    public sealed record HistoryEntry(string Role, string Text, string? ToolCallId = null);
+
     public async Task<SessionInfo?> NewSessionAsync(string agent, string? cwd, bool useAgency = false, CancellationToken ct = default)
     {
         var resp = await _http.PostAsJsonAsync(

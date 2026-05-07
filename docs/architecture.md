@@ -386,18 +386,14 @@ exposed two real edges, both fixed:
 - A fresh tab with no cache + an Owned session = empty UI, even though
   `events.jsonl` on disk has full history.
 
-**Workaround in place**: Magnus's bootstrap deliberately leaves the
-session **Dormant** at boot. The first client to touch it (SPA or WA)
-triggers ACP load and gets the full history. Practical rule: after a
-Magnus restart, **open the SPA before sending WA messages** so the SPA
-gets the history into its tab cache. From that point on, WA messages
-flow into the SPA's open SSE stream and both clients stay consistent.
-
-**Proper fix (not yet implemented)**: agent's `/sessions/{id}/stream`
-endpoint should be able to replay `events.jsonl` server-side when load
-is requested but ACP says already-loaded -- requires a translator from
-Copilot CLI's `session.start`/`assistant.message`/etc events into
-Magpilot's `StreamEvent` schema (AssistantDelta, ToolCall, TurnComplete).
+**Fix in place** (the proper one): the agent now exposes
+`GET /api/sessions/{id}/history` (`HistoryReader.cs`) which reads the
+session's `events.jsonl` directly and projects it into a flat
+`List<{Role,Text,ToolCallId}>`. The SPA falls back to that endpoint when
+state==Owned and there's no in-tab cache, then connects to `/stream`
+without `load=true` for live updates. ACP is bypassed entirely; the
+events file is the durable source of truth that ACP itself was going to
+replay anyway.
 
 ### Edge 2: WA-side prompts not visible in SPA stream
 
