@@ -478,3 +478,42 @@ with other sidecars. Magpilot doesn't need to know you exist.
 - **MEMORY.md / SOUL.md / IDENTITY.md** -- convention from OpenClaw,
   carried into Magnus. Knowledge files in `~/clawd/` that the model reads
   at session start and updates before /compact.
+
+## UI / SPA
+
+The Magpilot SPA is a Blazor WebAssembly app served by the hub. As of
+2026-05-07 it uses **MudBlazor 9.4** as its design-system foundation.
+
+- **Theme**: `Magpilot.UI/MagpilotTheme.cs` defines a single `MudTheme`
+  with light + dark `Palette` variants. Brand colours: deep midnight blue
+  primary (matching the magpie's plumage), iridescent teal/violet accents
+  for success/secondary highlights. Inter is the typography stack.
+- **Mode**: defaults to light. The AppBar carries a sun/moon
+  `MudIconButton` toggle; the user's choice is persisted to
+  `localStorage["magpilot.darkMode"]`. Toggle propagates from the AppBar
+  (in `Home.razor`) to `MainLayout` via a cascading `ThemeState` record
+  (`Magpilot.UI/ThemeState.cs`) -- this avoids a circular reference
+  between `Magpilot.UI` (RCL) and `Magpilot.Web` (the WASM project).
+- **Layout**: `MudLayout` with `MudAppBar` (brand mark + selected host
+  chip + dark toggle + cloud-status icon) and a `MudDrawer` that becomes
+  off-canvas at viewports below `Breakpoint.Md`. Drawer holds the host
+  picker (`MudList` with online dot) and grouped session list
+  (`MudListSubheader` per state, `MudChip` for state, "Show N more"
+  button).
+- **Chat surface** (`Magpilot.UI/Components/ChatView.razor`): per-message
+  `MudPaper` bubbles with role-aware avatars + alignment. User on the
+  right with primary fill; assistant on the left outlined; thoughts in a
+  dimmed italic card; tool calls as compact monospace `MudChip`. Approval
+  prompts are a `MudAlert` Severity.Warning with action buttons. Magnus's
+  thinking state is a 3-dot pulse animation. Composer is a real
+  `<textarea>` (so the Enter/Shift+Enter shim in
+  `Magpilot.Web/wwwroot/js/composer.js` still applies) paired with a
+  `MudIconButton` paper-plane send.
+- **Logo**: the magpie SVG at `wwwroot/favicon-mark.svg` (a
+  background-stripped variant of `favicon.svg`) is mounted in the AppBar
+  with a layered `drop-shadow` halo so it doesn't disappear into the
+  primary-coloured bar.
+- **Static JS**: lives in `Magpilot.Web/wwwroot/js/` (e.g. `composer.js`)
+  rather than collocated as `*.razor.js` next to components -- the hub's
+  multi-stage Dockerfile trips BLAZOR106 on `_content/...` collocated
+  assets at the second publish step.
