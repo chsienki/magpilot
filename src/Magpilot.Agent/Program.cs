@@ -9,7 +9,8 @@ using System.Text.Encodings.Web;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddSingleton<AcpClient>();
+builder.Services.AddSingleton<FlavorCapabilities>();
+builder.Services.AddSingleton<AcpFlavorPool>();
 builder.Services.AddSingleton<AcpSessionManager>();
 builder.Services.AddSingleton<SessionScanner>();
 builder.Services.AddSingleton<SessionRegistry>();
@@ -54,12 +55,22 @@ internal sealed class BearerHandler(
     }
 }
 
-internal sealed class AcpStarter(AcpClient client, AcpSessionManager mgr, ILogger<AcpStarter> log) : IHostedService
+internal sealed class AcpStarter(
+    AcpFlavorPool pool,
+    AcpSessionManager mgr,
+    ILoggerFactory loggerFactory,
+    ILogger<AcpStarter> log) : IHostedService
 {
     public async Task StartAsync(CancellationToken ct)
     {
-        log.LogInformation("Starting ACP child process...");
+        log.LogInformation("Starting default ACP child process...");
+        // Eagerly start the default flavor and pre-register it so the pool
+        // doesn't try to spawn a duplicate on first use.
+        var client = new AcpClient(loggerFactory.CreateLogger<AcpClient>(),
+            AcpFlavor.Default.Exe, AcpFlavor.Default.Args);
         await client.StartAsync(ct);
+        await pool.RegisterAsync(AcpFlavor.Default, client);
+        // Keep mgr alive (it subscribes to pool events in its constructor).
         _ = mgr;
     }
     public Task StopAsync(CancellationToken ct) => Task.CompletedTask;

@@ -108,6 +108,13 @@
                         <option value="@c"></option>
                     }
                 </datalist>
+                @if (_currentAgentSupportsAgency)
+                {
+                    <label class="toggle agency-toggle" title="Run via the agency CLI for extra MCP servers (Microsoft-internal tools)">
+                        <input type="checkbox" @bind="_newSessionUseAgency" />
+                        Wrap with agency (extra MCPs)
+                    </label>
+                }
                 @if (_newSessionError is not null)
                 {
                     <p class="muted" style="color:#f87171">@_newSessionError</p>
@@ -173,6 +180,7 @@
     private SessionInfo? _pendingOrphan;
     private bool _newSessionOpen;
     private string _newSessionCwd = "";
+    private bool _newSessionUseAgency;
     private string? _newSessionError;
     private bool _newSessionBusy;
     private List<string> _cwdSuggestions = new();
@@ -323,6 +331,14 @@
             ? (s.Summary ?? s.Id[..8])
             : null;
 
+    /// <summary>
+    /// True when the current Agent advertises the "agency" flavor (i.e. the
+    /// `agency` CLI is installed on that host). Used to gate the "Wrap with
+    /// agency" checkbox in the new session dialog.
+    /// </summary>
+    private bool _currentAgentSupportsAgency =>
+        _agents?.FirstOrDefault(a => a.Name == Agent)?.Flavors?.Contains("agency") == true;
+
     private void OpenSession(SessionInfo s)
     {
         Nav.NavigateTo($"/agents/{Agent}/sessions/{s.Id}");
@@ -340,6 +356,7 @@
             .Take(20)
             .ToList();
         _newSessionCwd = _cwdSuggestions.FirstOrDefault() ?? "";
+        _newSessionUseAgency = false;
         _newSessionError = null;
         _newSessionBusy = false;
         _newSessionOpen = true;
@@ -359,7 +376,7 @@
         try
         {
             var cwd = string.IsNullOrWhiteSpace(_newSessionCwd) ? null : _newSessionCwd.Trim();
-            var s = await Hub.NewSessionAsync(Agent, cwd);
+            var s = await Hub.NewSessionAsync(Agent, cwd, _newSessionUseAgency);
             if (s is null) { _newSessionError = "Server returned no session"; _newSessionBusy = false; return; }
             // Instant-insert: prepend the new session to the visible list
             // before navigating, so the user sees it appear immediately.

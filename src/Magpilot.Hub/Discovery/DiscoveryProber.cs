@@ -59,8 +59,10 @@ public sealed class DiscoveryProber : BackgroundService
                     var reply = JsonSerializer.Deserialize<DiscoveryReply>(result.Buffer);
                     if (reply?.Magic == Magic && !string.IsNullOrEmpty(reply.Name) && !string.IsNullOrEmpty(reply.Url))
                     {
-                        _logger.LogInformation("Discovered {Name} at {Url}", reply.Name, reply.Url);
-                        _registry.Upsert(reply.Name, reply.Url, defaultAgentToken, online: true);
+                        _logger.LogInformation("Discovered {Name} at {Url} (flavors: {Flavors})",
+                            reply.Name, reply.Url,
+                            reply.Flavors is null ? "<unspecified>" : string.Join(", ", reply.Flavors));
+                        _registry.Upsert(reply.Name, reply.Url, defaultAgentToken, online: true, flavors: reply.Flavors);
                     }
                 }
                 catch (Exception ex) { _logger.LogDebug(ex, "Bad discovery reply"); }
@@ -73,6 +75,7 @@ public sealed class DiscoveryProber : BackgroundService
         [property: JsonPropertyName("magic")] string Magic,
         [property: JsonPropertyName("name")] string Name,
         [property: JsonPropertyName("url")] string Url,
-        [property: JsonPropertyName("os")] string? Os
+        [property: JsonPropertyName("os")] string? Os,
+        [property: JsonPropertyName("flavors")] IReadOnlyList<string>? Flavors
     );
 }

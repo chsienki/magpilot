@@ -119,9 +119,23 @@ public sealed class AgentRegistry
         }
     }
 
-    public void Upsert(string name, string url, string? token, bool online)
+    public void Upsert(string name, string url, string? token, bool online, IReadOnlyList<string>? flavors = null)
     {
-        var info = new AgentInfo(name, url, online, null, DateTimeOffset.UtcNow);
+        // Preserve previously-known flavors if this caller didn't specify any
+        // (e.g. a manual /api/agents POST without discovery context).
+        var resolvedFlavors = flavors;
+        if (resolvedFlavors is null)
+        {
+            lock (_lock)
+            {
+                if (_agents.TryGetValue(name, out var existing))
+                {
+                    resolvedFlavors = existing.Flavors;
+                }
+            }
+        }
+
+        var info = new AgentInfo(name, url, online, null, DateTimeOffset.UtcNow, resolvedFlavors);
         lock (_lock)
         {
             _agents[name] = info;

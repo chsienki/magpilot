@@ -30,10 +30,11 @@ public sealed class SessionRegistry
 
     public SessionInfo? Get(string id) => _scanner.Get(id, Owned);
 
-    public async Task<SessionInfo> CreateAsync(string? cwd, CancellationToken ct)
+    public async Task<SessionInfo> CreateAsync(string? cwd, bool useAgency, CancellationToken ct)
     {
         cwd ??= Environment.CurrentDirectory;
-        var sid = await _acp.NewSessionAsync(cwd, ct);
+        var flavor = useAgency ? AcpFlavor.Agency : AcpFlavor.Default;
+        var sid = await _acp.NewSessionAsync(cwd, flavor, ct);
         _owned.TryAdd(sid, 0);
         return _scanner.Get(sid, Owned)
             ?? new SessionInfo(sid, SessionState.Owned, cwd, null, null, null, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
@@ -42,6 +43,8 @@ public sealed class SessionRegistry
     /// <summary>
     /// Adopt: if the session is held by another process, kill it (force=true required),
     /// then session/load it into our ACP child.
+    /// Adopted sessions always use the default flavor; the original flavor is
+    /// not persisted on disk (yet).
     /// </summary>
     public async Task<SessionInfo> AdoptAsync(string sessionId, bool force, CancellationToken ct)
     {
@@ -75,7 +78,7 @@ public sealed class SessionRegistry
         }
 
         var cwd = info.Cwd ?? Environment.CurrentDirectory;
-        await _acp.LoadSessionAsync(sessionId, cwd, ct);
+        await _acp.LoadSessionAsync(sessionId, cwd, AcpFlavor.Default, ct);
         _owned.TryAdd(sessionId, 0);
         return _scanner.Get(sessionId, Owned) ?? info with { State = SessionState.Owned };
     }

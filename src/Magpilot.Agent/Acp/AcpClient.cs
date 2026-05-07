@@ -7,12 +7,15 @@ namespace Magpilot.Agent.Acp;
 
 /// <summary>
 /// JSON-RPC 2.0 client for a single <c>copilot --acp</c> child process over stdio.
-/// One instance per host; multiplexes any number of ACP sessionIds.
+/// Each instance owns one process. The session manager runs multiple instances
+/// in parallel (one per <see cref="AcpFlavor"/>), routing each session to its
+/// owning client by sessionId.
 /// </summary>
 public sealed class AcpClient : IAsyncDisposable
 {
     private readonly ILogger<AcpClient> _logger;
-    private readonly string _copilotExe;
+    private readonly string _exe;
+    private readonly string _args;
     private Process? _proc;
     private int _nextId;
     private readonly Dictionary<int, TaskCompletionSource<JsonNode?>> _pending = new();
@@ -25,15 +28,16 @@ public sealed class AcpClient : IAsyncDisposable
     public event Action<string, JsonNode?>? OnSessionUpdate;
     public event Func<string, JsonNode?, Task<JsonNode>>? OnRequest;
 
-    public AcpClient(ILogger<AcpClient> logger, string? copilotExe = null)
+    public AcpClient(ILogger<AcpClient> logger, string? exe = null, string? args = null)
     {
         _logger = logger;
-        _copilotExe = copilotExe ?? (OperatingSystem.IsWindows() ? "copilot.exe" : "copilot");
+        _exe = exe ?? (OperatingSystem.IsWindows() ? "copilot.exe" : "copilot");
+        _args = args ?? "--acp --allow-all-tools";
     }
 
     public async Task StartAsync(CancellationToken ct)
     {
-        var psi = new ProcessStartInfo(_copilotExe, "--acp --allow-all-tools")
+        var psi = new ProcessStartInfo(_exe, _args)
         {
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
@@ -43,8 +47,8 @@ public sealed class AcpClient : IAsyncDisposable
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
         };
-        _proc = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start copilot");
-        _logger.LogInformation("Started copilot --acp pid={Pid}", _proc.Id);
+        _proc = Process.Start(psi) ?? throw new InvalidOperationException($"Failed to start {_exe}");
+        _logger.LogInformation("Started {Exe} {Args} pid={Pid}", _exe, _args, _proc.Id);
 
         _ = Task.Run(() => DrainStderrAsync(ct));
         _ = Task.Run(() => ReadLoopAsync(ct));

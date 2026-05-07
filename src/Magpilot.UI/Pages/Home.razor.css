@@ -45,6 +45,8 @@
 .chat-pane { display: flex; flex-direction: column; height: 100vh; min-width: 0; }
 .muted { color: #999; }
 .welcome { padding: 2rem; text-align: center; color: #666; }
+.agency-toggle { display: block; margin: 0.75rem 0; font-size: 0.9rem; color: #444; }
+.agency-toggle input { margin-right: 0.4rem; }
 
 /* Mobile back-bar -- hidden on wide viewports; shown by the @@media block below
    when the user is inside a session (the chat pane is the "page"). */

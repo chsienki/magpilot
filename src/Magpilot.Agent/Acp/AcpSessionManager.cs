@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json.Nodes;
 using Magpilot.Shared.Models;
 
@@ -7,45 +8,76 @@ namespace Magpilot.Agent.Acp;
 /// Higher-level wrapper that bundles ACP method calls with structured event
 /// dispatch. Holds a per-session subscriber list so HTTP SSE handlers can
 /// fan out updates without re-parsing JSON.
+///
+/// Sessions are tagged with the <see cref="AcpFlavor"/> they were created
+/// against; subsequent prompt/cancel/close calls for that session are routed
+/// to the matching <see cref="AcpClient"/> instance from the pool.
 /// </summary>
 public sealed class AcpSessionManager
 {
-    private readonly AcpClient _client;
+    private readonly AcpFlavorPool _pool;
     private readonly ILogger<AcpSessionManager> _logger;
     private readonly Dictionary<string, List<Channel<StreamEvent>>> _subscribers = new();
     private readonly object _subLock = new();
     private readonly Dictionary<string, TaskCompletionSource<ApprovalResponse>> _pendingApprovals = new();
     private readonly object _approvalLock = new();
 
-    public AcpSessionManager(AcpClient client, ILogger<AcpSessionManager> logger)
+    /// <summary>
+    /// Maps sessionId -> the actual <see cref="AcpClient"/> that owns it.
+    /// Multiplexing flavors share one client across sessions; non-multiplexing
+    /// flavors (e.g. agency) get a dedicated client per session, also tracked
+    /// here so we can clean up on close.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, AcpClient> _sessionClient = new();
+
+    public AcpSessionManager(AcpFlavorPool pool, ILogger<AcpSessionManager> logger)
     {
-        _client = client;
+        _pool = pool;
         _logger = logger;
-        _client.OnSessionUpdate += HandleUpdate;
-        _client.OnRequest += HandleRequestAsync;
+        _pool.OnSessionUpdate += HandleUpdate;
+        _pool.OnRequest += HandleRequestAsync;
     }
 
-    public async Task<string> NewSessionAsync(string cwd, CancellationToken ct)
+    /// <summary>
+    /// Resolve the ACP client owning <paramref name="sessionId"/>. If we
+    /// don't know which client (e.g. session predates this agent process),
+    /// fall back to the default-flavor client and remember the mapping.
+    /// </summary>
+    private async Task<AcpClient> ClientForAsync(string sessionId, CancellationToken ct)
     {
-        var res = await _client.CallAsync("session/new", new JsonObject
+        if (_sessionClient.TryGetValue(sessionId, out var existing))
+        {
+            return existing;
+        }
+        var fallback = await _pool.AcquireAsync(AcpFlavor.Default, ct);
+        return _sessionClient.GetOrAdd(sessionId, fallback);
+    }
+
+    public async Task<string> NewSessionAsync(string cwd, AcpFlavor flavor, CancellationToken ct)
+    {
+        var client = await _pool.AcquireAsync(flavor, ct);
+        var res = await client.CallAsync("session/new", new JsonObject
         {
             ["cwd"] = cwd,
             ["mcpServers"] = new JsonArray(),
         }, ct);
         var sid = res?["sessionId"]?.GetValue<string>()
             ?? throw new InvalidOperationException("session/new returned no sessionId");
-        _logger.LogInformation("New ACP session {SessionId} cwd={Cwd}", sid, cwd);
+        _sessionClient[sid] = client;
+        _logger.LogInformation("New ACP session {SessionId} cwd={Cwd} flavor={Flavor}", sid, cwd, flavor.Key);
         return sid;
     }
 
-    public async Task LoadSessionAsync(string sessionId, string cwd, CancellationToken ct)
+    public async Task LoadSessionAsync(string sessionId, string cwd, AcpFlavor flavor, CancellationToken ct)
     {
-        await _client.CallAsync("session/load", new JsonObject
+        var client = await _pool.AcquireAsync(flavor, ct);
+        await client.CallAsync("session/load", new JsonObject
         {
             ["sessionId"] = sessionId,
             ["cwd"] = cwd,
             ["mcpServers"] = new JsonArray(),
         }, ct, timeoutSec: 300);
+        _sessionClient[sessionId] = client;
     }
 
     public async Task PromptAsync(string sessionId, string text, CancellationToken ct)
@@ -54,7 +86,8 @@ public sealed class AcpSessionManager
         var stopReason = "end_turn";
         try
         {
-            var resp = await _client.CallAsync("session/prompt", new JsonObject
+            var client = await ClientForAsync(sessionId, ct);
+            var resp = await client.CallAsync("session/prompt", new JsonObject
             {
                 ["sessionId"] = sessionId,
                 ["prompt"] = new JsonArray
@@ -85,7 +118,8 @@ public sealed class AcpSessionManager
 
     public async Task CancelAsync(string sessionId, CancellationToken ct)
     {
-        await _client.NotifyAsync("session/cancel", new JsonObject { ["sessionId"] = sessionId });
+        var client = await ClientForAsync(sessionId, ct);
+        await client.NotifyAsync("session/cancel", new JsonObject { ["sessionId"] = sessionId });
         await Task.CompletedTask;
     }
 
@@ -93,9 +127,14 @@ public sealed class AcpSessionManager
     {
         try
         {
-            await _client.CallAsync("session/close", new JsonObject { ["sessionId"] = sessionId }, ct, timeoutSec: 30);
+            var client = await ClientForAsync(sessionId, ct);
+            await client.CallAsync("session/close", new JsonObject { ["sessionId"] = sessionId }, ct, timeoutSec: 30);
         }
         catch (Exception ex) { _logger.LogWarning(ex, "session/close failed for {Sid}", sessionId); }
+        finally
+        {
+            _sessionClient.TryRemove(sessionId, out _);
+        }
     }
 
     public ChannelReader<StreamEvent> Subscribe(string sessionId)

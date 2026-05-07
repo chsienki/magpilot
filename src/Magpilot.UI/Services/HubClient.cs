@@ -26,9 +26,12 @@ public sealed class HubClient
     public Task<List<SessionInfo>?> ListSessionsAsync(string agent, CancellationToken ct = default) =>
         _http.GetFromJsonAsync<List<SessionInfo>>($"api/agents/{agent}/sessions", ct);
 
-    public async Task<SessionInfo?> NewSessionAsync(string agent, string? cwd, CancellationToken ct = default)
+    public async Task<SessionInfo?> NewSessionAsync(string agent, string? cwd, bool useAgency = false, CancellationToken ct = default)
     {
-        var resp = await _http.PostAsJsonAsync($"api/agents/{agent}/sessions", new NewSessionRequest(cwd, null), ct);
+        var resp = await _http.PostAsJsonAsync(
+            $"api/agents/{agent}/sessions",
+            new NewSessionRequest(cwd, null, null, useAgency),
+            ct);
         resp.EnsureSuccessStatusCode();
         return await resp.Content.ReadFromJsonAsync<SessionInfo>(cancellationToken: ct);
     }

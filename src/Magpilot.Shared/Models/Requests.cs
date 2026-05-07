@@ -1,6 +1,10 @@
 namespace Magpilot.Shared.Models;
 
-public sealed record NewSessionRequest(string? Cwd, string? Name, string? InitialPrompt = null);
+public sealed record NewSessionRequest(
+    string? Cwd,
+    string? Name,
+    string? InitialPrompt = null,
+    bool UseAgency = false);
 public sealed record PromptRequest(string Text);
 public sealed record AdoptRequest(bool Force = false);
 public sealed record ApprovalResponse(string OptionId);

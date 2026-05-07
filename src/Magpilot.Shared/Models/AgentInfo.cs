@@ -5,5 +5,6 @@ public sealed record AgentInfo(
     string Url,
     bool Online,
     string? OsDescription = null,
-    DateTimeOffset? LastSeen = null
+    DateTimeOffset? LastSeen = null,
+    IReadOnlyList<string>? Flavors = null
 );

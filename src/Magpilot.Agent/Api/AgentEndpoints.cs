@@ -11,11 +11,12 @@ public static class AgentEndpoints
     {
         var api = routes.MapGroup("/api").RequireAuthorization();
 
-        api.MapGet("/info", () => new
+        api.MapGet("/info", (FlavorCapabilities flavors) => new
         {
             name = Environment.MachineName,
             os = Environment.OSVersion.VersionString,
             cwd = Environment.CurrentDirectory,
+            flavors = flavors.Available,
         });
 
         api.MapGet("/sessions", (SessionRegistry reg) => reg.List()
@@ -31,7 +32,7 @@ public static class AgentEndpoints
 
         api.MapPost("/sessions", async (NewSessionRequest req, SessionRegistry reg, AcpSessionManager acp, CancellationToken ct) =>
         {
-            var info = await reg.CreateAsync(req.Cwd, ct);
+            var info = await reg.CreateAsync(req.Cwd, req.UseAgency, ct);
 
             // If the caller provided an initial prompt, fire-and-forget it so the
             // response returns immediately. The caller can subscribe to the SSE
@@ -57,7 +58,7 @@ public static class AgentEndpoints
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
 
-            var info = await reg.CreateAsync(req.Cwd, cts.Token);
+            var info = await reg.CreateAsync(req.Cwd, useAgency: false, cts.Token);
             var sid = info.Id;
             log.LogInformation("QuickPrompt: created ephemeral session {Sid}", sid);
 
