@@ -212,7 +212,7 @@
         }
     </MudDrawer>
 
-    <MudMainContent Class="d-flex flex-column" Style="height: 100vh;">
+    <MudMainContent Class="d-flex flex-column" Style="height: calc(100dvh - var(--mud-appbar-height)); overflow: hidden;">
         @if (_newSessionOpen)
         {
             <MudContainer MaxWidth="MaxWidth.Small" Class="my-8">

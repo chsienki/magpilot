@@ -1,5 +1,13 @@
 html, body {
     font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    /* The SPA owns the full viewport; the chat surface manages its own
+       internal scrolling. Without this, mobile browsers let the page
+       scroll under the chat composer when the soft keyboard appears or
+       when the URL bar collapses. */
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
 }
 
 h1:focus {
