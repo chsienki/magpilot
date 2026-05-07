@@ -1,0 +1,28 @@
+# Magnus -- Magpilot agent stack for /srv/magpilot-agent on the docker LXC (102).
+#
+# Sibling to the magpilot-hub stack at /srv/magpilot/. Host networking so
+# the agent's UDP discovery responder on 47823 sees the hub's broadcast
+# probes on the same LAN, and so /api/info on TCP 5099 is reachable by NPM
+# / the hub.
+#
+# Bring up:
+#   cd /srv/magpilot-agent && docker compose up -d
+#
+# Required env (in /srv/magpilot-agent/.env):
+#   MAGPILOT_AGENT_TOKEN=<same shared secret as the hub>
+#   COPILOT_GITHUB_TOKEN=<fine-grained PAT with Copilot Requests permission>
+
+services:
+  magnus:
+    image: magpilot-agent:latest
+    container_name: magnus
+    hostname: magnus
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      MAGPILOT_AGENT_TOKEN: ${MAGPILOT_AGENT_TOKEN:?set MAGPILOT_AGENT_TOKEN in .env}
+      MAGPILOT_AGENT_PUBLIC_URL: http://192.168.1.239:5099
+      COPILOT_GITHUB_TOKEN: ${COPILOT_GITHUB_TOKEN:?set COPILOT_GITHUB_TOKEN in .env}
+      TZ: America/Los_Angeles
+    volumes:
+      - ./home:/home/magnus

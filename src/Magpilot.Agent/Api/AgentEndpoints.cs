@@ -58,9 +58,33 @@ public static class AgentEndpoints
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
 
-            var info = await reg.CreateAsync(req.Cwd, useAgency: false, cts.Token);
-            var sid = info.Id;
-            log.LogInformation("QuickPrompt: created ephemeral session {Sid}", sid);
+            string sid;
+            bool createdEphemeral;
+            if (!string.IsNullOrWhiteSpace(req.SessionId))
+            {
+                // Caller pinned a long-lived session; adopt-on-demand if dormant
+                // and route the prompt at it. Never detach in this branch.
+                try { await reg.AdoptAsync(req.SessionId, force: false, cts.Token); }
+                catch (Exception ex) { log.LogDebug(ex, "QuickPrompt: adopt-on-pin returned {Msg}", ex.Message); }
+                sid = req.SessionId;
+                createdEphemeral = false;
+                log.LogInformation("QuickPrompt: using pinned session {Sid}", sid);
+
+                // Echo the prompt as a UserDelta into the broadcast channel so
+                // other connected subscribers (the SPA) render "the user said
+                // X" before the assistant deltas arrive. ACP doesn't emit
+                // user_message_chunk for live prompts (only during
+                // session/load history replay), so without this the SPA would
+                // see Magnus's reply but no question.
+                acp.PublishToSubscribers(sid, new UserDelta(req.Prompt));
+            }
+            else
+            {
+                var info = await reg.CreateAsync(req.Cwd, useAgency: false, cts.Token);
+                sid = info.Id;
+                createdEphemeral = true;
+                log.LogInformation("QuickPrompt: created ephemeral session {Sid}", sid);
+            }
 
             // Subscribe BEFORE sending the prompt so we don't race the first delta.
             var reader = acp.Subscribe(sid);
@@ -87,7 +111,10 @@ public static class AgentEndpoints
             finally
             {
                 acp.Unsubscribe(sid, reader);
-                if (!req.KeepSession)
+                // Only detach when we created an ephemeral session AND the caller
+                // didn't ask us to keep it. Pinned sessions (SessionId set) are
+                // owned by the caller; we never tear them down.
+                if (createdEphemeral && !req.KeepSession)
                 {
                     try { await reg.DetachAsync(sid, CancellationToken.None); }
                     catch (Exception ex) { log.LogWarning(ex, "QuickPrompt: detach failed for {Sid}", sid); }

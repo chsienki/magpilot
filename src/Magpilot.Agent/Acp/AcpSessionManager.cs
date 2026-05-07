@@ -107,6 +107,16 @@ public sealed class AcpSessionManager
         Publish(sessionId, new TurnComplete(stopReason));
     }
 
+    /// <summary>
+    /// Push a synthesized event into the broadcast channel for a session.
+    /// Used by sidecar code paths (e.g. quick-prompt with a pinned sessionId)
+    /// to make a UserDelta visible to other connected subscribers (the SPA),
+    /// since ACP doesn't echo the prompt text back during live prompts --
+    /// it only emits user_message_chunk during session/load history replay.
+    /// </summary>
+    public void PublishToSubscribers(string sessionId, StreamEvent evt)
+        => Publish(sessionId, evt);
+
     private void Publish(string sessionId, StreamEvent evt)
     {
         List<Channel<StreamEvent>>? list;

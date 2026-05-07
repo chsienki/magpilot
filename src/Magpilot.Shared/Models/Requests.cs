@@ -15,12 +15,18 @@ public sealed record SessionDetails(SessionInfo Info, string? AcpSessionId);
 /// Request body for the synchronous "ask Copilot a question and wait for the answer"
 /// endpoint. Hub creates an ephemeral session, sends the prompt, accumulates the
 /// streamed assistant output, and returns it as a single response.
+///
+/// If <see cref="SessionId"/> is supplied, the call reuses an existing session
+/// instead of creating a new ephemeral one. The session is NOT detached after
+/// the call (regardless of <see cref="KeepSession"/>) so caller-pinned
+/// long-lived sessions survive across many quick-prompt calls.
 /// </summary>
 public sealed record QuickPromptRequest(
     string Prompt,
     string? Cwd = null,
     int? TimeoutSeconds = null,
-    bool KeepSession = false);
+    bool KeepSession = false,
+    string? SessionId = null);
 
 /// <summary>
 /// Response body for /quick-prompt. <see cref="ResponseText"/> is the concatenation

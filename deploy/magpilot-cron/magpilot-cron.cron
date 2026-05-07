@@ -1,0 +1,15 @@
+# magpilot-cron crontab snippet.
+#
+# Install with: cp magpilot-cron.cron /etc/cron.d/magpilot-cron
+# (file is read by cron automatically; no `crontab` reload needed)
+#
+# Each entry runs run.sh with a job name from /srv/magpilot-cron/jobs.yaml.
+# Cron uses its own minimal PATH; we set one explicitly so curl/jq are found.
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Heartbeat: every 30 minutes, prove magpilot-cron + Magnus are alive.
+*/30 * * * * root /srv/magpilot-cron/run.sh magnus-heartbeat
+
+# GitHub daily report: every morning at 10am Pacific.
+0 10 * * * root /srv/magpilot-cron/run.sh github-daily-report
