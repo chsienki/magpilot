@@ -37,7 +37,15 @@ public sealed class AcpClient : IAsyncDisposable
 
     public async Task StartAsync(CancellationToken ct)
     {
-        var psi = new ProcessStartInfo(_exe, _args)
+        // Resolve the executable to a full path before spawning. .NET's
+        // Process.Start uses the OS's CreateProcess for unqualified names,
+        // which on Windows can resolve to a launcher shim that immediately
+        // re-execs and exits, leaving us with broken pipes. Resolving via
+        // PATH ourselves and passing a full path means CreateProcess just
+        // launches that exact binary -- the same one the user gets at the
+        // command line.
+        var resolvedExe = ResolveOnPath(_exe) ?? _exe;
+        var psi = new ProcessStartInfo(resolvedExe, _args)
         {
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
@@ -47,8 +55,8 @@ public sealed class AcpClient : IAsyncDisposable
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
         };
-        _proc = Process.Start(psi) ?? throw new InvalidOperationException($"Failed to start {_exe}");
-        _logger.LogInformation("Started {Exe} {Args} pid={Pid}", _exe, _args, _proc.Id);
+        _proc = Process.Start(psi) ?? throw new InvalidOperationException($"Failed to start {resolvedExe}");
+        _logger.LogInformation("Started {Exe} {Args} pid={Pid}", resolvedExe, _args, _proc.Id);
 
         _ = Task.Run(() => DrainStderrAsync(ct));
         _ = Task.Run(() => ReadLoopAsync(ct));
@@ -123,6 +131,31 @@ public sealed class AcpClient : IAsyncDisposable
         string? line;
         while ((line = await _proc.StandardError.ReadLineAsync(ct)) != null)
             _logger.LogDebug("[copilot stderr] {Line}", line);
+    }
+
+    /// <summary>
+    /// Resolve an unqualified executable name to a full path by walking the
+    /// PATH environment variable. Returns null if no match found.
+    /// On Windows, also tries the .exe extension if the input lacks one.
+    /// </summary>
+    private static string? ResolveOnPath(string exe)
+    {
+        if (Path.IsPathFullyQualified(exe) && File.Exists(exe)) return exe;
+        var pathSep = OperatingSystem.IsWindows() ? ';' : ':';
+        var dirs = (Environment.GetEnvironmentVariable("PATH") ?? "")
+            .Split(pathSep, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var candidates = OperatingSystem.IsWindows() && !exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+            ? new[] { exe, exe + ".exe" }
+            : new[] { exe };
+        foreach (var dir in dirs)
+        {
+            foreach (var cand in candidates)
+            {
+                var full = Path.Combine(dir, cand);
+                if (File.Exists(full)) return full;
+            }
+        }
+        return null;
     }
 
     private async Task WriteLoopAsync(CancellationToken ct)
