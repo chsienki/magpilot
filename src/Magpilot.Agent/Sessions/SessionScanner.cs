@@ -100,21 +100,39 @@ public sealed class SessionScanner
         ParseWorkspaceYaml(string path)
     {
         if (!File.Exists(path)) return (null, null, null, null, null, null);
-        string? cwd = null, repo = null, branch = null, summary = null;
+        string? cwd = null, repo = null, branch = null, summary = null, name = null;
         DateTimeOffset? created = null, updated = null;
-        foreach (var raw in File.ReadAllLines(path))
+        var allLines = File.ReadAllLines(path);
+        for (var i = 0; i < allLines.Length; i++)
         {
+            var raw = allLines[i];
             var line = raw.TrimEnd();
             var idx = line.IndexOf(':');
             if (idx <= 0 || line.StartsWith(' ') || line.StartsWith('-')) continue;
             var key = line[..idx].Trim();
             var val = line[(idx + 1)..].Trim().Trim('"', '\'');
+            // YAML literal-block scalar (|-, >, etc.): the actual value is
+            // on the indented continuation lines that follow. Stitch them
+            // together so the summary shown in the SPA isn't just "|-".
+            if (val == "|-" || val == "|" || val == ">" || val == ">-")
+            {
+                var parts = new List<string>();
+                while (i + 1 < allLines.Length && (allLines[i + 1].StartsWith("  ") || string.IsNullOrWhiteSpace(allLines[i + 1])))
+                {
+                    i++;
+                    var cont = allLines[i];
+                    if (string.IsNullOrWhiteSpace(cont)) continue;
+                    parts.Add(cont.TrimStart());
+                }
+                val = string.Join(" ", parts).Trim();
+            }
             switch (key)
             {
                 case "cwd": cwd = val; break;
                 case "repository": repo = val; break;
                 case "branch": branch = val; break;
                 case "summary": summary = val; break;
+                case "name": name = val; break;
                 case "created_at":
                     if (DateTimeOffset.TryParse(val, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var c))
                         created = c;
@@ -125,6 +143,8 @@ public sealed class SessionScanner
                     break;
             }
         }
-        return (cwd, repo, branch, summary, created, updated);
+        // Prefer an explicit name (set by us via /sessions { name: ... })
+        // over the auto-generated summary.
+        return (cwd, repo, branch, name ?? summary, created, updated);
     }
 }

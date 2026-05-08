@@ -40,7 +40,7 @@ public static class AgentEndpoints
 
         api.MapPost("/sessions", async (NewSessionRequest req, SessionRegistry reg, AcpSessionManager acp, CancellationToken ct) =>
         {
-            var info = await reg.CreateAsync(req.Cwd, req.UseAgency, ct);
+            var info = await reg.CreateAsync(req.Cwd, req.UseAgency, ct, name: req.Name);
 
             // If the caller provided an initial prompt, fire-and-forget it so the
             // response returns immediately. The caller can subscribe to the SSE

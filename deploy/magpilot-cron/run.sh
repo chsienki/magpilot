@@ -1,29 +1,33 @@
 #!/usr/bin/env bash
 # magpilot-cron run.sh -- run a named job by posting its prompt template to
-# the Magpilot hub's quick-prompt endpoint, then deliver the response.
+# the local agent's /api/quick-prompt, pinning the request to Magnus's
+# Operations session so cron noise doesn't pollute the main thread.
+#
+# Pinned session id is read from the magpilot-agent's persistent state at
+# /srv/magpilot-agent/home/.magnus/.operations-session-id (created by the
+# Magnus bootstrap on first boot).
+#
+# Talks DIRECTLY to the local agent (Magnus on the same LXC), not through
+# the hub. The hub's /api endpoints are gated by user OAuth and don't
+# accept the shared agent bearer token.
 #
 # Usage:   /srv/magpilot-cron/run.sh <job-name>
 # Example: /srv/magpilot-cron/run.sh magnus-heartbeat
 #
-# Jobs are defined in /srv/magpilot-cron/jobs.yaml. A YAML parser would be
-# nice, but to avoid a python/yq dependency for now we keep jobs.yaml as a
-# tiny key/value file and parse with awk. See jobs.yaml for the format.
+# Jobs are defined in /srv/magpilot-cron/jobs.yaml. The parser uses awk
+# (mawk-compatible literal-6-space match for prompt-body lines).
 #
 # Delivery channels:
 #   log    -- write to /var/log/magpilot-cron/<job>.log (default)
 #   stdout -- print to stdout (cron mails this to root)
-#   whatsapp -- POST to the whatsapp sidecar's outbound endpoint
-#               (Phase E -- not yet implemented)
+#   whatsapp -- POST to the whatsapp sidecar's outbound endpoint (TBD)
 set -euo pipefail
 
 JOBS_FILE=/srv/magpilot-cron/jobs.yaml
 LOG_DIR=/var/log/magpilot-cron
-# magpilot-cron talks DIRECTLY to the local agent (Magnus on the same LXC),
-# not through the hub. The hub's /api endpoints are gated by user OAuth and
-# don't accept the shared agent bearer token. Talking direct keeps cron
-# self-sufficient and avoids needing a service-account auth concept.
 AGENT_URL="${MAGPILOT_AGENT_URL:-http://127.0.0.1:5099}"
 TOKEN_FILE=/srv/magpilot/.env
+OPS_SID_FILE=/srv/magpilot-agent/home/.magnus/.operations-session-id
 
 if [[ $# -lt 1 ]]; then
   echo "usage: $0 <job-name>" >&2
@@ -35,14 +39,13 @@ LOG="${LOG_DIR}/${JOB}.log"
 
 TOKEN=$(grep -E '^MAGPILOT_AGENT_TOKEN=' "${TOKEN_FILE}" | cut -d= -f2-)
 
-# Tiny YAML extractor: looks for a job block whose name matches $JOB and
-# emits the prompt + delivery + agent + timeout fields. Format is rigid:
-#   - name: magnus-heartbeat
-#     agent: magnus
-#     timeout: 60
-#     delivery: log
-#     prompt: |
-#       <prompt body indented exactly 6 spaces>
+# Operations session is the durable target. If it doesn't exist (e.g.
+# first boot before bootstrap created it), fall through to ephemeral mode.
+OPS_SID=""
+if [[ -s "${OPS_SID_FILE}" ]]; then
+  OPS_SID=$(cat "${OPS_SID_FILE}")
+fi
+
 get_block() {
   awk -v target="$1" '
     BEGIN { in_match = 0; in_prompt = 0 }
@@ -56,8 +59,6 @@ get_block() {
     !in_match { next }
     /^[ \t]+prompt:[ \t]*\|/ { in_prompt = 1; print "PROMPT:"; next }
     in_prompt {
-      # Prompt body lines must be indented at least 6 spaces. Use literal
-      # 6-space match (mawk on Debian does NOT support {6,} intervals).
       if ($0 ~ /^      /) { sub(/^      /, ""); print "PLINE:" $0; next }
       else { in_prompt = 0 }
     }
@@ -77,11 +78,16 @@ delivery=$(echo "${block}" | sed -n 's/^DELIVERY://p' | head -n1); delivery=${de
 timeout=$(echo "${block}" | sed -n 's/^TIMEOUT://p' | head -n1); timeout=${timeout:-60}
 prompt=$(echo "${block}" | sed -n 's/^PLINE://p')
 
-body=$(jq -n --arg p "${prompt}" --argjson t "${timeout}" \
-  '{prompt:$p, timeoutSeconds:$t}')
+if [[ -n "${OPS_SID}" ]]; then
+  body=$(jq -n --arg p "${prompt}" --argjson t "${timeout}" --arg s "${OPS_SID}" \
+    '{prompt:$p, timeoutSeconds:$t, sessionId:$s}')
+else
+  body=$(jq -n --arg p "${prompt}" --argjson t "${timeout}" \
+    '{prompt:$p, timeoutSeconds:$t}')
+fi
 
 started=$(date -Is)
-echo "[${started}] running job=${JOB} agent=${agent} delivery=${delivery}" >> "${LOG}"
+echo "[${started}] running job=${JOB} agent=${agent} delivery=${delivery} pinned=${OPS_SID:-(none)}" >> "${LOG}"
 
 resp=$(curl -fsS --max-time $((timeout + 30)) -X POST \
   -H "Authorization: Bearer ${TOKEN}" \

@@ -1,19 +1,26 @@
 #!/usr/bin/env bash
 # Magnus container entrypoint.
 #
-# 1. Make sure /home/magnus/{clawd,.copilot,copilot-context} exist with the
-#    right ownership (volume mounts can show up root-owned on first boot).
-# 2. Drop to the magnus user and exec the .NET agent.
-# 3. Once the agent's HTTP API is up, create-or-adopt Magnus's always-on
-#    session via the agent's own /api/sessions endpoint. Session id is
-#    persisted at /home/magnus/.magnus/.session-id so it survives container
-#    restarts.
+# Bootstraps two long-running pinned sessions:
+#   - Magnus   : the user-facing always-on conversation. Persisted at
+#                /home/magnus/.magnus/.session-id, exposed to the SPA, WA
+#                sidecar, etc.
+#   - Operations: the cron heartbeat / scheduled-job thread. Persisted at
+#                /home/magnus/.magnus/.operations-session-id, used by
+#                /srv/magpilot-cron/ so heartbeat noise doesn't pollute
+#                Magnus's main conversation.
+#
+# Both ids survive container restarts. After the first boot, this script
+# leaves both sessions Dormant so the first client to touch each one
+# triggers ACP load (avoids the SPA's empty-on-fresh-tab edge -- see
+# /sessions/{id}/history endpoint and docs/architecture.md).
 
 set -euo pipefail
 
 HOME_DIR=/home/magnus
 STATE_DIR="${HOME_DIR}/.magnus"
 SESSION_ID_FILE="${STATE_DIR}/.session-id"
+OPS_SESSION_ID_FILE="${STATE_DIR}/.operations-session-id"
 CLAWD_DIR="${HOME_DIR}/clawd"
 TOKEN="${MAGPILOT_AGENT_TOKEN:-dev-token}"
 AGENT_URL="http://127.0.0.1:5099"
@@ -25,8 +32,6 @@ mkdir -p "${HOME_DIR}" "${STATE_DIR}" "${CLAWD_DIR}" \
          "${HOME_DIR}/.copilot" "${HOME_DIR}/copilot-context"
 chown -R magnus:magnus "${HOME_DIR}"
 
-# --- 2. background a session-bootstrapper that polls the agent and
-#         creates-or-adopts the always-on session once the API answers ---
 (
     sleep 3
     for i in $(seq 1 60); do
@@ -37,68 +42,76 @@ chown -R magnus:magnus "${HOME_DIR}"
         sleep 1
     done
 
+    # Create a named pinned session, send a warm-up prompt so events.jsonl
+    # exists (without it, ACP cannot session/load on a future restart),
+    # write the new id to the given path. Returns the new sid on stdout.
     create_session() {
-        log "Creating Magnus's always-on session..."
+        local label="$1"            # e.g. "Magnus" or "Operations"
+        local cwd="$2"              # e.g. /home/magnus/clawd
+        local id_file="$3"          # where to persist the sid
+        local warmup_prompt="$4"    # initialisation prompt
+        log "Creating ${label} session..."
+        local body
+        body=$(printf '{"cwd":"%s","name":"%s","useAgency":false}' "${cwd}" "${label}")
         local create_resp
         create_resp=$(curl -fsS -X POST \
             -H "Authorization: Bearer ${TOKEN}" \
             -H "Content-Type: application/json" \
-            -d "{\"cwd\":\"${CLAWD_DIR}\",\"useAgency\":false}" \
+            -d "${body}" \
             "${AGENT_URL}/api/sessions" || true)
         local new_sid
         new_sid=$(echo "${create_resp}" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]\+\)".*/\1/p' | head -n1)
         if [[ -z "${new_sid}" ]]; then
-            log "Failed to create session: ${create_resp}"
+            log "Failed to create ${label} session: ${create_resp}"
             return 1
         fi
-        echo "${new_sid}" > "${SESSION_ID_FILE}"
-        chown magnus:magnus "${SESSION_ID_FILE}"
-        log "Created session ${new_sid}"
+        echo "${new_sid}" > "${id_file}"
+        chown magnus:magnus "${id_file}"
+        log "Created ${label} session ${new_sid}"
 
-        # Warm-up: send a trivial prompt so events.jsonl gets written. Without
-        # this, the session is empty on disk, and ACP cannot session/load it
-        # after a restart (it returns "session not found"). With even one
-        # event persisted, future adopts work.
-        log "Sending warm-up prompt to persist events.jsonl..."
+        local warmup_body
+        warmup_body=$(printf '{"prompt":"%s","sessionId":"%s","timeoutSeconds":60}' "${warmup_prompt}" "${new_sid}")
         curl -fsS -X POST \
             -H "Authorization: Bearer ${TOKEN}" \
             -H "Content-Type: application/json" \
-            -d "{\"prompt\":\"Initialising memory. Reply with one word: ready.\",\"sessionId\":\"${new_sid}\",\"timeoutSeconds\":60}" \
+            -d "${warmup_body}" \
             "${AGENT_URL}/api/quick-prompt" >/dev/null 2>&1 || \
-            log "Warm-up prompt failed (events.jsonl may not be persisted)"
+            log "${label} warm-up prompt failed (events.jsonl may not be persisted)"
         echo "${new_sid}"
         return 0
     }
 
-    if [[ ! -s "${SESSION_ID_FILE}" ]]; then
-        create_session >/dev/null || true
-    else
-        sid=$(cat "${SESSION_ID_FILE}")
-        log "Session id ${sid} on file. Leaving Dormant -- first client (SPA or WA) will adopt + load history."
-        # Clean up stale lock from previous container instance so the session
-        # shows up as Dormant in the registry.
-        SESSION_DIR="${HOME_DIR}/.copilot/session-state/${sid}"
-        if [[ -d "${SESSION_DIR}" ]]; then
-            rm -f "${SESSION_DIR}"/inuse.*.lock
+    # Clear any stale lock on an existing session so it shows up Dormant
+    # in the registry and the first client (SPA / WA / cron) can adopt it.
+    poke_dormant() {
+        local sid="$1"
+        local label="$2"
+        local sd="${HOME_DIR}/.copilot/session-state/${sid}"
+        if [[ -d "${sd}" ]]; then
+            rm -f "${sd}"/inuse.*.lock
+            log "${label} session ${sid} on file (left Dormant)"
+        else
+            log "${label} session ${sid} on file but events dir missing"
         fi
-        # NOTE: We deliberately do NOT call /sessions/{id}/adopt here. If we
-        # adopt at boot, ACP loads the session and we mark it Owned in the
-        # registry. The SPA, when first opened, sees Owned + no client-side
-        # cache and connects WITHOUT load=true (because ACP rejects double-
-        # load on Owned sessions). Result: SPA shows empty session even
-        # though events.jsonl on disk has the full history.
-        #
-        # By leaving the session Dormant, the FIRST client to touch it (SPA
-        # opening with load=true, OR WA's quick-prompt with sessionId via
-        # AdoptAsync) will trigger the ACP load and history streams to that
-        # client. If you want both SPA history AND WA, open the SPA first
-        # after a restart -- subsequent WA messages will appear in the SPA's
-        # already-open SSE stream.
+    }
+
+    # --- Magnus (user-facing) ---
+    if [[ ! -s "${SESSION_ID_FILE}" ]]; then
+        create_session "Magnus" "${CLAWD_DIR}" "${SESSION_ID_FILE}" \
+            "Initialising memory. Reply with one word: ready." >/dev/null || true
+    else
+        poke_dormant "$(cat ${SESSION_ID_FILE})" "Magnus"
+    fi
+
+    # --- Operations (cron / scheduled jobs) ---
+    if [[ ! -s "${OPS_SESSION_ID_FILE}" ]]; then
+        create_session "Operations" "${CLAWD_DIR}" "${OPS_SESSION_ID_FILE}" \
+            "I am the Operations channel. Reply: ready." >/dev/null || true
+    else
+        poke_dormant "$(cat ${OPS_SESSION_ID_FILE})" "Operations"
     fi
 ) &
 
-# --- 3. exec the agent as the magnus user, in /home/magnus so any stray
-#         working-directory references resolve under the persistent volume.
 log "Starting Magpilot.Agent as magnus..."
 cd "${HOME_DIR}"
 exec setpriv --reuid=magnus --regid=magnus --init-groups \
