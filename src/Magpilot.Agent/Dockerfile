@@ -26,9 +26,9 @@ RUN dotnet publish src/Magpilot.Agent/Magpilot.Agent.csproj \
 FROM mcr.microsoft.com/dotnet/aspnet:${DOTNET_RUNTIME} AS runtime
 
 # Install Node.js 22 (Copilot CLI prerequisite) + git/curl/openssh-client/ca-certs
-# (skills + task-context clone need git, curl is handy, openssh for sshing out).
+# + ffmpeg (audio transcoding for voice tools / Wyoming pipeline).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg git openssh-client tini procps \
+        ca-certificates curl gnupg git openssh-client tini procps ffmpeg \
  && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/* \
