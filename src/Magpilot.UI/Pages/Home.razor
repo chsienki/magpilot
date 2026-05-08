@@ -6,6 +6,7 @@
 @inject IJSRuntime JS
 @implements IAsyncDisposable
 @using System.Collections.ObjectModel
+@using System.Text.Json
 
 <MudLayout>
     <MudAppBar Elevation="1" Dense="true">
@@ -344,6 +345,7 @@
     private bool _loading;
     private bool _thinking;
     private string? _streamingFor;
+    private int _streamGeneration;
     private SessionInfo? _pendingOrphan;
     private bool _newSessionOpen;
     private string _newSessionCwd = "";
@@ -458,6 +460,13 @@
 
         if (Agent is not null && SessionId is not null && _streamingFor != $"{Agent}/{SessionId}")
         {
+            // Claim the slot synchronously, BEFORE any awaits, so a re-entrant
+            // call (cascading parameter change, navigation event, etc.) sees
+            // the new target and skips this branch instead of starting a
+            // duplicate stream task.
+            var target = $"{Agent}/{SessionId}";
+            _streamingFor = target;
+
             // Snapshot the previous session before tearing down its stream so
             // we can rehydrate when the user navigates back.
             SnapshotCurrentMessages();
@@ -696,6 +705,21 @@
     private async Task StartStreamingAsync(bool load = false, bool force = false, List<ChatMessage>? restoreFrom = null)
     {
         if (Agent is null || SessionId is null) return;
+
+        // Defensive: if a previous stream task is still alive (caller didn't
+        // StopStreamingAsync, or a race in OnParametersSetAsync), cancel it
+        // before installing a new CTS. Without this, the old Task.Run keeps
+        // pumping events into Apply() in parallel with the new one, doubling
+        // every assistant chunk. (Reproduces as character-interleaving in
+        // the streaming bubble.)
+        if (_streamCts is not null)
+        {
+            try { await _streamCts.CancelAsync(); }
+            catch { /* already cancelled */ }
+            _streamCts.Dispose();
+            _streamCts = null;
+        }
+
         _messages.Clear();
         _streamingAssistant = null;
         if (restoreFrom is not null)
@@ -709,15 +733,26 @@
         var ct = _streamCts.Token;
         var agent = Agent;
         var sid = SessionId;
+        var streamId = ++_streamGeneration;
+        Console.WriteLine($"[stream {streamId}] start agent={agent} sid={sid} load={load}");
         _ = Task.Run(async () =>
         {
             try
             {
                 await foreach (var evt in Hub.StreamAsync(agent, sid, load, force, ct))
+                {
+                    if (streamId != _streamGeneration)
+                    {
+                        // A newer stream task has taken over; this one is stale.
+                        Console.WriteLine($"[stream {streamId}] stale, dropping {evt.GetType().Name}");
+                        break;
+                    }
                     await InvokeAsync(() => Apply(evt));
+                }
             }
             catch (OperationCanceledException) { }
-            catch (Exception ex) { Console.Error.WriteLine($"stream: {ex.Message}"); }
+            catch (Exception ex) { Console.Error.WriteLine($"[stream {streamId}] {ex.Message}"); }
+            Console.WriteLine($"[stream {streamId}] exit");
         }, ct);
 
         if (load)
@@ -760,6 +795,10 @@
                     _messages.Add(_streamingAssistant);
                 }
                 _streamingAssistant.Text += d.Text;
+                if (d.Text.Length <= 32)
+                    Console.WriteLine($"[apply] AssistantDelta gen={_streamGeneration} len={d.Text.Length} text={JsonSerializer.Serialize(d.Text)}");
+                else
+                    Console.WriteLine($"[apply] AssistantDelta gen={_streamGeneration} len={d.Text.Length}");
                 break;
             case ThoughtDelta td:
                 _thinking = false;

@@ -150,25 +150,34 @@ public sealed class AcpSessionManager
     public ChannelReader<StreamEvent> Subscribe(string sessionId)
     {
         var ch = Channel.CreateUnbounded<StreamEvent>(new UnboundedChannelOptions { SingleReader = true });
+        int count;
         lock (_subLock)
         {
             if (!_subscribers.TryGetValue(sessionId, out var list))
                 _subscribers[sessionId] = list = new();
             list.Add(ch);
+            count = list.Count;
         }
+        if (count > 1)
+            _logger.LogWarning("Subscribe sid={Sid} -> {Count} subscribers (>1 means multiple SSE connections, expect duplicate UI events)", sessionId, count);
+        else
+            _logger.LogDebug("Subscribe sid={Sid} -> {Count}", sessionId, count);
         return ch.Reader;
     }
 
     public void Unsubscribe(string sessionId, ChannelReader<StreamEvent> reader)
     {
+        int count = 0;
         lock (_subLock)
         {
             if (_subscribers.TryGetValue(sessionId, out var list))
             {
                 list.RemoveAll(c => ReferenceEquals(c.Reader, reader));
+                count = list.Count;
                 if (list.Count == 0) _subscribers.Remove(sessionId);
             }
         }
+        _logger.LogDebug("Unsubscribe sid={Sid} -> {Count}", sessionId, count);
     }
 
     public bool ResolveApproval(string approvalId, string optionId)
