@@ -2,11 +2,13 @@
 @page "/agents/{agent}"
 @page "/agents/{agent}/sessions/{sessionId}"
 @inject HubClient Hub
+@inject HubLogClient HubLog
 @inject NavigationManager Nav
 @inject IJSRuntime JS
 @implements IAsyncDisposable
 @using System.Collections.ObjectModel
 @using System.Text.Json
+@using Magpilot.UI.Services
 
 <MudLayout>
     <MudAppBar Elevation="1" Dense="true">
@@ -31,6 +33,12 @@
             }
         }
         <MudSpacer />
+        <MudTooltip Text="View central logs">
+            <MudIconButton Icon="@Icons.Material.Filled.Article"
+                           Color="Color.Inherit"
+                           Href="/admin/logs"
+                           aria-label="Logs" />
+        </MudTooltip>
         <MudTooltip Text="@((Theme?.IsDark ?? false) ? "Switch to light mode" : "Switch to dark mode")">
             <MudIconButton Icon="@((Theme?.IsDark ?? false) ? Icons.Material.Filled.LightMode : Icons.Material.Filled.DarkMode)"
                            Color="Color.Inherit"
@@ -369,7 +377,7 @@
         catch (Exception ex)
         {
             _agents = [];
-            Console.Error.WriteLine($"ListAgentsAsync failed: {ex.Message}");
+            HubLog.LogError($"ListAgentsAsync failed: {ex.Message}", ex.ToString(), category: nameof(Home));
             Snackbar.Add($"Could not load hosts: {ex.Message}", Severity.Error);
         }
 
@@ -452,7 +460,9 @@
             try { _sessions = await Hub.ListSessionsAsync(Agent); }
             catch (Exception ex)
             {
-                Console.Error.WriteLine(ex.Message);
+                HubLog.LogError($"ListSessionsAsync failed for {Agent}: {ex.Message}", ex.ToString(),
+                    category: nameof(Home), sessionId: SessionId,
+                    extra: new { agent = Agent });
                 _sessions = [];
                 Snackbar.Add($"Could not load sessions on {Agent}: {ex.Message}", Severity.Error);
             }
@@ -517,7 +527,12 @@
                             .ToList();
                     }
                 }
-                catch (Exception ex) { Console.Error.WriteLine($"GetHistoryAsync: {ex.Message}"); }
+                catch (Exception ex)
+                {
+                    HubLog.LogError($"GetHistoryAsync failed: {ex.Message}", ex.ToString(),
+                        category: nameof(Home), sessionId: SessionId,
+                        extra: new { agent = Agent });
+                }
                 await StartStreamingAsync(load: false, force: false, restoreFrom: fromDisk);
             }
             else
@@ -689,7 +704,11 @@
                 Nav.NavigateTo($"/agents/{Agent}/sessions/{s.Id}");
             }
         }
-        catch (Exception ex) { Console.Error.WriteLine($"NewSession failed: {ex.Message}"); }
+        catch (Exception ex)
+        {
+            HubLog.LogError($"NewSession failed: {ex.Message}", ex.ToString(),
+                category: nameof(Home), extra: new { agent = Agent });
+        }
     }
 
     private void SnapshotCurrentMessages()
@@ -751,7 +770,13 @@
                 }
             }
             catch (OperationCanceledException) { }
-            catch (Exception ex) { Console.Error.WriteLine($"[stream {streamId}] {ex.Message}"); }
+            catch (Exception ex)
+            {
+                HubLog.LogError($"[stream {streamId}] {ex.Message}", ex.ToString(),
+                    category: nameof(Home), sessionId: sid,
+                    extra: new { agent, generation = streamId });
+                Console.Error.WriteLine($"[stream {streamId}] {ex.Message}");
+            }
             Console.WriteLine($"[stream {streamId}] exit");
         }, ct);
 

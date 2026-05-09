@@ -1,0 +1,235 @@
+@page "/admin/logs"
+@inject HttpClient Http
+@inject NavigationManager Nav
+@using System.Net.Http.Json
+@using System.Text.Json
+
+<MudLayout>
+    <MudAppBar Elevation="1" Dense="true">
+        <MudIconButton Icon="@Icons.Material.Filled.ArrowBack" Color="Color.Inherit"
+                       OnClick="@(() => Nav.NavigateTo("/"))" Edge="Edge.Start"
+                       aria-label="Back" />
+        <MudText Typo="Typo.h6" Class="mr-4">Logs</MudText>
+        <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="@CountColor">
+            @_rows.Count rows
+        </MudChip>
+        <MudSpacer />
+        <MudIconButton Icon="@(_autoRefresh ? Icons.Material.Filled.Pause : Icons.Material.Filled.PlayArrow)"
+                       Color="Color.Inherit"
+                       OnClick="@ToggleAutoRefresh"
+                       aria-label="@(_autoRefresh ? "Pause auto-refresh" : "Resume auto-refresh")" />
+        <MudIconButton Icon="@Icons.Material.Filled.Refresh" Color="Color.Inherit"
+                       OnClick="@LoadAsync" aria-label="Refresh" />
+    </MudAppBar>
+
+    <MudMainContent Class="mt-2 px-3" Style="height: calc(100dvh - 64px); display: flex; flex-direction: column;">
+        <MudPaper Elevation="0" Class="pa-2 mb-2 d-flex flex-wrap align-center" Style="gap: .5rem;">
+            <MudSelect T="string" Label="Source" Value="_source" ValueChanged="OnSourceChanged"
+                       Clearable="true" Dense="true" Style="min-width: 150px;">
+                @foreach (var s in _sources)
+                {
+                    <MudSelectItem T="string" Value="@s">@s</MudSelectItem>
+                }
+            </MudSelect>
+            <MudSelect T="string" Label="Level" Value="_level" ValueChanged="OnLevelChanged"
+                       Clearable="true" Dense="true" Style="min-width: 130px;">
+                <MudSelectItem T="string" Value="@("Critical")">Critical</MudSelectItem>
+                <MudSelectItem T="string" Value="@("Error")">Error</MudSelectItem>
+                <MudSelectItem T="string" Value="@("Warning")">Warning</MudSelectItem>
+                <MudSelectItem T="string" Value="@("Information")">Information</MudSelectItem>
+                <MudSelectItem T="string" Value="@("Debug")">Debug</MudSelectItem>
+            </MudSelect>
+            <MudTextField T="string" Label="Search" Value="_search" ValueChanged="OnSearchChanged" Adornment="Adornment.End" AdornmentIcon="@Icons.Material.Filled.Search" Immediate="false" DebounceInterval="500" Margin="Margin.Dense" Style="min-width: 200px;" />
+            <MudTextField T="string" Label="Session" Value="_sessionId" ValueChanged="OnSessionIdChanged" Margin="Margin.Dense" Style="min-width: 200px;" />
+            <MudSelect T="int" Label="Window" Value="_minutesBack" ValueChanged="OnWindowChanged" Dense="true" Style="min-width: 110px;">
+                <MudSelectItem T="int" Value="15">15 min</MudSelectItem>
+                <MudSelectItem T="int" Value="60">1 hour</MudSelectItem>
+                <MudSelectItem T="int" Value="360">6 hours</MudSelectItem>
+                <MudSelectItem T="int" Value="1440">24 hours</MudSelectItem>
+                <MudSelectItem T="int" Value="0">All</MudSelectItem>
+            </MudSelect>
+        </MudPaper>
+
+        <MudPaper Elevation="0" Outlined="true" Class="flex-grow-1" Style="overflow: auto;">
+            @if (_loading)
+            {
+                <MudProgressLinear Indeterminate="true" Color="Color.Primary" Size="Size.Small" />
+            }
+            <MudTable T="LogEventRow" Items="_rows" Dense="true" Hover="true" Striped="true"
+                      FixedHeader="true" Height="calc(100dvh - 220px)">
+                <HeaderContent>
+                    <MudTh Style="width: 170px;">Time</MudTh>
+                    <MudTh Style="width: 90px;">Level</MudTh>
+                    <MudTh Style="width: 90px;">Source</MudTh>
+                    <MudTh>Message</MudTh>
+                    <MudTh Style="width: 60px;"></MudTh>
+                </HeaderContent>
+                <RowTemplate Context="row">
+                    <MudTd>
+                        <MudText Typo="Typo.caption">@row.Timestamp.ToLocalTime().ToString("HH:mm:ss.fff")</MudText>
+                        <MudText Typo="Typo.caption" Color="Color.Default">@row.Timestamp.ToLocalTime().ToString("MMM d")</MudText>
+                    </MudTd>
+                    <MudTd>
+                        <MudChip T="string" Size="Size.Small" Color="@LevelColor(row.Level)" Variant="Variant.Filled">@row.Level</MudChip>
+                    </MudTd>
+                    <MudTd>
+                        <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">@row.Source</MudChip>
+                    </MudTd>
+                    <MudTd>
+                        <MudText Typo="Typo.body2" Class="text-truncate" Style="max-width: 60ch;">@row.Message</MudText>
+                        @if (!string.IsNullOrEmpty(row.Category))
+                        {
+                            <MudText Typo="Typo.caption" Color="Color.Default">@row.Category</MudText>
+                        }
+                    </MudTd>
+                    <MudTd>
+                        <MudIconButton Icon="@(_expandedId == row.Id ? Icons.Material.Filled.ExpandLess : Icons.Material.Filled.ExpandMore)"
+                                       Size="Size.Small"
+                                       OnClick="@(() => Toggle(row.Id))" aria-label="Expand" />
+                    </MudTd>
+                </RowTemplate>
+                <ChildRowContent Context="row">
+                    @if (_expandedId == row.Id)
+                    {
+                        <MudTr>
+                            <td colspan="5" style="background-color: var(--mud-palette-background); padding: 1rem;">
+                                @if (!string.IsNullOrEmpty(row.Stack))
+                                {
+                                    <MudText Typo="Typo.subtitle2">Stack</MudText>
+                                    <MudPaper Elevation="0" Outlined="true" Class="pa-2 my-2">
+                                        <pre style="white-space: pre-wrap; font-size: .8em; margin: 0;">@row.Stack</pre>
+                                    </MudPaper>
+                                }
+                                @if (!string.IsNullOrEmpty(row.SessionId))
+                                {
+                                    <MudText Typo="Typo.body2"><strong>Session:</strong> @row.SessionId</MudText>
+                                }
+                                @if (!string.IsNullOrEmpty(row.Url))
+                                {
+                                    <MudText Typo="Typo.body2"><strong>URL:</strong> @row.Url</MudText>
+                                }
+                                @if (!string.IsNullOrEmpty(row.Extra))
+                                {
+                                    <MudText Typo="Typo.body2"><strong>Extra:</strong></MudText>
+                                    <pre style="white-space: pre-wrap; font-size: .8em; margin: 0;">@row.Extra</pre>
+                                }
+                                @if (!string.IsNullOrEmpty(row.UserAgent))
+                                {
+                                    <MudText Typo="Typo.caption" Color="Color.Default">@row.UserAgent</MudText>
+                                }
+                            </td>
+                        </MudTr>
+                    }
+                </ChildRowContent>
+            </MudTable>
+        </MudPaper>
+    </MudMainContent>
+</MudLayout>
+
+@code {
+    private List<LogEventRow> _rows = new();
+    private List<string> _sources = new();
+    private string? _source;
+    private string? _level;
+    private string _search = "";
+    private string _sessionId = "";
+    private int _minutesBack = 60;
+    private long? _expandedId;
+    private bool _loading;
+    private bool _autoRefresh = true;
+    private System.Threading.Timer? _timer;
+
+    private Color CountColor =>
+        _rows.Count > 0 && _rows.Any(r => r.Level is "Error" or "Critical")
+            ? Color.Error : Color.Default;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadSourcesAsync();
+        await LoadAsync();
+        _timer = new System.Threading.Timer(async _ =>
+        {
+            if (!_autoRefresh) return;
+            await InvokeAsync(LoadAsync);
+        }, null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+    }
+
+    public void Dispose()
+    {
+        _timer?.Dispose();
+    }
+
+    private async Task LoadSourcesAsync()
+    {
+        try { _sources = (await Http.GetFromJsonAsync<List<string>>("api/log/sources")) ?? new(); }
+        catch { _sources = new(); }
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        StateHasChanged();
+        try
+        {
+            var qs = new List<string> { "limit=500" };
+            if (!string.IsNullOrEmpty(_source))    qs.Add($"source={Uri.EscapeDataString(_source)}");
+            if (!string.IsNullOrEmpty(_level))     qs.Add($"level={Uri.EscapeDataString(_level)}");
+            if (!string.IsNullOrEmpty(_search))    qs.Add($"search={Uri.EscapeDataString(_search)}");
+            if (!string.IsNullOrEmpty(_sessionId)) qs.Add($"sessionId={Uri.EscapeDataString(_sessionId)}");
+            if (_minutesBack > 0)
+            {
+                var since = DateTimeOffset.UtcNow.AddMinutes(-_minutesBack).ToUnixTimeMilliseconds();
+                qs.Add($"since={since}");
+            }
+            var url = "api/log?" + string.Join("&", qs);
+            _rows = (await Http.GetFromJsonAsync<List<LogEventRow>>(url)) ?? new();
+        }
+        catch (Exception ex)
+        {
+            _rows = new();
+            // Don't recurse: this page itself failing to fetch logs is just
+            // shown as empty + the snack. We'd loop forever otherwise.
+            Console.Error.WriteLine($"logs page load failed: {ex.Message}");
+        }
+        finally
+        {
+            _loading = false;
+            StateHasChanged();
+        }
+    }
+
+    private void Toggle(long id)
+    {
+        _expandedId = _expandedId == id ? null : id;
+    }
+
+    private void ToggleAutoRefresh() { _autoRefresh = !_autoRefresh; }
+
+    private async Task OnSourceChanged(string? v) { _source = v; await LoadAsync(); }
+    private async Task OnLevelChanged(string? v) { _level = v; await LoadAsync(); }
+    private async Task OnSearchChanged(string v) { _search = v ?? ""; await LoadAsync(); }
+    private async Task OnSessionIdChanged(string v) { _sessionId = v ?? ""; await LoadAsync(); }
+    private async Task OnWindowChanged(int v) { _minutesBack = v; await LoadAsync(); }
+
+    private static Color LevelColor(string level) => level switch
+    {
+        "Critical" => Color.Error,
+        "Error"    => Color.Error,
+        "Warning"  => Color.Warning,
+        "Debug"    => Color.Default,
+        _          => Color.Info,
+    };
+
+    public sealed record LogEventRow(
+        long Id,
+        DateTimeOffset Timestamp,
+        string Source,
+        string Level,
+        string? Category,
+        string Message,
+        string? Stack,
+        string? SessionId,
+        string? Extra,
+        string? UserAgent,
+        string? Url);
+}

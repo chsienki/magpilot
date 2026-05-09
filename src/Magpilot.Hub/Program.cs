@@ -10,6 +10,8 @@ builder.Services.AddSingleton<AgentRegistry>();
 builder.Services.AddSingleton<AgentHttpClient>();
 builder.Services.AddSingleton<DiscoveryProber>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<DiscoveryProber>());
+builder.Services.AddSingleton<Magpilot.Hub.Logging.LogStore>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<Magpilot.Hub.Logging.LogStore>());
 // Short timeout for control-plane calls so a single dead agent can't stall
 // SPA aggregation. SSE proxy uses a separate client with no timeout.
 var agentTimeoutSec = builder.Configuration.GetValue("Hub:AgentHttpTimeoutSec", 10);
@@ -58,6 +60,7 @@ app.UseAuthorization();
 app.MapGet("/healthz", () => Results.Ok(new { ok = true }));
 app.MapGitHubOAuth();
 app.MapHubApi();
+app.MapLogApi();
 
 // SPA fallback: any unmatched, non-API path -> index.html.
 app.MapFallbackToFile("index.html");

@@ -1,4 +1,7 @@
 @inherits LayoutComponentBase
+@inject NavigationManager Nav
+@inject Magpilot.UI.Services.HubLogClient HubLog
+@implements IDisposable
 
 <MudThemeProvider Theme="MagpilotTheme.Default" @bind-IsDarkMode="_isDarkMode" />
 <MudPopoverProvider />
@@ -24,9 +27,24 @@
         StateHasChanged();
     }
 
+    protected override void OnInitialized()
+    {
+        // Track navigation so each subsequent log event records which page
+        // raised it. Saved by HubLogClient and shown in /admin/logs.
+        Nav.LocationChanged += OnLocationChanged;
+        HubLog.SetCurrentUrl(Nav.Uri);
+    }
+
+    private void OnLocationChanged(object? sender, Microsoft.AspNetCore.Components.Routing.LocationChangedEventArgs e)
+        => HubLog.SetCurrentUrl(e.Location);
+
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         if (!firstRender) return;
+
+        // Pick up the persisted dark mode + capture browser User-Agent into
+        // the hub-log client so server-side viewer rows show which device
+        // raised the error.
         try
         {
             var stored = await JS.InvokeAsync<string?>("localStorage.getItem", DarkModeKey);
@@ -37,5 +55,21 @@
             }
         }
         catch { }
+
+        try
+        {
+            var ua = await JS.InvokeAsync<string?>("eval", "navigator.userAgent");
+            if (!string.IsNullOrEmpty(ua)) HubLog.SetUserAgent(ua);
+        }
+        catch { }
+
+        // Install window.onerror + unhandledrejection -> CaptureJsError bridge.
+        try { await JS.InvokeVoidAsync("magpilot.installErrorCapture"); }
+        catch (Exception ex)
+        {
+            HubLog.LogError("installErrorCapture failed", ex.ToString(), category: nameof(MainLayout));
+        }
     }
+
+    public void Dispose() => Nav.LocationChanged -= OnLocationChanged;
 }

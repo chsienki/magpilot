@@ -24,4 +24,25 @@ builder.Services.AddScoped(sp =>
     return new HubClient(http, auth);
 });
 
-await builder.Build().RunAsync();
+// Central log forwarder: dedicated HttpClient (separate from HubClient so a
+// stuck data fetch can't starve log egress and vice-versa). Singleton so the
+// in-memory queue is shared across components.
+builder.Services.AddSingleton(sp =>
+{
+    var auth = sp.GetRequiredService<IHubAuthProvider>();
+    var js = sp.GetRequiredService<Microsoft.JSInterop.IJSRuntime>();
+    var http = new HttpClient(new IncludeCredentialsHandler(js))
+    {
+        BaseAddress = new Uri(builder.HostEnvironment.BaseAddress),
+    };
+    return new HubLogClient(http, auth);
+});
+
+var host = builder.Build();
+
+// Resolve the singleton once and stash it on the static JS-error bridge so
+// window.onerror / unhandledrejection handlers can reach it without a
+// per-component DotNetObjectReference.
+JsErrorBridge.Configure(host.Services.GetRequiredService<HubLogClient>());
+
+await host.RunAsync();

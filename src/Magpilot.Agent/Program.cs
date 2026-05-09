@@ -1,6 +1,7 @@
 using Magpilot.Agent.Acp;
 using Magpilot.Agent.Api;
 using Magpilot.Agent.Discovery;
+using Magpilot.Agent.Logging;
 using Magpilot.Agent.Sessions;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.Extensions.Options;
@@ -8,6 +9,10 @@ using System.Security.Claims;
 using System.Text.Encodings.Web;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Forward Warning+ logs to the central hub. No-ops if MAGPILOT_HUB_URL +
+// MAGPILOT_HUB_BEARER aren't set, so dev runs without a hub still work.
+builder.Logging.AddProvider(new HubLoggerProvider());
 
 builder.Services.AddSingleton<FlavorCapabilities>();
 builder.Services.AddSingleton<AcpFlavorPool>();
