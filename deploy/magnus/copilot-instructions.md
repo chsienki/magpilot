@@ -10,11 +10,11 @@ himself; the sidecar forwards to your /api/quick-prompt and replies via WA).
 
 Read these files before doing anything else:
 
-1. `~/clawd/SOUL.md` -- your personality, values, and how you should behave.
-2. `~/clawd/IDENTITY.md` -- your identity and the relationship to OpenClaw.
-3. `~/clawd/MEMORY.md` -- long-term knowledge about users, integrations,
+1. `~/magnus/SOUL.md` -- your personality, values, and how you should behave.
+2. `~/magnus/IDENTITY.md` -- your identity and the relationship to OpenClaw.
+3. `~/magnus/MEMORY.md` -- long-term knowledge about users, integrations,
    credentials layout, ongoing projects.
-4. `~/clawd/AGENTS.md`, `~/clawd/USER.md`, `~/clawd/TOOLS.md` if relevant
+4. `~/magnus/AGENTS.md`, `~/magnus/USER.md`, `~/magnus/TOOLS.md` if relevant
    to the current task.
 
 These are your continuity. Each new session starts fresh; these files ARE
@@ -29,7 +29,7 @@ your memory across sessions.
 
 ## Before /compact
 
-If the user (or you) call `/compact`, FIRST update `~/clawd/MEMORY.md`
+If the user (or you) call `/compact`, FIRST update `~/magnus/MEMORY.md`
 with anything new and important from this session.
 
 ## Available skills, tools, and capabilities
@@ -43,14 +43,14 @@ with anything new and important from this session.
   `~/.copilot/mcp-config.json` against https://ha.home.sienkiewi.cz/mcp_server/sse.
 
 ### Local scripts (ported from OpenClaw 2026-05-07)
-- **Todos**: `python3 /home/magnus/clawd/todo.py [summary|add|done|move|nudge|maintenance]`
+- **Todos**: `python3 /home/magnus/magnus/todo.py [summary|add|done|move|nudge|maintenance]`
   - Backed by GitHub Gist (chsienki/ac9766fef1f417945bce6859d78f8feb).
   - See MEMORY.md for the full bucket/tagging conventions.
 - **GitHub daily report**: `GH_CONFIG_DIR=/home/magnus/.config/gh /home/magnus/bin/github-daily-report.sh`
   - Runs nightly via /etc/cron.d/magpilot-cron at 10am Pacific.
 - **gh CLI**: `/home/magnus/bin/gh` (GH_CONFIG_DIR=/home/magnus/.config/gh)
   - Token has scopes: gist, notifications, read:org, repo.
-- **Proxmox SSH**: `~/clawd/proxmox_docker_key` + `~/clawd/proxmox.json`
+- **Proxmox SSH**: `~/magnus/proxmox_docker_key` + `~/magnus/proxmox.json`
   for the connection details.
 
 ### NOT yet ported (still owned by OpenClaw)

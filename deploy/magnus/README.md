@@ -4,7 +4,7 @@ This directory holds the deployment artifacts for **Magnus**, an always-on
 Magpilot agent that runs in a Docker container on LXC 102 alongside the
 magpilot-hub stack. Magnus's job is to host a long-running session that
 the user can talk to from anywhere via the Magpilot SPA, with persistent
-memory in `~/clawd/` and skills/MCPs configured under `~/.copilot/`.
+memory in `~/magnus/` and skills/MCPs configured under `~/.copilot/`.
 
 It exists to absorb the role that OpenClaw plays today (an always-on,
 multi-channel personal assistant) while keeping Magpilot's clean

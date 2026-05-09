@@ -42,7 +42,7 @@ RUN useradd -m -u 1000 -s /bin/bash magnus
 WORKDIR /app
 COPY --from=build /publish-agent/ ./
 
-# Bootstrap script runs at container start: ensures clawd/MEMORY etc exist,
+# Bootstrap script runs at container start: ensures magnus/MEMORY etc exist,
 # launches the agent, then (after agent is up) creates-or-adopts Magnus's
 # always-on session.
 COPY src/Magpilot.Agent/bootstrap.sh /usr/local/bin/bootstrap.sh

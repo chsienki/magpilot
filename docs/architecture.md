@@ -441,7 +441,7 @@ with other sidecars. Magpilot doesn't need to know you exist.
     home/                  <- bind-mounted to /home/magnus inside container
       .copilot/            <- skills, mcp-config.json, copilot-instructions.md
       .magnus/.session-id  <- the well-known pinned session id
-      clawd/               <- MEMORY/SOUL/IDENTITY + ported scripts (todo.py etc)
+      magnus/              <- MEMORY/SOUL/IDENTITY + ported scripts (todo.py etc)
       bin/                 <- gh, github-daily-report.sh
       copilot-context/     <- task-context contents
   magpilot-whatsapp/       <- WA sidecar
@@ -472,7 +472,7 @@ with other sidecars. Magpilot doesn't need to know you exist.
 - **Adopt** -- bring a dormant session back online by respawning ACP wiring
   and replaying events.
 - **MEMORY.md / SOUL.md / IDENTITY.md** -- convention from OpenClaw,
-  carried into Magnus. Knowledge files in `~/clawd/` that the model reads
+  carried into Magnus. Knowledge files in `~/magnus/` that the model reads
   at session start and updates before /compact.
 
 ## UI / SPA

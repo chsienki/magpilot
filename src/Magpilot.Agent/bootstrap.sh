@@ -21,14 +21,17 @@ HOME_DIR=/home/magnus
 STATE_DIR="${HOME_DIR}/.magnus"
 SESSION_ID_FILE="${STATE_DIR}/.session-id"
 OPS_SESSION_ID_FILE="${STATE_DIR}/.operations-session-id"
-CLAWD_DIR="${HOME_DIR}/clawd"
+# Magnus's working directory: holds MEMORY.md, IDENTITY.md, todo.py, proxmox keys,
+# and is the cwd of both pinned sessions. Renamed from the original "clawd"
+# (legacy from OpenClaw) to match the persona.
+MAGNUS_DIR="${HOME_DIR}/magnus"
 TOKEN="${MAGPILOT_AGENT_TOKEN:-dev-token}"
 AGENT_URL="http://127.0.0.1:5099"
 
 log() { echo "[bootstrap] $*"; }
 
 # --- 1. fix up ownership / ensure dirs exist (runs as root on entry) ---
-mkdir -p "${HOME_DIR}" "${STATE_DIR}" "${CLAWD_DIR}" \
+mkdir -p "${HOME_DIR}" "${STATE_DIR}" "${MAGNUS_DIR}" \
          "${HOME_DIR}/.copilot" "${HOME_DIR}/copilot-context"
 chown -R magnus:magnus "${HOME_DIR}"
 
@@ -47,7 +50,7 @@ chown -R magnus:magnus "${HOME_DIR}"
     # write the new id to the given path. Returns the new sid on stdout.
     create_session() {
         local label="$1"            # e.g. "Magnus" or "Operations"
-        local cwd="$2"              # e.g. /home/magnus/clawd
+        local cwd="$2"              # e.g. /home/magnus/magnus
         local id_file="$3"          # where to persist the sid
         local warmup_prompt="$4"    # initialisation prompt
         log "Creating ${label} session..."
@@ -97,7 +100,7 @@ chown -R magnus:magnus "${HOME_DIR}"
 
     # --- Magnus (user-facing) ---
     if [[ ! -s "${SESSION_ID_FILE}" ]]; then
-        create_session "Magnus" "${CLAWD_DIR}" "${SESSION_ID_FILE}" \
+        create_session "Magnus" "${MAGNUS_DIR}" "${SESSION_ID_FILE}" \
             "Initialising memory. Reply with one word: ready." >/dev/null || true
     else
         poke_dormant "$(cat ${SESSION_ID_FILE})" "Magnus"
@@ -105,7 +108,7 @@ chown -R magnus:magnus "${HOME_DIR}"
 
     # --- Operations (cron / scheduled jobs) ---
     if [[ ! -s "${OPS_SESSION_ID_FILE}" ]]; then
-        create_session "Operations" "${CLAWD_DIR}" "${OPS_SESSION_ID_FILE}" \
+        create_session "Operations" "${MAGNUS_DIR}" "${OPS_SESSION_ID_FILE}" \
             "I am the Operations channel. Reply: ready." >/dev/null || true
     else
         poke_dormant "$(cat ${OPS_SESSION_ID_FILE})" "Operations"

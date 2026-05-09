@@ -8,15 +8,15 @@ set -euo pipefail
 OC=/srv/openclaw/home
 MG=/srv/magpilot-agent/home
 
-mkdir -p "${MG}/clawd" "${MG}/bin" "${MG}/.config/gh" "${MG}/keys"
+mkdir -p "${MG}/magnus" "${MG}/bin" "${MG}/.config/gh" "${MG}/keys"
 
 # --- Todo scripts (gist-backed) ---
 for f in todo.py todo.mjs todo-maintenance.mjs; do
-  sed 's|/home/node/|/home/magnus/|g' "${OC}/clawd/${f}" > "${MG}/clawd/${f}"
-  chmod 600 "${MG}/clawd/${f}"
-  echo "[port] clawd/${f}"
+  sed 's|/home/node/|/home/magnus/|g' "${OC}/clawd/${f}" > "${MG}/magnus/${f}"
+  chmod 600 "${MG}/magnus/${f}"
+  echo "[port] magnus/${f}"
 done
-chmod 700 "${MG}/clawd/todo.py"  # python script, executable
+chmod 700 "${MG}/magnus/todo.py"  # python script, executable
 
 # --- gh CLI binary + auth (classic PAT works for gh itself) ---
 cp -a "${OC}/bin/gh" "${MG}/bin/gh"
@@ -34,18 +34,18 @@ chmod 755 "${MG}/bin/github-daily-report.sh"
 echo "[port] bin/github-daily-report.sh"
 
 # --- Proxmox SSH key (for accessing the Proxmox host or LXC neighbours) ---
-cp "${OC}/clawd/proxmox.json" "${MG}/clawd/proxmox.json"
-cp "${OC}/clawd/proxmox_docker_key" "${MG}/clawd/proxmox_docker_key"
-cp "${OC}/clawd/proxmox_docker_key.pub" "${MG}/clawd/proxmox_docker_key.pub"
-chmod 600 "${MG}/clawd/proxmox.json" "${MG}/clawd/proxmox_docker_key"
-chmod 644 "${MG}/clawd/proxmox_docker_key.pub"
-echo "[port] clawd/proxmox.{json,_docker_key,_docker_key.pub}"
+cp "${OC}/clawd/proxmox.json" "${MG}/magnus/proxmox.json"
+cp "${OC}/clawd/proxmox_docker_key" "${MG}/magnus/proxmox_docker_key"
+cp "${OC}/clawd/proxmox_docker_key.pub" "${MG}/magnus/proxmox_docker_key.pub"
+chmod 600 "${MG}/magnus/proxmox.json" "${MG}/magnus/proxmox_docker_key"
+chmod 644 "${MG}/magnus/proxmox_docker_key.pub"
+echo "[port] magnus/proxmox.{json,_docker_key,_docker_key.pub}"
 
 # --- Patch MEMORY.md so Magnus knows the tools are now local on him ---
 # Insert a note at the top describing the port. Idempotent: only insert if
 # the marker isn't already present.
 MARKER="<!-- magnus-port-note -->"
-if ! grep -q "${MARKER}" "${MG}/clawd/MEMORY.md"; then
+if ! grep -q "${MARKER}" "${MG}/magnus/MEMORY.md"; then
   TMP=$(mktemp)
   cat > "${TMP}" <<EOF
 ${MARKER}
@@ -56,8 +56,8 @@ ${MARKER}
 > for now (they have shared refresh tokens that we don't want to race on)._
 
 EOF
-  cat "${MG}/clawd/MEMORY.md" >> "${TMP}"
-  mv "${TMP}" "${MG}/clawd/MEMORY.md"
+  cat "${MG}/magnus/MEMORY.md" >> "${TMP}"
+  mv "${TMP}" "${MG}/magnus/MEMORY.md"
   echo "[port] inserted port-note into MEMORY.md"
 fi
 

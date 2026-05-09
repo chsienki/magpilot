@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# Phase B setup: seed Magnus's clawd/, install task-context skill, write
+# Phase B setup: seed Magnus's magnus/, install task-context skill, write
 # user-level copilot-instructions.md. Run as root inside the LXC.
 set -euo pipefail
 
 MAGNUS_HOME=/srv/magpilot-agent/home
 OPENCLAW_HOME=/srv/openclaw/home
 
-# --- 1. Seed clawd/ from openclaw's existing files. ---
+# --- 1. Seed magnus/ from openclaw's clawd/'s existing files. ---
 # Copy the knowledge files (MEMORY/SOUL/IDENTITY/AGENTS/USER/TOOLS/HEARTBEAT)
 # only -- not the credential-bearing scripts/tokens. Those stay with OpenClaw
 # until the cutover phase.
-mkdir -p "${MAGNUS_HOME}/clawd"
+mkdir -p "${MAGNUS_HOME}/magnus"
 for f in MEMORY.md SOUL.md IDENTITY.md AGENTS.md USER.md TOOLS.md HEARTBEAT.md; do
   if [[ -f "${OPENCLAW_HOME}/clawd/${f}" ]]; then
     # Replace /home/node references (OpenClaw's home) with /home/magnus,
     # so paths in MEMORY.md point at Magnus's filesystem.
     sed 's|/home/node/|/home/magnus/|g' "${OPENCLAW_HOME}/clawd/${f}" \
-      > "${MAGNUS_HOME}/clawd/${f}"
-    echo "[B1] seeded clawd/${f}"
+      > "${MAGNUS_HOME}/magnus/${f}"
+    echo "[B1] seeded magnus/${f}"
   fi
 done
 
@@ -32,8 +32,8 @@ cat > "${TMP}" <<'EOF'
 > as your context fills; rewrite it before /compact._
 
 EOF
-cat "${MAGNUS_HOME}/clawd/MEMORY.md" >> "${TMP}"
-mv "${TMP}" "${MAGNUS_HOME}/clawd/MEMORY.md"
+cat "${MAGNUS_HOME}/magnus/MEMORY.md" >> "${TMP}"
+mv "${TMP}" "${MAGNUS_HOME}/magnus/MEMORY.md"
 
 # --- 2. copilot-context: copy from openclaw's existing clone (private repo;
 #         no need to re-auth git just to seed it). Magnus can `git pull`
@@ -108,11 +108,11 @@ WhatsApp + cron sidecars that talk to the Magpilot HTTP API.
 
 Read these files before doing anything else:
 
-1. `~/clawd/SOUL.md` -- your personality, values, and how you should behave.
-2. `~/clawd/IDENTITY.md` -- your identity and the relationship to OpenClaw.
-3. `~/clawd/MEMORY.md` -- long-term knowledge about users, integrations,
+1. `~/magnus/SOUL.md` -- your personality, values, and how you should behave.
+2. `~/magnus/IDENTITY.md` -- your identity and the relationship to OpenClaw.
+3. `~/magnus/MEMORY.md` -- long-term knowledge about users, integrations,
    credentials layout, ongoing projects.
-4. `~/clawd/AGENTS.md`, `~/clawd/USER.md`, `~/clawd/TOOLS.md` if relevant
+4. `~/magnus/AGENTS.md`, `~/magnus/USER.md`, `~/magnus/TOOLS.md` if relevant
    to the current task.
 
 These are your continuity. Each new session starts fresh; these files ARE
@@ -127,7 +127,7 @@ your memory across sessions.
 
 ## Before /compact
 
-If the user (or you) call `/compact`, FIRST update `~/clawd/MEMORY.md`
+If the user (or you) call `/compact`, FIRST update `~/magnus/MEMORY.md`
 with anything new and important from this session. Compaction loses
 ephemeral context; MEMORY is what survives.
 
