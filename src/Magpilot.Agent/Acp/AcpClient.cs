@@ -45,7 +45,16 @@ public sealed class AcpClient : IAsyncDisposable
         // launches that exact binary -- the same one the user gets at the
         // command line.
         var resolvedExe = ResolveOnPath(_exe) ?? _exe;
-        var psi = new ProcessStartInfo(resolvedExe, _args)
+
+        // The Copilot CLI's --acp mode does NOT auto-load enabled plugins
+        // from settings.json the way the interactive CLI does. Discover the
+        // user's enabled plugins ourselves and append --plugin-dir for each
+        // so skills like task-context, revue etc are available inside ACP
+        // sessions just as they are at the interactive prompt.
+        var pluginArgs = BuildPluginDirArgs();
+        var fullArgs = string.IsNullOrEmpty(pluginArgs) ? _args : $"{_args} {pluginArgs}";
+
+        var psi = new ProcessStartInfo(resolvedExe, fullArgs)
         {
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
@@ -56,7 +65,7 @@ public sealed class AcpClient : IAsyncDisposable
             StandardErrorEncoding = Encoding.UTF8,
         };
         _proc = Process.Start(psi) ?? throw new InvalidOperationException($"Failed to start {resolvedExe}");
-        _logger.LogInformation("Started {Exe} {Args} pid={Pid}", resolvedExe, _args, _proc.Id);
+        _logger.LogInformation("Started {Exe} {Args} pid={Pid}", resolvedExe, fullArgs, _proc.Id);
 
         _ = Task.Run(() => DrainStderrAsync(ct));
         _ = Task.Run(() => ReadLoopAsync(ct));
@@ -157,6 +166,55 @@ public sealed class AcpClient : IAsyncDisposable
         }
         return null;
     }
+
+    /// <summary>
+    /// Read ~/.copilot/settings.json and emit a <c>--plugin-dir &lt;path&gt;</c>
+    /// flag for each enabled plugin's cache directory. The Copilot CLI's
+    /// <c>--acp</c> mode does not auto-load plugins from settings the way
+    /// the interactive CLI does, so we forward them explicitly.
+    /// </summary>
+    private string BuildPluginDirArgs()
+    {
+        try
+        {
+            var home = Environment.GetEnvironmentVariable("HOME")
+                ?? Environment.GetEnvironmentVariable("USERPROFILE")
+                ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (string.IsNullOrEmpty(home)) return "";
+
+            var settingsPath = Path.Combine(home, ".copilot", "settings.json");
+            if (!File.Exists(settingsPath)) return "";
+
+            using var fs = File.OpenRead(settingsPath);
+            var root = JsonNode.Parse(fs);
+            if (root?["installedPlugins"] is not JsonArray plugins) return "";
+
+            var args = new StringBuilder();
+            int loaded = 0;
+            foreach (var p in plugins)
+            {
+                if (p is null) continue;
+                if (p["enabled"]?.GetValue<bool>() != true) continue;
+                var cache = p["cache_path"]?.GetValue<string>();
+                if (string.IsNullOrEmpty(cache) || !Directory.Exists(cache)) continue;
+                if (args.Length > 0) args.Append(' ');
+                args.Append("--plugin-dir ");
+                args.Append(QuoteIfNeeded(cache));
+                loaded++;
+            }
+            if (loaded > 0)
+                _logger.LogInformation("Forwarding {Count} enabled plugin(s) to ACP child via --plugin-dir", loaded);
+            return args.ToString();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to discover enabled plugins from settings.json; ACP child will run without them");
+            return "";
+        }
+    }
+
+    private static string QuoteIfNeeded(string s) =>
+        s.Contains(' ') ? $"\"{s}\"" : s;
 
     private async Task WriteLoopAsync(CancellationToken ct)
     {
