@@ -259,3 +259,5 @@ If you implement any of these, update `docs/plan.md` and this file.
 - 2026-05-07: Rename the clawd folder on the magnus server to be magnus
 - 2026-05-07: /commands aren't routed through to copilot (likely --acp); add UI controls (options or slash commands) for context, session name, and other options
 - 2026-05-07: Separate stripped-down agent app for magnus -- share the base rendering code, ship a thin assistant-only app
+- 2026-05-08: Improve the loading screen
+- 2026-05-08: Logo consolidation -- drop the agents logo entirely, use the magpi logo on the no-agents screen and elsewhere, and remove the magpi logo from the header
