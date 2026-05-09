@@ -32,8 +32,97 @@ log() { echo "[bootstrap] $*"; }
 
 # --- 1. fix up ownership / ensure dirs exist (runs as root on entry) ---
 mkdir -p "${HOME_DIR}" "${STATE_DIR}" "${MAGNUS_DIR}" \
-         "${HOME_DIR}/.copilot" "${HOME_DIR}/copilot-context"
+         "${HOME_DIR}/.copilot" "${HOME_DIR}/copilot-context" \
+         "${HOME_DIR}/.copilot/installed-plugins/chsienki"
 chown -R magnus:magnus "${HOME_DIR}"
+
+# --- 2. context-repos / settings.json scaffold ---
+# task-context plugin reads ~/.copilot/context-repos.json to know which
+# repos contain context.md folders. We seed it with the local
+# copilot-context clone if it isn't already configured. Same for
+# settings.json -- it needs the plugin marked enabled so the agent's
+# AcpClient.BuildPluginDirArgs picks it up via --plugin-dir.
+if [[ ! -s "${HOME_DIR}/.copilot/context-repos.json" ]]; then
+    cat > "${HOME_DIR}/.copilot/context-repos.json" <<EOF
+{
+  "repos": [
+    {
+      "alias": "copilot-context",
+      "path": "${HOME_DIR}/copilot-context"
+    }
+  ]
+}
+EOF
+    chown magnus:magnus "${HOME_DIR}/.copilot/context-repos.json"
+    log "wrote default context-repos.json"
+fi
+
+if [[ ! -s "${HOME_DIR}/.copilot/settings.json" ]]; then
+    cat > "${HOME_DIR}/.copilot/settings.json" <<EOF
+{
+  "installedPlugins": [
+    {
+      "name": "task-context",
+      "marketplace": "chsienki",
+      "enabled": true,
+      "cache_path": "${HOME_DIR}/.copilot/installed-plugins/chsienki/task-context"
+    }
+  ]
+}
+EOF
+    chown magnus:magnus "${HOME_DIR}/.copilot/settings.json"
+    log "wrote default settings.json (task-context enabled)"
+fi
+
+# --- 3. clone / refresh the task-context plugin ---
+# Private repo; uses the gh CLI auth that the port-lowrisk.sh script
+# planted at /home/magnus/.config/gh/. If gh isn't authenticated we just
+# skip and let the user fix it; bootstrap mustn't block agent startup
+# on plugin sync failures.
+PLUGIN_DIR="${HOME_DIR}/.copilot/installed-plugins/chsienki/task-context"
+
+# 3a. one-time git wiring as the magnus user: safe.directory exemption
+# (host UID/GID can mismatch confusingly across rebuilds) and gh as the
+# HTTPS credential helper so private repo clones / pulls just work.
+if [[ ! -f "${HOME_DIR}/.gitconfig" ]] || ! grep -q "gh auth git-credential" "${HOME_DIR}/.gitconfig" 2>/dev/null; then
+    log "configuring git: safe.directory + gh credential helper"
+    su - magnus -c '
+        set -e
+        git config --global --add safe.directory "*"
+        export GH_CONFIG_DIR=/home/magnus/.config/gh
+        /home/magnus/bin/gh auth setup-git
+    ' || log "git wiring failed (gh not authenticated yet?)"
+fi
+
+if [[ ! -d "${PLUGIN_DIR}/.git" ]]; then
+    log "cloning chsienki/task-context plugin..."
+    su - magnus -c "GH_CONFIG_DIR=${HOME_DIR}/.config/gh ${HOME_DIR}/bin/gh repo clone chsienki/task-context ${PLUGIN_DIR} -- --depth 1" \
+        && log "task-context plugin cloned" \
+        || log "task-context plugin clone failed (gh auth missing? skill will not load)"
+else
+    log "task-context plugin present, pulling latest..."
+    su - magnus -c "git -C ${PLUGIN_DIR} pull --quiet" \
+        || log "task-context plugin pull failed (continuing)"
+fi
+
+# --- 4. refresh copilot-context so contexts are current ---
+# The plugin also runs `git pull` on each repo when the skill is invoked,
+# but we do an early pull at boot so fresh sessions see today's state.
+if [[ -d "${HOME_DIR}/copilot-context/.git" ]]; then
+    su - magnus -c "git -C ${HOME_DIR}/copilot-context pull --quiet" \
+        && log "copilot-context up to date" \
+        || log "copilot-context pull failed (continuing)"
+fi
+
+# --- 5. retire the legacy phase-B stub at ~/.copilot/skills/task-context ---
+# That one was a hand-written linux-only SKILL.md placed before the real
+# plugin was wired up. Remove it so we don't have two entries with the
+# same name competing for the model's attention.
+LEGACY_STUB="${HOME_DIR}/.copilot/skills/task-context"
+if [[ -d "${LEGACY_STUB}" && -d "${PLUGIN_DIR}" ]]; then
+    rm -rf "${LEGACY_STUB}"
+    log "removed legacy task-context stub (replaced by plugin clone)"
+fi
 
 (
     sleep 3
