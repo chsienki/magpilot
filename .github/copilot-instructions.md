@@ -451,9 +451,21 @@ If you implement any of these, update `docs/plan.md` and this file.
 
 <!-- Mirrored from copilot-context/ideas/inbox.md. Newest at the bottom. -->
 
-- 2026-05-07: /commands aren't routed through to copilot (likely --acp); add UI controls (options or slash commands) for context, session name, and other options
-- 2026-05-07: Separate stripped-down agent app for magnus -- share the base rendering code, ship a thin assistant-only app
-- 2026-05-08: Improve the loading screen
-- 2026-05-08: Logo consolidation -- drop the agents logo entirely, use the magpi logo on the no-agents screen and elsewhere, and remove the magpi logo from the header
-- 2026-05-11: Consistent branding -- move the bird to be the agents logo, both on the side and main
-- 2026-05-11: Nice loading screen instead of the default Blazor one
+The active backlog has been promoted out of one-liners into developed
+project files in chsienki/copilot-context/ideas/projects/:
+
+- **magpilot-ui-controls** -- expose CLI-only controls in the SPA
+  (load context into a fresh session, rename, set agent mode, add dir,
+  etc). /commands aren't routed through `--acp` so these need to be
+  UI affordances rather than slash syntax. Distinct from preflight,
+  which solves the *pre-session* "load context" case as a separate
+  site -- this is the *during-session* case inside the SPA.
+- **magpilot-brand-sweep** -- one-pass visual consolidation across
+  both magpilot SPAs (magpilot.home + magnus.home): the bird becomes
+  THE agents logo (drop from headers, use on agents-list bullets +
+  empty states), and the default Blazor loading screen gets replaced
+  with a MudBlazor-themed loader.
+
+(Both project files are private to copilot-context. The summaries
+above are the magpilot-side pointer so this codebase's agents
+remember they exist and don't accidentally re-litigate them.)
