@@ -160,7 +160,7 @@
     cursor: not-allowed;
 }
 
-/* Typing dots while Magnus is thinking. */
+/* Typing dots while the assistant is thinking. */
 .thinking-dots {
     display: inline-flex;
     gap: 0.3em;

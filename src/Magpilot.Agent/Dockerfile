@@ -64,8 +64,10 @@ RUN chmod +x /usr/local/bin/bootstrap.sh
 ENV ASPNETCORE_URLS=http://0.0.0.0:5099 \
     DOTNET_RUNNING_IN_CONTAINER=true \
     HOME=/home/magnus \
-    MAGPILOT_AGENT_NAME=magnus \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# (MAGPILOT_AGENT_NAME deliberately unset; HubLoggerProvider falls back to
+#  Environment.MachineName which is the right default for any host.)
 
 EXPOSE 5099
 

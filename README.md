@@ -68,40 +68,47 @@ codebase** (MAUI Blazor Hybrid):
 
 ## Components
 
-| Name             | What                                                     | Where it runs              |
-|------------------|----------------------------------------------------------|----------------------------|
-| `copilot-agent`  | ACP-to-HTTP/SSE adapter, one per machine                 | HENDRIK, Mac, etc.         |
-| `copilot-hub`    | Aggregator, discovery, push, OAuth, serves the web SPA   | docker LXC (CT 102)        |
-| `Magpilot.UI`   | Shared Blazor UI library (chat, sessions tree, modals)   | Phone WebView + browser    |
-| `Magpilot.Web`  | Blazor WASM shell for browsers                           | Browser, served by hub     |
-| `CopilotChat.Maui` | MAUI Blazor Hybrid shell for the phone                 | Pixel (later: iOS, macOS)  |
+| Name              | What                                                     | Where it runs              |
+|-------------------|----------------------------------------------------------|----------------------------|
+| `Magpilot.Agent`  | ACP-to-HTTP/SSE adapter, one per machine                 | HENDRIK, Linux container, etc. |
+| `Magpilot.Hub`    | Aggregator, discovery, OAuth, central log, serves the web SPA | docker LXC (CT 102)   |
+| `Magpilot.UI`     | Shared Blazor UI library (chat, sessions, theme)         | Future MAUI WebView + browser |
+| `Magpilot.Web`    | Blazor WASM shell for browsers                           | Browser, served by hub     |
+| `Magpilot.Shared` | DTOs + SSE wire types (the contract between agent + UI)  | n/a (referenced)           |
 
 ## Status
 
-**v0 scaffold (this commit):** the agent + hub + shared Blazor UI + web
-SPA all build and pass an end-to-end smoke test (hub auto-discovers the
-agent over UDP, lists past sessions on disk, creates new ACP sessions
-through the proxy, serves the WASM bundle at `/`).
+**Live since 2026-04** at `https://magpilot.home.sienkiewi.cz`. The hub
+runs on a docker LXC (CT 102), agents on each host (HENDRIK + a Linux
+container called `magnus`). Day-to-day usage covers chatting from any
+browser, hopping between Owned / Locked / Dormant sessions, full ACP
+tool-call streaming, central log viewer at `/admin/logs`.
 
-What is **NOT yet wired**: the MAUI Android shell, real FCM/Web Push
-delivery, TLS for hub<->agents, and the LXC compose deployment. See
+What is **NOT yet wired**: the MAUI Android shell (the original phone
+target), real FCM/Web Push delivery, TLS for hub<->agents (still LAN +
+bearer), and approval-prompt modals for risky tool calls. See
 `docs/plan.md` for the full roadmap.
 
 ## Repository layout
 
 ```
 magpilot/
-   Magpilot.sln
-   docs/plan.md              <- design doc (start here)
+   Magpilot.slnx
+   docs/plan.md              <- design doc (start here for the long version)
+   docs/architecture.md      <- topology + the agent HTTP contract
+   .github/copilot-instructions.md  <- orientation for AI agents working on this repo
    spikes/acp-smoke/         <- standalone ACP smoke test
    scripts/build-hub.ps1     <- builds web SPA + copies into hub wwwroot
    src/
       Magpilot.Shared/      <- DTOs, SSE event types
       Magpilot.Agent/       <- per-host daemon (ACP wrapper + HTTP/SSE API)
-      Magpilot.Hub/         <- central daemon (proxy, OAuth, SPA host)
-      Magpilot.UI/          <- shared Blazor components (chat, sessions)
-      Magpilot.Web/         <- Blazor WASM shell
-      CopilotChat.Maui/      <- MAUI Blazor Hybrid shell (TBD)
+      Magpilot.Hub/         <- central daemon (proxy, OAuth, SPA host,
+                                central /api/log sink + viewer)
+      Magpilot.UI/          <- shared Blazor components (chat, sessions,
+                                MagpilotTheme, ChatView, HubClient,
+                                HubLogClient, JsErrorBridge)
+      Magpilot.Web/         <- Blazor WASM shell for the browser
+   deploy/                   <- docker-compose + ship-image notes for the hub
 ```
 
 ## Build & run locally
@@ -121,17 +128,33 @@ dotnet run --project src/Magpilot.Agent
 # Run the hub (in another terminal)
 $env:MAGPILOT_HUB_BEARER  = "dev-bearer"
 $env:MAGPILOT_AGENT_TOKEN = "dev-token"
+$env:MAGPILOT_DEV_BYPASS_AUTH = "true"
 $env:ASPNETCORE_URLS       = "http://localhost:7088"
 dotnet run --project src/Magpilot.Hub
 
-# Open http://localhost:7088/  (web SPA, will require GitHub OAuth in prod)
+# Open http://localhost:7088/  (web SPA; OAuth bypassed in dev mode)
 # Or curl with bearer:
 #   curl -H "Authorization: Bearer dev-bearer" http://localhost:7088/api/agents
 ```
 
+See `deploy/README.md` for the LXC docker recipe.
+
+## Architectural law
+
+> **Satellites know about magpilot. Magpilot does NOT know about satellites.**
+
+If you want magpilot to do something for an external service, the right
+answer is almost always a deployment-time bootstrap hook (see
+`MAGPILOT_BOOTSTRAP_HOOK_DIR` in `src/Magpilot.Agent/bootstrap.sh`) or a
+new HTTP-API consumer, not a magpilot patch. Don't add agent-specific
+code paths or hostnames into magpilot itself.
+
 ## Related context
 
-- The home-network and openclaw task-context docs live in a separate
-  repo at `chsienki/copilot-context`. Magpilot intentionally lives
-  on its own so the codebase, issues, and history are all in one
-  place once implementation starts.
+- An example **outer-ring deployment** that consumes magpilot as a git
+  submodule + adds a personal-assistant product, a WhatsApp bridge, a
+  cron sidecar, and a context-loader on top:
+  [`chsienki/magstronaut`](https://github.com/chsienki/magstronaut)
+  (private; reach out if you'd like to see how it's wired).
+- The home-network and openclaw task-context docs for Chris's deployment
+  live in a separate repo at `chsienki/copilot-context`.

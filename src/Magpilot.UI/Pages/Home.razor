@@ -447,8 +447,11 @@
 
     private static string ShortPath(string cwd)
     {
-        // Compress home prefix and keep tail readable in narrow chips.
-        var compressed = cwd.Replace("/home/magnus/", "~/").Replace("/home/node/", "~/");
+        // Compress any /home/<user>/ prefix to ~/ for narrow display chips.
+        // Generic so any deployment's user accounts collapse cleanly --
+        // we don't want platform-specific user-name strings here.
+        var compressed = System.Text.RegularExpressions.Regex.Replace(
+            cwd, @"^/home/[^/]+/", "~/");
         if (compressed.Length <= 28) return compressed;
         return "..." + compressed[^25..];
     }

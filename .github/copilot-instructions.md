@@ -4,6 +4,22 @@
 > non-obvious gotchas, and the build/deploy workflow you need to make
 > changes confidently. The README is for humans; this file is for you.
 
+## Architectural law
+
+> **Satellites know about magpilot. Magpilot does NOT know about satellites.**
+
+Magpilot is a generic platform: a multi-host Copilot CLI multiplexer +
+SPA. External products (assistants, chat-bridges, schedulers,
+launchers) live in their own repos and consume magpilot's HTTP API.
+None of them is mentioned by name in magpilot code.
+
+If you find yourself wanting to add an `if (agent == "magnus")` branch,
+a `WhatsApp`-named class, a deployment-specific `bootstrap.sh` block, or
+a hard-coded sessionId, **stop**: the right answer is almost always
+either a deployment-time **bootstrap hook** (see
+`MAGPILOT_BOOTSTRAP_HOOK_DIR` in `src/Magpilot.Agent/bootstrap.sh`) or a
+new HTTP-API consumer in the deployer's own repo.
+
 ## What this repo is
 
 Magpilot puts the GitHub Copilot CLI on the user's phone (and any
