@@ -56,89 +56,118 @@
                Breakpoint="Breakpoint.Md"
                Elevation="1"
                Color="Color.Surface">
-        <MudDrawerHeader>
-            <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
-                <MagpieMark Size="28" Glow="true" />
+        @if (Agent is null || _showHostsPane)
+        {
+            @* Hosts pane: pick a host. Hub icon sits in the same column as the *@
+            @* host-row radio bullets so the leading edges line up vertically.   *@
+            <div class="d-flex align-center gap-2 px-4 py-3">
+                <MudIcon Icon="@Icons.Material.Filled.Hub" Size="Size.Small" />
                 <MudText Typo="Typo.subtitle1">Hosts</MudText>
-            </MudStack>
-        </MudDrawerHeader>
+            </div>
 
-        @if (_agents is null)
-        {
-            <MudList T="string" Dense="true">
-                @for (var i = 0; i < 3; i++)
-                {
-                    <MudListItem T="string" Disabled="true">
-                        <MudSkeleton Width="80%" Height="20px" />
-                    </MudListItem>
-                }
-            </MudList>
-        }
-        else if (_agents.Count == 0)
-        {
-            <MudAlert Severity="Severity.Info" Dense="true" Class="mx-3 my-2">
-                No hosts discovered yet.
-            </MudAlert>
-        }
-        else
-        {
-            <MudList T="string" Dense="true" SelectedValue="@Agent" SelectedValueChanged="@OnAgentSelected">
-                @foreach (var a in _agents)
-                {
-                    <MudListItem T="string" Value="@a.Name">
-                        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
-                            <MudIcon Icon="@(a.Online ? Icons.Material.Filled.RadioButtonChecked : Icons.Material.Filled.RadioButtonUnchecked)"
-                                     Color="@(a.Online ? Color.Success : Color.Default)"
-                                     Size="Size.Small" />
-                            <MudText Typo="Typo.body1">@a.Name</MudText>
-                            @if (a.Flavors is { Count: > 0 } flavors && flavors.Any(f => f != "default"))
-                            {
-                                <MudSpacer />
-                                @foreach (var f in flavors.Where(f => f != "default"))
+            @if (_agents is null)
+            {
+                <MudList T="string" Dense="true">
+                    @for (var i = 0; i < 3; i++)
+                    {
+                        <MudListItem T="string" Disabled="true">
+                            <MudSkeleton Width="80%" Height="20px" />
+                        </MudListItem>
+                    }
+                </MudList>
+            }
+            else if (_agents.Count == 0)
+            {
+                <MudAlert Severity="Severity.Info" Dense="true" Class="mx-3 my-2">
+                    No hosts discovered yet.
+                </MudAlert>
+            }
+            else
+            {
+                <MudList T="string" Dense="true" SelectedValue="@Agent" SelectedValueChanged="@OnAgentSelected">
+                    @foreach (var a in _agents)
+                    {
+                        <MudListItem T="string" Value="@a.Name">
+                            <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
+                                <MudIcon Icon="@(a.Online ? Icons.Material.Filled.RadioButtonChecked : Icons.Material.Filled.RadioButtonUnchecked)"
+                                         Color="@(a.Online ? Color.Success : Color.Default)"
+                                         Size="Size.Small" />
+                                <MudText Typo="Typo.body1">@a.Name</MudText>
+                                @if (a.Flavors is { Count: > 0 } flavors && flavors.Any(f => f != "default"))
                                 {
-                                    <MudChip T="string" Size="Size.Small" Color="Color.Tertiary" Variant="Variant.Outlined">@f</MudChip>
+                                    <MudSpacer />
+                                    @foreach (var f in flavors.Where(f => f != "default"))
+                                    {
+                                        <MudChip T="string" Size="Size.Small" Color="Color.Tertiary" Variant="Variant.Outlined">@f</MudChip>
+                                    }
                                 }
-                            }
-                        </MudStack>
-                    </MudListItem>
-                }
-            </MudList>
-        }
+                            </MudStack>
+                        </MudListItem>
+                    }
+                </MudList>
+            }
 
-        <MudDivider Class="my-2" />
-
-        @if (Agent is null)
-        {
-            <MudText Typo="Typo.caption" Class="px-4 py-2" Color="Color.Default">Pick a host to see its sessions.</MudText>
-        }
-        else if (_sessions is null)
-        {
-            <MudList T="string" Dense="true">
-                @for (var i = 0; i < 4; i++)
-                {
-                    <MudListItem T="string" Disabled="true">
-                        <MudSkeleton Width="90%" Height="20px" />
-                        <MudSkeleton Width="50%" Height="14px" />
-                    </MudListItem>
-                }
-            </MudList>
+            @if (Agent is not null && _showHostsPane)
+            {
+                @* Reassurance affordance: an explicit way back to the active   *@
+                @* host's sessions, so the user isn't trapped if they bounced  *@
+                @* into the hosts pane just to glance at the host list.        *@
+                <MudDivider Class="my-2" />
+                <div class="px-3 pb-3">
+                    <MudButton Variant="Variant.Text"
+                               Size="Size.Small"
+                               Color="Color.Primary"
+                               StartIcon="@Icons.Material.Filled.ArrowForward"
+                               OnClick="@(() => _showHostsPane = false)">
+                        Back to @Agent
+                    </MudButton>
+                </div>
+            }
         }
         else
         {
-            <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="0" Class="px-4 py-1">
-                <MudText Typo="Typo.subtitle2">Sessions</MudText>
+            @* Sessions pane: focused on a single host. Back arrow returns to *@
+            @* the hosts pane (without leaving the open chat).                *@
+            <div class="d-flex align-center gap-1 px-2 py-2"
+                 style="border-bottom: 1px solid var(--mud-palette-divider);">
+                <MudTooltip Text="Back to hosts">
+                    <MudIconButton Icon="@Icons.Material.Filled.ArrowBack"
+                                   Size="Size.Small"
+                                   OnClick="@GoBackToHosts"
+                                   aria-label="Back to hosts" />
+                </MudTooltip>
+                @if (_agents?.FirstOrDefault(a => a.Name == Agent) is { } currentAgent)
+                {
+                    <MudIcon Icon="@(currentAgent.Online ? Icons.Material.Filled.RadioButtonChecked : Icons.Material.Filled.RadioButtonUnchecked)"
+                             Color="@(currentAgent.Online ? Color.Success : Color.Default)"
+                             Size="Size.Small" />
+                }
+                <MudText Typo="Typo.subtitle1" Class="ml-1 text-truncate" Style="min-width: 0;">@Agent</MudText>
                 <MudSpacer />
                 <MudTooltip Text="New chat">
                     <MudIconButton Icon="@Icons.Material.Filled.Add"
                                    Size="Size.Small"
                                    Color="Color.Primary"
-                                   OnClick="@OpenNewSessionDialog" />
+                                   OnClick="@OpenNewSessionDialog"
+                                   aria-label="New chat" />
                 </MudTooltip>
-            </MudStack>
+            </div>
 
-            @if (_sessions.Count == 0)
+            @if (_sessions is null)
             {
-                <MudPaper Class="mx-3 my-2 pa-3 d-flex flex-column align-center" Elevation="0">
+                <MudList T="string" Dense="true">
+                    @for (var i = 0; i < 4; i++)
+                    {
+                        <MudListItem T="string" Disabled="true">
+                            <MudSkeleton Width="90%" Height="20px" />
+                            <MudSkeleton Width="50%" Height="14px" />
+                        </MudListItem>
+                    }
+                </MudList>
+            }
+            else if (_sessions.Count == 0)
+            {
+                <MudPaper Class="mx-3 my-3 pa-3 d-flex flex-column align-center" Elevation="0">
                     <MudIcon Icon="@Icons.Material.Filled.ChatBubbleOutline" Size="Size.Large" Color="Color.Default" />
                     <MudText Typo="Typo.body2" Class="my-2" Color="Color.Default">No sessions on @Agent yet</MudText>
                     <MudButton Variant="Variant.Filled" Color="Color.Primary"
@@ -147,71 +176,73 @@
                     </MudButton>
                 </MudPaper>
             }
-
-            @foreach (var (state, label, group) in EnumerateGroups(_sessions))
+            else
             {
-                var expanded = _expandedGroups.Contains(state);
-                var visible = expanded ? group : group.Take(CollapsedLimit).ToList();
-                var hidden = group.Count - visible.Count;
-                var (chipColor, chipIcon) = GroupVisuals(state);
+                @foreach (var (state, label, group) in EnumerateGroups(_sessions))
+                {
+                    var expanded = _expandedGroups.Contains(state);
+                    var visible = expanded ? group : group.Take(CollapsedLimit).ToList();
+                    var hidden = group.Count - visible.Count;
+                    var (chipColor, chipIcon) = GroupVisuals(state);
 
-                <MudListSubheader Class="d-flex align-center gap-1 px-4">
-                    <MudIcon Icon="@chipIcon" Size="Size.Small" Color="@chipColor" />
-                    <MudText Typo="Typo.overline" Class="ml-1">@label</MudText>
-                    <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="Color.Default" Class="ml-1">@group.Count</MudChip>
-                </MudListSubheader>
+                    <MudListSubheader Class="d-flex align-center gap-1 px-4">
+                        <MudIcon Icon="@chipIcon" Size="Size.Small" Color="@chipColor" />
+                        <MudText Typo="Typo.overline" Class="ml-1">@label</MudText>
+                        <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="Color.Default" Class="ml-1">@group.Count</MudChip>
+                    </MudListSubheader>
 
-                <MudList T="string" Dense="true" SelectedValue="@SessionId" SelectedValueChanged="@OnSessionSelected">
-                    @foreach (var s in visible)
-                    {
-                        <MudListItem T="string" Value="@s.Id" Class="py-2">
-                            <MudStack Spacing="0">
-                                <MudText Typo="Typo.body2" Class="text-truncate" Style="font-weight: 500;">
-                                    @(s.Summary ?? s.Id[..8])
-                                </MudText>
-                                <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center" Class="mt-1">
-                                    @if (!string.IsNullOrWhiteSpace(s.Repository))
-                                    {
-                                        <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Default" Icon="@Icons.Material.Filled.FolderOpen">
-                                            @s.Repository@(string.IsNullOrWhiteSpace(s.Branch) ? string.Empty : $"@{s.Branch}")
-                                        </MudChip>
-                                    }
-                                    else if (!string.IsNullOrWhiteSpace(s.Cwd))
-                                    {
-                                        <MudText Typo="Typo.caption" Color="Color.Default" Class="text-truncate" Style="max-width: 200px;" title="@s.Cwd">
-                                            @ShortPath(s.Cwd)
-                                        </MudText>
-                                    }
-                                    @if (s.UpdatedAt is { } ua)
-                                    {
-                                        <MudSpacer />
-                                        <MudText Typo="Typo.caption" Color="Color.Default">@RelativeTime(ua)</MudText>
-                                    }
+                    <MudList T="string" Dense="true" SelectedValue="@SessionId" SelectedValueChanged="@OnSessionSelected">
+                        @foreach (var s in visible)
+                        {
+                            <MudListItem T="string" Value="@s.Id" Class="py-2">
+                                <MudStack Spacing="0">
+                                    <MudText Typo="Typo.body2" Class="text-truncate" Style="font-weight: 500;">
+                                        @(s.Summary ?? s.Id[..8])
+                                    </MudText>
+                                    <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center" Class="mt-1">
+                                        @if (!string.IsNullOrWhiteSpace(s.Repository))
+                                        {
+                                            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Default" Icon="@Icons.Material.Filled.FolderOpen">
+                                                @s.Repository@(string.IsNullOrWhiteSpace(s.Branch) ? string.Empty : $"@{s.Branch}")
+                                            </MudChip>
+                                        }
+                                        else if (!string.IsNullOrWhiteSpace(s.Cwd))
+                                        {
+                                            <MudText Typo="Typo.caption" Color="Color.Default" Class="text-truncate" Style="max-width: 200px;" title="@s.Cwd">
+                                                @ShortPath(s.Cwd)
+                                            </MudText>
+                                        }
+                                        @if (s.UpdatedAt is { } ua)
+                                        {
+                                            <MudSpacer />
+                                            <MudText Typo="Typo.caption" Color="Color.Default">@RelativeTime(ua)</MudText>
+                                        }
+                                    </MudStack>
                                 </MudStack>
-                            </MudStack>
-                        </MudListItem>
-                    }
-                </MudList>
+                            </MudListItem>
+                        }
+                    </MudList>
 
-                @if (hidden > 0)
-                {
-                    <div class="px-4 pb-2">
-                        <MudButton Variant="Variant.Text" Size="Size.Small" Color="Color.Primary"
-                                   StartIcon="@Icons.Material.Filled.ExpandMore"
-                                   OnClick="@(() => ToggleGroup(state))">
-                            Show @hidden more
-                        </MudButton>
-                    </div>
-                }
-                else if (expanded && group.Count > CollapsedLimit)
-                {
-                    <div class="px-4 pb-2">
-                        <MudButton Variant="Variant.Text" Size="Size.Small" Color="Color.Default"
-                                   StartIcon="@Icons.Material.Filled.ExpandLess"
-                                   OnClick="@(() => ToggleGroup(state))">
-                            Show less
-                        </MudButton>
-                    </div>
+                    @if (hidden > 0)
+                    {
+                        <div class="px-4 pb-2">
+                            <MudButton Variant="Variant.Text" Size="Size.Small" Color="Color.Primary"
+                                       StartIcon="@Icons.Material.Filled.ExpandMore"
+                                       OnClick="@(() => ToggleGroup(state))">
+                                Show @hidden more
+                            </MudButton>
+                        </div>
+                    }
+                    else if (expanded && group.Count > CollapsedLimit)
+                    {
+                        <div class="px-4 pb-2">
+                            <MudButton Variant="Variant.Text" Size="Size.Small" Color="Color.Default"
+                                       StartIcon="@Icons.Material.Filled.ExpandLess"
+                                       OnClick="@(() => ToggleGroup(state))">
+                                Show less
+                            </MudButton>
+                        </div>
+                    }
                 }
             }
         }
@@ -339,6 +370,7 @@
     private List<AgentInfo>? _agents;
     private List<SessionInfo>? _sessions;
     private bool _drawerOpen = true;
+    private bool _showHostsPane;
     private readonly HashSet<SessionState> _expandedGroups = new();
     private readonly ObservableCollection<ChatMessage> _messages = new();
     private ChatMessage? _streamingAssistant;
@@ -403,9 +435,12 @@
 
     private void OnAgentSelected(string? name)
     {
+        _showHostsPane = false;
         if (string.IsNullOrEmpty(name) || name == Agent) return;
         Nav.NavigateTo($"/agents/{name}");
     }
+
+    private void GoBackToHosts() => _showHostsPane = true;
 
     private void OnSessionSelected(string? id)
     {
