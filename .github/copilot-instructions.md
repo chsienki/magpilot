@@ -455,3 +455,5 @@ If you implement any of these, update `docs/plan.md` and this file.
 - 2026-05-07: Separate stripped-down agent app for magnus -- share the base rendering code, ship a thin assistant-only app
 - 2026-05-08: Improve the loading screen
 - 2026-05-08: Logo consolidation -- drop the agents logo entirely, use the magpi logo on the no-agents screen and elsewhere, and remove the magpi logo from the header
+- 2026-05-11: Consistent branding -- move the bird to be the agents logo, both on the side and main
+- 2026-05-11: Nice loading screen instead of the default Blazor one
