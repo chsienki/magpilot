@@ -75,38 +75,102 @@ a, .btn-link {
         content: "An error has occurred."
     }
 
-.loading-progress {
+/* ------------------------------------------------------------------ */
+/*  Brand-themed loading screen.                                      */
+/*                                                                    */
+/*  Replaces the default Blazor circle/SVG loader. Two layers stacked */
+/*  centrally: the magpie brand mark on top, a circular SVG progress  */
+/*  ring around it that fills as Blazor loads (driven by the          */
+/*  --blazor-load-percentage CSS variable the framework sets).        */
+/*                                                                    */
+/*  Light + dark variants via prefers-color-scheme so the loader      */
+/*  matches whichever mode the user's OS reports BEFORE we have a     */
+/*  chance to read localStorage.magpilot.darkMode.                    */
+/* ------------------------------------------------------------------ */
+
+.loading-progress-container {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1.5rem;
+    text-align: center;
+}
+
+.loading-progress-stack {
     position: relative;
-    display: block;
-    width: 8rem;
-    height: 8rem;
-    margin: 20vh auto 1rem auto;
+    width: 12rem;
+    height: 12rem;
+}
+
+.loading-progress {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
 }
 
     .loading-progress circle {
         fill: none;
-        stroke: #e0e0e0;
-        stroke-width: 0.6rem;
+        stroke: rgba(26, 43, 74, 0.13); /* primary @ 13% */
+        stroke-width: 4;
         transform-origin: 50% 50%;
         transform: rotate(-90deg);
     }
 
         .loading-progress circle:last-child {
-            stroke: #1b6ec2;
-            stroke-dasharray: calc(3.141 * var(--blazor-load-percentage, 0%) * 0.8), 500%;
-            transition: stroke-dasharray 0.05s ease-in-out;
+            stroke: #2DD4BF; /* secondary teal */
+            stroke-linecap: round;
+            /* circumference at r=45 ~= 283; --blazor-load-percentage is a % */
+            stroke-dasharray: calc(2.83 * var(--blazor-load-percentage, 0%)), 1000%;
+            transition: stroke-dasharray 0.15s ease-out;
         }
 
-.loading-progress-text {
+.loading-mark {
     position: absolute;
-    text-align: center;
-    font-weight: bold;
-    inset: calc(20vh + 3.25rem) 0 auto 0.2rem;
+    inset: 0;
+    margin: auto;
+    width: 5.5rem;
+    height: 5.5rem;
+    pointer-events: none;
+    filter: drop-shadow(0 0 3px #FFFFFF)
+            drop-shadow(0 0 6px #FFFFFFAA)
+            drop-shadow(0 0 12px #F6F2E680);
 }
+
+.loading-progress-text {
+    color: #1A2B4A;
+    font: 600 0.9rem/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    letter-spacing: 0.04em;
+}
+
+    .loading-progress-text:before {
+        content: var(--magpilot-loader-title, "Magpilot");
+        display: block;
+        font-size: 1.15rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        margin-bottom: 0.25rem;
+    }
 
     .loading-progress-text:after {
         content: var(--blazor-load-percentage-text, "Loading");
+        color: #4A4A4A;
+        font-weight: 400;
+        text-transform: lowercase;
     }
+
+@media (prefers-color-scheme: dark) {
+    body { background: #1A2238; }
+    .loading-progress circle { stroke: rgba(250, 246, 238, 0.13); }
+    .loading-progress circle:last-child { stroke: #5EEAD4; }
+    .loading-progress-text { color: #F2EEE0; }
+    .loading-progress-text:after { color: #C5BFB1; }
+}
 
 code {
     color: #c02d76;

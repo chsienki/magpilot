@@ -21,11 +21,16 @@
 
 <body>
     <div id="app">
-        <svg class="loading-progress">
-            <circle r="40%" cx="50%" cy="50%" />
-            <circle r="40%" cx="50%" cy="50%" />
-        </svg>
-        <div class="loading-progress-text"></div>
+        <div class="loading-progress-container">
+            <div class="loading-progress-stack">
+                <img class="loading-mark" src="_content/Magpilot.UI/favicon-mark.svg" alt="" />
+                <svg class="loading-progress" viewBox="0 0 100 100">
+                    <circle cx="50" cy="50" r="45"></circle>
+                    <circle cx="50" cy="50" r="45"></circle>
+                </svg>
+            </div>
+            <div class="loading-progress-text"></div>
+        </div>
     </div>
 
     <div id="blazor-error-ui">

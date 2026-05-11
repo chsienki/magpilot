@@ -1,0 +1,39 @@
+@*
+    The Magpilot brand mark. One source of truth for the bird across both
+    the magpilot SPA and any satellite SPA that ProjectReferences this
+    library (e.g. magstronaut/magnus/src/Magnus.Web/).
+
+    Asset lives in this RCL's wwwroot, so every consumer gets it served
+    at /_content/Magpilot.UI/favicon-mark.svg without having to copy the
+    file into their own wwwroot.
+
+    Parameters:
+      Size  - integer pixel size for both width + height. Default 32.
+              Use 24 for inline list bullets, 32 for AppBar marks
+              (currently UNUSED -- we removed the AppBar bird as part
+              of the brand sweep), 96+ for empty-state hero treatments.
+      Glow  - draw the bird with a soft cream-coloured halo. Useful on
+              dark hero contexts where the bird needs visual lift.
+              Default false.
+      Class - extra CSS classes to merge onto the <img>. Default empty.
+*@
+
+<img src="_content/Magpilot.UI/favicon-mark.svg"
+     alt=""
+     aria-hidden="true"
+     width="@Size"
+     height="@Size"
+     class="@($"magpie-mark {Class}".Trim())"
+     style="@(Glow ? GlowFilter : null)" />
+
+@code {
+    [Parameter] public int Size { get; set; } = 32;
+    [Parameter] public bool Glow { get; set; }
+    [Parameter] public string? Class { get; set; }
+
+    // Soft cream halo. Tuned to match the previous inline AppBar treatment
+    // so dark-mode renders still pop without changing the colour.
+    private const string GlowFilter =
+        "display: block; filter: drop-shadow(0 0 3px #FFFFFF) " +
+        "drop-shadow(0 0 6px #FFFFFFAA) drop-shadow(0 0 12px #F6F2E680);";
+}

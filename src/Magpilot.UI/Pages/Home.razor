@@ -18,14 +18,12 @@
                        OnClick="@ToggleDrawer"
                        Class="d-md-none"
                        aria-label="Toggle navigation" />
-        <img src="favicon-mark.svg" alt="" width="32" height="32"
-             class="ml-1 mr-2"
-             style="display:block; filter: drop-shadow(0 0 3px #FFFFFF) drop-shadow(0 0 6px #FFFFFFAA) drop-shadow(0 0 12px #F6F2E680);" />
-        <MudText Typo="Typo.h6" Class="mr-4">Magpilot</MudText>
+        <MudText Typo="Typo.h6" Class="ml-1 mr-4">Magpilot</MudText>
         @if (Agent is not null)
         {
-            <MudChip T="string" Size="Size.Small" Color="Color.Secondary" Variant="Variant.Filled"
-                     Icon="@Icons.Material.Filled.Computer">@Agent</MudChip>
+            <MudChip T="string" Size="Size.Small" Color="Color.Secondary" Variant="Variant.Filled">
+                <MagpieMark Size="16" Class="mr-1" /> @Agent
+            </MudChip>
             @if (_currentSessionTitle is not null)
             {
                 <MudIcon Icon="@Icons.Material.Filled.ChevronRight" Size="Size.Small" Class="mx-1" />
@@ -60,9 +58,7 @@
                Color="Color.Surface">
         <MudDrawerHeader>
             <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
-                <MudAvatar Color="Color.Primary" Size="Size.Small">
-                    <MudIcon Icon="@Icons.Material.Filled.Hub" Size="Size.Small" />
-                </MudAvatar>
+                <MagpieMark Size="28" Glow="true" />
                 <MudText Typo="Typo.subtitle1">Hosts</MudText>
             </MudStack>
         </MudDrawerHeader>
@@ -316,7 +312,7 @@
         else
         {
             <MudContainer MaxWidth="MaxWidth.Small" Class="d-flex flex-column align-center justify-center" Style="flex: 1;">
-                <MudIcon Icon="@Icons.Material.Filled.Hub" Color="Color.Primary" Size="Size.Large" Style="font-size: 4rem;" />
+                <MagpieMark Size="96" Glow="true" />
                 <MudText Typo="Typo.h4" Class="mt-3 mb-2">Magpilot</MudText>
                 <MudText Typo="Typo.body1" Color="Color.Default" Align="Align.Center">
                     Pick a host on the left to see its sessions, or start a new chat.
