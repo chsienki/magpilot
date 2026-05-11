@@ -1,0 +1,16 @@
+# Default to LF for source code so cross-platform clones don't fight git's
+# autocrlf. Shell scripts MUST be LF-ended; running CRLF scripts on Linux
+# produces ``$'\r': command not found``.
+
+* text=auto eol=lf
+
+# Explicit binary files so git doesn't try line-ending conversion on them.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.svg  text
+*.tar  binary
+*.tar.gz binary
+*.zip  binary

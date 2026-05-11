@@ -3,8 +3,12 @@
 # Build context MUST be the repo root so we can reach Magpilot.Shared:
 #   docker build -f src/Magpilot.Agent/Dockerfile -t magpilot-agent:latest .
 #
-# This image is intended for the always-on "Magnus" instance on LXC 102 but
-# is generic -- any Linux host can run it as a Magpilot agent.
+# This is the generic Magpilot agent image -- any Linux host can run it.
+# Site-specific behaviour (creating named pinned sessions, syncing extra
+# git repos, installing plugins, seeding memory files) is the deployer's
+# responsibility, achieved by bind-mounting a directory of *.sh hooks at
+# /etc/magpilot/bootstrap.d/ and setting MAGPILOT_BOOTSTRAP_HOOK_DIR
+# to that path. See src/Magpilot.Agent/bootstrap.sh for the contract.
 
 ARG DOTNET_SDK=9.0
 ARG DOTNET_RUNTIME=9.0
@@ -42,16 +46,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && npm install -g @github/copilot \
  && npm cache clean --force
 
-# Create the magnus user (uid 1000) and home dir. The compose stack bind-mounts
-# /srv/magpilot-agent/home/ over /home/magnus/ so state persists.
+# The agent runs as a non-root user. Default: "magnus" (uid 1000) for
+# historical reasons; overridable via MAGPILOT_AGENT_USER + a custom image.
+# The compose stack bind-mounts the deployer's persistent /home over
+# /home/magnus/ so state survives container recreation.
 RUN useradd -m -u 1000 -s /bin/bash magnus
 
 WORKDIR /app
 COPY --from=build /publish-agent/ ./
 
-# Bootstrap script runs at container start: ensures magnus/MEMORY etc exist,
-# launches the agent, then (after agent is up) creates-or-adopts Magnus's
-# always-on session.
+# Bootstrap script runs at container start: ensures HOME exists with
+# correct ownership, optionally runs deployer-supplied hooks
+# (MAGPILOT_BOOTSTRAP_HOOK_DIR), then exec's the agent process.
 COPY src/Magpilot.Agent/bootstrap.sh /usr/local/bin/bootstrap.sh
 RUN chmod +x /usr/local/bin/bootstrap.sh
 
@@ -63,6 +69,6 @@ ENV ASPNETCORE_URLS=http://0.0.0.0:5099 \
 
 EXPOSE 5099
 
-# tini for proper signal handling; bootstrap drops privileges to magnus
-# before launching the agent + child copilot processes.
+# tini for proper signal handling; bootstrap drops privileges to the agent
+# user before launching the agent + child copilot processes.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/bootstrap.sh"]
