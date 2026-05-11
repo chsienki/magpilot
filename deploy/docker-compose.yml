@@ -10,10 +10,20 @@
 # Required env (in /srv/magpilot/.env):
 #   MAGPILOT_AGENT_TOKEN=<shared secret matching the agents>
 #   MAGPILOT_HUB_BEARER=<secret used by agents+sidecars to POST /api/log>
+#
 # Optional env:
 #   MAGPILOT_HUB_COOKIE_DOMAIN=<e.g. .your-domain.example> -- widens the
 #     auth cookie's Domain attribute to share sign-in across satellite SPAs
 #     on sibling subdomains. Leave unset for plain single-host setups.
+#   OAUTH_CLIENT_ID + OAUTH_CLIENT_SECRET + OAUTH_ALLOWED_GITHUB_USERS --
+#     enable real GitHub OAuth login. Without these the hub serves
+#     /login -> 'OAUTH_CLIENT_ID not configured' (or, if
+#     MAGPILOT_DEV_BYPASS_AUTH=true, a dev backdoor that signs the
+#     visitor in as the first allowed user with no challenge -- DEV
+#     ONLY). Don't combine the two: dev-bypass takes precedence over
+#     OAuth even when both are set.
+#   MAGPILOT_DEV_BYPASS_AUTH=true -- DEV ONLY backdoor; never enable
+#     in any deployment that's reachable from outside trusted hands.
 
 services:
   hub:
@@ -29,6 +39,9 @@ services:
       MAGPILOT_HUB_BEARER: ${MAGPILOT_HUB_BEARER:?set MAGPILOT_HUB_BEARER in .env}
       MAGPILOT_HUB_COOKIE_DOMAIN: ${MAGPILOT_HUB_COOKIE_DOMAIN:-}
       MAGPILOT_HUB_TRUSTED_PROXIES: 192.168.1.149
-      MAGPILOT_DEV_BYPASS_AUTH: "true"
+      OAUTH_CLIENT_ID: ${OAUTH_CLIENT_ID:-}
+      OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET:-}
+      OAUTH_ALLOWED_GITHUB_USERS: ${OAUTH_ALLOWED_GITHUB_USERS:-}
+      MAGPILOT_DEV_BYPASS_AUTH: ${MAGPILOT_DEV_BYPASS_AUTH:-}
     volumes:
       - ./data:/data

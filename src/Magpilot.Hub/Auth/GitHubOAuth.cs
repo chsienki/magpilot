@@ -35,6 +35,24 @@ public static class GitHubOAuth
                 Secure = ctx.Request.IsHttps,
                 MaxAge = TimeSpan.FromMinutes(10),
             });
+            // Stash the original ReturnUrl in a sibling cookie so the
+            // callback can bounce the user back to where they started --
+            // critical for the multi-subdomain shared-cookie setup, where
+            // a 401 at magnus.home.example bounces here for OAuth and we
+            // want to send them back to magnus.home, not to magpilot.home.
+            // Sibling cookie (not GitHub state param) keeps it server-side
+            // private and out of any logs that capture the OAuth URL.
+            var ret0 = ctx.Request.Query["ReturnUrl"].ToString();
+            if (!string.IsNullOrEmpty(ret0))
+            {
+                ctx.Response.Cookies.Append("oauth_return", ret0, new CookieOptions
+                {
+                    HttpOnly = true,
+                    SameSite = SameSiteMode.Lax,
+                    Secure = ctx.Request.IsHttps,
+                    MaxAge = TimeSpan.FromMinutes(10),
+                });
+            }
             var redirect = $"{ctx.Request.Scheme}://{ctx.Request.Host}/oauth/callback";
             var url = $"https://github.com/login/oauth/authorize?client_id={opts.OAuthClientId}&scope=read:user&state={state}&redirect_uri={Uri.EscapeDataString(redirect)}";
             return Results.Redirect(url);
@@ -82,7 +100,33 @@ public static class GitHubOAuth
             await ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme,
                 new ClaimsPrincipal(claims),
                 new AuthenticationProperties { IsPersistent = true, ExpiresUtc = DateTimeOffset.UtcNow.AddDays(30) });
-            return Results.Redirect("/");
+
+            // Recover the original ReturnUrl set in /login, with sanity checks
+            // mirroring /dev-login so a stale or hostile cookie can't bounce
+            // the user to a JSON endpoint or an off-site URL.
+            var ret = ctx.Request.Cookies["oauth_return"] ?? "";
+            ctx.Response.Cookies.Delete("oauth_return");
+
+            // Allow either a relative path (with the same /api guard as
+            // /dev-login) OR an absolute URL whose host falls under the
+            // configured cookie domain (so multi-subdomain shared cookies
+            // can land back at sibling SPAs).
+            string target = "/";
+            if (!string.IsNullOrEmpty(ret))
+            {
+                if (ret.StartsWith('/') && !ret.StartsWith("//", StringComparison.Ordinal)
+                    && !ret.StartsWith("/api", StringComparison.OrdinalIgnoreCase))
+                {
+                    target = ret;
+                }
+                else if (Uri.TryCreate(ret, UriKind.Absolute, out var uri)
+                         && !string.IsNullOrEmpty(opts.CookieDomain)
+                         && IsHostInDomain(uri.Host, opts.CookieDomain))
+                {
+                    target = ret;
+                }
+            }
+            return Results.Redirect(target);
         });
 
         routes.MapPost("/logout", async (HttpContext ctx) =>
@@ -115,4 +159,19 @@ public static class GitHubOAuth
 
     private sealed record TokenResponse([property: JsonPropertyName("access_token")] string? AccessToken);
     private sealed record GhUser([property: JsonPropertyName("login")] string? Login);
+
+    /// <summary>
+    /// Returns true if <paramref name="host"/> falls under the cookie
+    /// <paramref name="domain"/>. Domain is canonically a leading-dot
+    /// value (e.g. ".home.sienkiewi.cz"); a host like
+    /// "magnus.home.sienkiewi.cz" matches but "evil-home.sienkiewi.cz"
+    /// does not (suffix match must be on the dot boundary).
+    /// </summary>
+    private static bool IsHostInDomain(string host, string domain)
+    {
+        if (string.IsNullOrEmpty(host) || string.IsNullOrEmpty(domain)) return false;
+        var d = domain.StartsWith('.') ? domain : "." + domain;
+        var h = "." + host;
+        return h.EndsWith(d, StringComparison.OrdinalIgnoreCase);
+    }
 }
