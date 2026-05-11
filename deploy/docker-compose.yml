@@ -10,6 +10,10 @@
 # Required env (in /srv/magpilot/.env):
 #   MAGPILOT_AGENT_TOKEN=<shared secret matching the agents>
 #   MAGPILOT_HUB_BEARER=<secret used by agents+sidecars to POST /api/log>
+# Optional env:
+#   MAGPILOT_HUB_COOKIE_DOMAIN=<e.g. .your-domain.example> -- widens the
+#     auth cookie's Domain attribute to share sign-in across satellite SPAs
+#     on sibling subdomains. Leave unset for plain single-host setups.
 
 services:
   hub:
@@ -23,6 +27,7 @@ services:
       MAGPILOT_HUB_DATA: /data
       MAGPILOT_AGENT_TOKEN: ${MAGPILOT_AGENT_TOKEN:?set MAGPILOT_AGENT_TOKEN in .env}
       MAGPILOT_HUB_BEARER: ${MAGPILOT_HUB_BEARER:?set MAGPILOT_HUB_BEARER in .env}
+      MAGPILOT_HUB_COOKIE_DOMAIN: ${MAGPILOT_HUB_COOKIE_DOMAIN:-}
       MAGPILOT_HUB_TRUSTED_PROXIES: 192.168.1.149
       MAGPILOT_DEV_BYPASS_AUTH: "true"
     volumes:
