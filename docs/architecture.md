@@ -444,11 +444,11 @@ with other sidecars. Magpilot doesn't need to know you exist.
       magnus/              <- MEMORY/SOUL/IDENTITY + ported scripts (todo.py etc)
       bin/                 <- gh, github-daily-report.sh
       copilot-context/     <- task-context contents
-  magpilot-whatsapp/       <- WA sidecar
+  magpilot-whatsapp/       <- WA sidecar (now in chsienki/magstronaut)
     docker-compose.yml
     .env                   <- MAGPILOT_AGENT_TOKEN, WA_ALLOWLIST, OUTBOUND_TOKEN
     auth/                  <- Baileys persistent auth state (don't lose this)
-  magpilot-cron/           <- cron sidecar
+  magpilot-cron/           <- cron sidecar (now in chsienki/magstronaut)
     run.sh
     jobs.yaml
   openclaw/                <- the legacy assistant, still running in parallel
@@ -459,6 +459,12 @@ with other sidecars. Magpilot doesn't need to know you exist.
 /etc/cron.d/
   magpilot-cron            <- crontab snippet calling /srv/magpilot-cron/run.sh
 ```
+
+> **Note** -- the `magpilot-whatsapp/` and `magpilot-cron/` directories on
+> the LXC are deployed from
+> [chsienki/magstronaut](https://github.com/chsienki/magstronaut), not from
+> magpilot itself. Magpilot is a generic platform; site-specific sidecars
+> live in the outer-ring repo. See magstronaut's `docs/ecosystem.md`.
 
 ## Glossary
 
