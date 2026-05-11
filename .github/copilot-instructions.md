@@ -469,3 +469,4 @@ project files in chsienki/copilot-context/ideas/projects/:
 (Both project files are private to copilot-context. The summaries
 above are the magpilot-side pointer so this codebase's agents
 remember they exist and don't accidentally re-litigate them.)
+- 2026-05-11: Magpilot UI as a Razor Class Library that magnus references directly -- no copies of code in magnus
