@@ -6,7 +6,12 @@ using Microsoft.Extensions.Options;
 
 namespace Magpilot.Hub.Auth;
 
-public sealed record HubAuthOptions(string PhoneBearer, IReadOnlyList<string> AllowedGitHubUsers, string? OAuthClientId, string? OAuthClientSecret);
+public sealed record HubAuthOptions(
+    string PhoneBearer,
+    IReadOnlyList<string> AllowedGitHubUsers,
+    string? OAuthClientId,
+    string? OAuthClientSecret,
+    string? CookieDomain);
 
 public static class HubAuthExtensions
 {
@@ -24,7 +29,16 @@ public static class HubAuthExtensions
                 ?? Environment.GetEnvironmentVariable("OAUTH_ALLOWED_GITHUB_USERS")
                 ?? "chsienki").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
             OAuthClientId: config["Hub:OAuthClientId"] ?? Environment.GetEnvironmentVariable("OAUTH_CLIENT_ID"),
-            OAuthClientSecret: config["Hub:OAuthClientSecret"] ?? Environment.GetEnvironmentVariable("OAUTH_CLIENT_SECRET"));
+            OAuthClientSecret: config["Hub:OAuthClientSecret"] ?? Environment.GetEnvironmentVariable("OAUTH_CLIENT_SECRET"),
+            // Cookie Domain widening for shared sign-in across satellite SPAs
+            // hosted on sibling subdomains (e.g. magpilot.home.sienkiewi.cz +
+            // magnus.home.sienkiewi.cz). Setting Domain=.home.sienkiewi.cz
+            // makes the cookie valid for *.home.sienkiewi.cz so a single
+            // OAuth round-trip at the hub covers every satellite. Leave
+            // unset for plain dev runs at localhost (the default Domain is
+            // the request host with no leading dot).
+            CookieDomain: config["Hub:CookieDomain"]
+                ?? Environment.GetEnvironmentVariable("MAGPILOT_HUB_COOKIE_DOMAIN"));
         services.AddSingleton(opts);
 
         var auth = services.AddAuthentication(o =>
@@ -46,6 +60,8 @@ public static class HubAuthExtensions
                 o.Cookie.HttpOnly = true;
                 o.Cookie.SameSite = SameSiteMode.Lax;
                 o.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+                if (!string.IsNullOrWhiteSpace(opts.CookieDomain))
+                    o.Cookie.Domain = opts.CookieDomain;
                 o.LoginPath = "/login";
                 o.LogoutPath = "/logout";
                 o.Events.OnRedirectToLogin = ctx =>

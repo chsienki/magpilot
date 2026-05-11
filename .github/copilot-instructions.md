@@ -123,6 +123,7 @@ plain `dotnet run` in an `async` PowerShell session named `agent`.
 | `MAGPILOT_DEV_BYPASS_AUTH` | hub | When `"true"`, skips OAuth (dev only -- redirects `/login` to `/dev-login`). |
 | `MAGPILOT_HUB_DATA` | hub | Directory for `hub.db` and `logs.db`. Defaults to `./data`. |
 | `MAGPILOT_HUB_TRUSTED_PROXIES` | hub | Comma list of IPs allowed to set `X-Forwarded-*` (NPM IP). |
+| `MAGPILOT_HUB_COOKIE_DOMAIN` | hub (optional) | Sets the auth cookie's `Domain` attribute. Use a leading-dot value like `.home.sienkiewi.cz` to share sign-in across satellite SPAs hosted on sibling subdomains (e.g. magnus.home.sienkiewi.cz). Leave unset for plain dev runs at localhost. |
 
 ## Architectural rules and gotchas
 
