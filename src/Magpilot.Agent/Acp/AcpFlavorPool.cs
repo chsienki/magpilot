@@ -35,10 +35,21 @@ public sealed class AcpFlavorPool(ILoggerFactory loggerFactory, ILogger<AcpFlavo
     }
 
     /// <summary>
-    /// For multiplexing flavors: returns the existing client or starts a new
-    /// one and caches it. For non-multiplexing flavors: always starts a fresh
-    /// child.
+    /// For multiplexing flavors: returns the existing client (if its
+    /// subprocess is still alive) or starts a new one and caches it.
+    /// For non-multiplexing flavors: always starts a fresh child.
     /// </summary>
+    /// <remarks>
+    /// Liveness check: if the cached client's <c>copilot --acp</c>
+    /// subprocess has exited (crashed, killed, OOM'd...), the dead
+    /// instance is disposed and a fresh one spawned in its place.
+    /// Without this check we would keep handing out dead clients
+    /// forever; every <see cref="AcpClient.CallAsync"/> would write
+    /// into a broken pipe and time out 120s later -- the symptom that
+    /// surfaces in the SPA as "new session never finishes" and
+    /// breaks Preflight context discovery (which routes through
+    /// <c>session/new</c>).
+    /// </remarks>
     public async Task<AcpClient> AcquireAsync(AcpFlavor flavor, CancellationToken ct)
     {
         if (!flavor.MultiplexesSessions)
@@ -52,7 +63,14 @@ public sealed class AcpFlavorPool(ILoggerFactory loggerFactory, ILogger<AcpFlavo
         {
             if (_clients.TryGetValue(flavor.Key, out var existing))
             {
-                return existing;
+                if (existing.IsAlive) return existing;
+
+                log.LogWarning(
+                    "Cached ACP client for flavor {Flavor} is dead -- respawning",
+                    flavor.Key);
+                _clients.Remove(flavor.Key);
+                try { await existing.DisposeAsync(); }
+                catch (Exception ex) { log.LogDebug(ex, "Disposing dead ACP client threw"); }
             }
             var client = await StartFreshAsync(flavor, ct);
             _clients[flavor.Key] = client;

@@ -35,6 +35,16 @@ public sealed class AcpClient : IAsyncDisposable
         _args = args ?? "--acp --allow-all-tools";
     }
 
+    /// <summary>
+    /// True while the underlying <c>copilot --acp</c> subprocess is alive.
+    /// Returns false before <see cref="StartAsync"/> succeeds and after the
+    /// child exits (whether crashed, killed, or disposed). Used by
+    /// <see cref="AcpFlavorPool"/> to skip-and-respawn cached-but-dead
+    /// multiplex clients instead of writing into a broken pipe and
+    /// timing out 120s later.
+    /// </summary>
+    public bool IsAlive => _proc is { HasExited: false };
+
     public async Task StartAsync(CancellationToken ct)
     {
         // Resolve the executable to a full path before spawning. .NET's
@@ -248,6 +258,32 @@ public sealed class AcpClient : IAsyncDisposable
         {
             _logger.LogError(ex, "ACP read loop crashed");
         }
+        finally
+        {
+            // ReadLineAsync returned null (stdout closed -> child exited) or
+            // the loop crashed. Either way the subprocess is gone. Surface
+            // that to every in-flight request immediately instead of
+            // letting them sit on the 120s WaitWithTimeoutAsync clock.
+            FailAllPending(new IOException(
+                $"ACP child process exited (pid={_proc?.Id}, exitCode={SafeExitCode()})"));
+        }
+    }
+
+    private int? SafeExitCode()
+    {
+        try { return _proc?.HasExited == true ? _proc.ExitCode : (int?)null; }
+        catch { return null; }
+    }
+
+    private void FailAllPending(Exception ex)
+    {
+        List<TaskCompletionSource<JsonNode?>> snapshot;
+        lock (_pendingLock)
+        {
+            snapshot = _pending.Values.ToList();
+            _pending.Clear();
+        }
+        foreach (var tcs in snapshot) tcs.TrySetException(ex);
     }
 
     private async Task DispatchAsync(JsonNode msg, CancellationToken ct)
@@ -333,6 +369,7 @@ public sealed class AcpClient : IAsyncDisposable
             try { if (!_proc.WaitForExit(2000)) _proc.Kill(); } catch { }
             _proc.Dispose();
         }
+        FailAllPending(new ObjectDisposedException(nameof(AcpClient)));
         await Task.CompletedTask;
     }
 }
