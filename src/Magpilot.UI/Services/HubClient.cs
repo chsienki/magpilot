@@ -93,4 +93,50 @@ public sealed class HubClient
             if (evt is not null) yield return evt;
         }
     }
+
+    /// <summary>
+    /// Distinct list of source names (agent host names + "spa" + "hub") that
+    /// have at least one row in the central log -- used to populate the
+    /// Source filter dropdown on the /admin/logs viewer.
+    /// </summary>
+    public Task<List<string>?> ListLogSourcesAsync(CancellationToken ct = default) =>
+        _http.GetFromJsonAsync<List<string>>("api/log/sources", ct);
+
+    /// <summary>
+    /// Read recent rows from the central log. All filters are optional; the
+    /// hub returns at most <paramref name="limit"/> rows newest-first. Used
+    /// by the /admin/logs viewer for both the initial load and each filter
+    /// change.
+    /// </summary>
+    public Task<List<LogEntry>?> ListLogsAsync(
+        string? source = null,
+        string? level = null,
+        string? search = null,
+        string? sessionId = null,
+        long? sinceUnixMs = null,
+        int limit = 500,
+        CancellationToken ct = default)
+    {
+        var qs = new List<string> { $"limit={limit}" };
+        if (!string.IsNullOrEmpty(source))    qs.Add($"source={Uri.EscapeDataString(source)}");
+        if (!string.IsNullOrEmpty(level))     qs.Add($"level={Uri.EscapeDataString(level)}");
+        if (!string.IsNullOrEmpty(search))    qs.Add($"search={Uri.EscapeDataString(search)}");
+        if (!string.IsNullOrEmpty(sessionId)) qs.Add($"sessionId={Uri.EscapeDataString(sessionId)}");
+        if (sinceUnixMs is { } s)             qs.Add($"since={s}");
+        return _http.GetFromJsonAsync<List<LogEntry>>("api/log?" + string.Join("&", qs), ct);
+    }
+
+    /// <summary>One row from the central log as exposed by /api/log.</summary>
+    public sealed record LogEntry(
+        long Id,
+        DateTimeOffset Timestamp,
+        string Source,
+        string Level,
+        string? Category,
+        string Message,
+        string? Stack,
+        string? SessionId,
+        string? Extra,
+        string? UserAgent,
+        string? Url);
 }
