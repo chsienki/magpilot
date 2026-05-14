@@ -111,6 +111,44 @@ public static class HubEndpoints
                     return await Forward(resp);
                 }));
 
+        // ---- shim Phase 1+ proxies (cooperative single-owner handoff) ----
+        // Pure pass-throughs; bodies and statuses are forwarded verbatim.
+        // The shim docs (copilot-context/ideas/projects/magpilot-shim.md)
+        // describe the wire shapes.
+
+        api.MapGet("/agents/{name}/sessions/{id}/state",
+            (string name, string id, AgentHttpClient http, AgentRegistry reg, CancellationToken ct) =>
+                Proxy(name, reg, async () =>
+                {
+                    var resp = await http.ClientFor(name).GetAsync($"api/sessions/{id}/state", ct);
+                    return await Forward(resp);
+                }));
+
+        api.MapPost("/agents/{name}/sessions/{id}/release-request",
+            (string name, string id, ReleaseRequestBody body, AgentHttpClient http, AgentRegistry reg, CancellationToken ct) =>
+                Proxy(name, reg, async () =>
+                {
+                    var resp = await http.ClientFor(name).PostAsJsonAsync($"api/sessions/{id}/release-request", body, ct);
+                    return await Forward(resp);
+                }));
+
+        api.MapPost("/agents/{name}/sessions/{id}/acquire-for-host",
+            (string name, string id, AcquireForHostBody body, AgentHttpClient http, AgentRegistry reg, CancellationToken ct) =>
+                Proxy(name, reg, async () =>
+                {
+                    var resp = await http.ClientFor(name).PostAsJsonAsync($"api/sessions/{id}/acquire-for-host", body, ct);
+                    return await Forward(resp);
+                }));
+
+        api.MapPost("/agents/{name}/sessions/{id}/release",
+            (string name, string id, ReleaseFromHostBody body, AgentHttpClient http, AgentRegistry reg, CancellationToken ct) =>
+                Proxy(name, reg, async () =>
+                {
+                    var resp = await http.ClientFor(name).PostAsJsonAsync($"api/sessions/{id}/release", body, ct);
+                    return await Forward(resp);
+                }));
+        // ------------------------------------------------------------------
+
         api.MapPost("/agents/{name}/sessions/{id}/interrupt",
             (string name, string id, AgentHttpClient http, AgentRegistry reg, CancellationToken ct) =>
                 Proxy(name, reg, async () =>

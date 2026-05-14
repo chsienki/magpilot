@@ -40,6 +40,19 @@ public sealed record AcquireForHostBody(int HostPid, bool Force = false);
 public sealed record ReleaseFromHostBody(int HostPid);
 
 /// <summary>
+/// Response body returned by ACP-driving endpoints (<c>POST /messages</c>,
+/// <c>POST /interrupt</c>, <c>POST /approvals/{id}</c>) with status code
+/// <c>409 Conflict</c> when the session is currently held by a
+/// magpilot-host wrapper. Callers (SPA, WhatsApp) react by firing
+/// <c>POST /release-request</c> and polling <c>GET /state</c> until the
+/// host releases, then retrying the original POST.
+/// </summary>
+public sealed record HostOwnedResponse(
+    string Error,
+    bool NeedsRelease,
+    int HostPid);
+
+/// <summary>
 /// Request body for the synchronous "ask Copilot a question and wait for the answer"
 /// endpoint. Hub creates an ephemeral session, sends the prompt, accumulates the
 /// streamed assistant output, and returns it as a single response.

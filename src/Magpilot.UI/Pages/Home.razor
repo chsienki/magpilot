@@ -332,6 +332,25 @@
                            Value="_showThoughts" ValueChanged="@SetShowThoughts"
                            Label="Show thinking" />
             </div>
+            @if (_pendingForceTake is { } pending)
+            {
+                <MudAlert Severity="Severity.Warning" Dense="true" Class="mx-3 my-2"
+                          ContentAlignment="HorizontalAlignment.Left">
+                    <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
+                        <MudText Typo="Typo.body2">
+                            Terminal session (PID @pending.HostPid) didn't release for "@TruncatePreview(pending.Text)".
+                        </MudText>
+                        <MudSpacer />
+                        <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Warning"
+                                   StartIcon="@Icons.Material.Filled.SwapHoriz"
+                                   OnClick="HandleForceTake">
+                            Take over from terminal
+                        </MudButton>
+                        <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Close"
+                                       OnClick="HandleCancelForceTake" aria-label="Dismiss" />
+                    </MudStack>
+                </MudAlert>
+            }
             <ChatView Messages="@_messages"
                       PendingApproval="@_pendingApproval"
                       Disabled="@(_busy || _loading)"
@@ -380,6 +399,14 @@
     private bool _busy;
     private bool _loading;
     private bool _thinking;
+    /// <summary>
+    /// When the agent refuses a prompt because a magpilot-host wrapper holds
+    /// the session AND the wrapper failed to release within the polite-knock
+    /// window, we stash the user's prompt here so they can hit "Take over
+    /// from terminal" to force-acquire and retry. Cleared on success or
+    /// explicit cancel.
+    /// </summary>
+    private PendingForceTake? _pendingForceTake;
     private string? _streamingFor;
     private int _streamGeneration;
     private SessionInfo? _pendingOrphan;
@@ -389,6 +416,8 @@
     private string? _newSessionError;
     private bool _newSessionBusy;
     private List<string> _cwdSuggestions = new();
+
+    private sealed record PendingForceTake(string Text, int HostPid);
 
     // Per-session in-memory snapshot of messages, keyed by "{Agent}/{SessionId}".
     // We keep this so switching back to an Owned session restores its
@@ -918,7 +947,19 @@
         _messages.Add(new ChatMessage { Role = "user", Text = text });
         _busy = true;
         _thinking = true;
-        try { await Hub.SendPromptAsync(Agent, SessionId, text); }
+        _pendingForceTake = null;
+        try
+        {
+            await Hub.SendPromptAsync(Agent, SessionId, text);
+        }
+        catch (HostStillOwnedException ex)
+        {
+            // Polite knock + 60s poll already happened inside the client.
+            // Stash the prompt so the user can hit "Take over" to force.
+            _busy = false; _thinking = false;
+            _pendingForceTake = new PendingForceTake(text, ex.HostPid);
+            Snackbar.Add($"Terminal (PID {ex.HostPid}) didn't release. Click 'Take over' to force.", Severity.Warning);
+        }
         catch (Exception ex)
         {
             _messages.Add(new ChatMessage { Role = "tool", Text = $"send failed: {ex.Message}" });
@@ -927,6 +968,35 @@
         }
         StateHasChanged();
     }
+
+    /// <summary>
+    /// "Take over from terminal" affordance handler. Bypasses the polite
+    /// release-request and force-acquires the session via the agent so
+    /// the pending prompt can land. Wraps the call so a force-take
+    /// failure surfaces just as cleanly as a polite-send failure.
+    /// </summary>
+    private async Task HandleForceTake()
+    {
+        if (Agent is null || SessionId is null || _pendingForceTake is not { } pending) return;
+        _busy = true; _thinking = true;
+        try
+        {
+            await Hub.ForceTakeOverAndSendAsync(Agent, SessionId, pending.Text);
+            _pendingForceTake = null;
+        }
+        catch (Exception ex)
+        {
+            _busy = false; _thinking = false;
+            _messages.Add(new ChatMessage { Role = "tool", Text = $"force-take failed: {ex.Message}" });
+            Snackbar.Add($"Force take-over failed: {ex.Message}", Severity.Error);
+        }
+        StateHasChanged();
+    }
+
+    private void HandleCancelForceTake() { _pendingForceTake = null; StateHasChanged(); }
+
+    private static string TruncatePreview(string s) =>
+        s.Length <= 60 ? s : s[..57] + "...";
 
     private async Task HandleApproval((string ApprovalId, string OptionId) a)
     {

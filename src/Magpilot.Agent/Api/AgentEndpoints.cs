@@ -209,8 +209,18 @@ public static class AgentEndpoints
         });
         // --------------------------------------------------------------------
 
-        api.MapPost("/sessions/{id}/messages", (string id, PromptRequest req, AcpSessionManager acp) =>
+        api.MapPost("/sessions/{id}/messages", (string id, PromptRequest req, AcpSessionManager acp, HostOwnership hostOwn) =>
         {
+            // Refuse to drive the session if a magpilot-host wrapper
+            // currently owns it. The caller (SPA, WhatsApp, cron) is
+            // expected to react to 409 by firing /release-request and
+            // polling /state until the host releases, then retrying.
+            if (hostOwn.TryGet(id, out var entry))
+                return Results.Conflict(new HostOwnedResponse(
+                    Error: $"Session is held by magpilot-host PID {entry.HostPid}",
+                    NeedsRelease: true,
+                    HostPid: entry.HostPid));
+
             // Fire-and-forget: session/prompt returns when the turn completes
             // (could be 60s+). The endpoint returns 202 immediately and the
             // SPA learns the turn ended via the SSE TurnComplete event.
@@ -218,14 +228,26 @@ public static class AgentEndpoints
             return Results.Accepted();
         });
 
-        api.MapPost("/sessions/{id}/interrupt", async (string id, AcpSessionManager acp, CancellationToken ct) =>
+        api.MapPost("/sessions/{id}/interrupt", async (string id, AcpSessionManager acp, HostOwnership hostOwn, CancellationToken ct) =>
         {
+            if (hostOwn.TryGet(id, out var entry))
+                return Results.Conflict(new HostOwnedResponse(
+                    Error: $"Session is held by magpilot-host PID {entry.HostPid}",
+                    NeedsRelease: true,
+                    HostPid: entry.HostPid));
+
             await acp.CancelAsync(id, ct);
             return Results.NoContent();
         });
 
-        api.MapPost("/sessions/{id}/approvals/{approvalId}", (string id, string approvalId, ApprovalResponse resp, AcpSessionManager acp) =>
+        api.MapPost("/sessions/{id}/approvals/{approvalId}", (string id, string approvalId, ApprovalResponse resp, AcpSessionManager acp, HostOwnership hostOwn) =>
         {
+            if (hostOwn.TryGet(id, out var entry))
+                return Results.Conflict(new HostOwnedResponse(
+                    Error: $"Session is held by magpilot-host PID {entry.HostPid}",
+                    NeedsRelease: true,
+                    HostPid: entry.HostPid));
+
             var ok = acp.ResolveApproval(approvalId, resp.OptionId);
             return ok ? Results.NoContent() : Results.NotFound();
         });

@@ -56,8 +56,109 @@ public sealed class HubClient
 
     public async Task SendPromptAsync(string agent, string id, string text, CancellationToken ct = default)
     {
+        // Retry-on-409: the agent refuses prompts when the session is held
+        // by a magpilot-host wrapper. We knock politely (release-request)
+        // then poll state until the host releases, then retry. On final
+        // timeout we throw HostStillOwnedException so callers can surface
+        // a useful error to the user.
         var resp = await _http.PostAsJsonAsync($"api/agents/{agent}/sessions/{id}/messages", new PromptRequest(text), ct);
+        if (resp.StatusCode != System.Net.HttpStatusCode.Conflict)
+        {
+            resp.EnsureSuccessStatusCode();
+            return;
+        }
+
+        // Try to deserialize the conflict body so we know which host PID
+        // is holding the session. If the body shape is unexpected, fall
+        // back to a generic conflict error.
+        HostOwnedResponse? owned = null;
+        try { owned = await resp.Content.ReadFromJsonAsync<HostOwnedResponse>(cancellationToken: ct); }
+        catch { /* malformed body -- treat as generic conflict */ }
+        if (owned is null || !owned.NeedsRelease)
+            throw new InvalidOperationException("Agent rejected the prompt: " + (owned?.Error ?? resp.ReasonPhrase ?? "Conflict"));
+
+        // Polite knock + poll. 60s budget matches the agent's typical
+        // max-turn time so a wrapper waiting out a slow LLM response can
+        // still hand off cleanly.
+        await FireReleaseRequestAsync(agent, id, "spa", force: false, ct);
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(60);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            await Task.Delay(500, ct);
+            var state = await GetStateAsync(agent, id, ct);
+            if (state is null || state.Owner != SessionOwner.Host)
+                break;
+        }
+
+        // Retry once -- if it 409s again, the host didn't release.
+        var retry = await _http.PostAsJsonAsync($"api/agents/{agent}/sessions/{id}/messages", new PromptRequest(text), ct);
+        if (retry.StatusCode == System.Net.HttpStatusCode.Conflict)
+            throw new HostStillOwnedException(owned.HostPid,
+                $"Terminal session held by PID {owned.HostPid} did not release within 60s. Use the 'Take over' button to force, or close the terminal.");
+        retry.EnsureSuccessStatusCode();
+    }
+
+    /// <summary>
+    /// Force-acquire a session held by a magpilot-host wrapper, then send
+    /// the prompt. Used by the SPA's "Take over from terminal" button --
+    /// bypasses the polite release-request and aborts any in-flight turn
+    /// the wrapper had running.
+    /// </summary>
+    public async Task ForceTakeOverAndSendAsync(string agent, string id, string text, CancellationToken ct = default)
+    {
+        // host_pid 0 because the SPA isn't really a host -- it's just
+        // taking over so the agent can drive again. The agent treats the
+        // PID as advisory after the swap; HostOwnership is cleared.
+        await AcquireForHostAsync(agent, id, hostPid: 0, force: true, ct);
+        // Immediately release so the agent re-adopts.
+        await ReleaseAsync(agent, id, hostPid: 0, ct);
+        // Now the prompt should land cleanly.
+        await SendPromptAsync(agent, id, text, ct);
+    }
+
+    /// <summary>
+    /// Fetch the rich session state (owner, activity, in-flight info,
+    /// last-event timestamp) for the take-over UX.
+    /// </summary>
+    public async Task<SessionStateInfo?> GetStateAsync(string agent, string id, CancellationToken ct = default)
+    {
+        var resp = await _http.GetAsync($"api/agents/{agent}/sessions/{id}/state", ct);
+        if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) return null;
         resp.EnsureSuccessStatusCode();
+        return await resp.Content.ReadFromJsonAsync<SessionStateInfo>(cancellationToken: ct);
+    }
+
+    /// <summary>
+    /// Broadcast a <c>release_requested</c> SSE event so any subscribed
+    /// magpilot-host wrapper can begin its graceful shutdown.
+    /// </summary>
+    public async Task FireReleaseRequestAsync(string agent, string id, string requester, bool force, CancellationToken ct = default)
+    {
+        var resp = await _http.PostAsJsonAsync(
+            $"api/agents/{agent}/sessions/{id}/release-request",
+            new ReleaseRequestBody(requester, force),
+            ct);
+        resp.EnsureSuccessStatusCode();
+    }
+
+    public async Task<SessionStateInfo> AcquireForHostAsync(string agent, string id, int hostPid, bool force, CancellationToken ct = default)
+    {
+        var resp = await _http.PostAsJsonAsync(
+            $"api/agents/{agent}/sessions/{id}/acquire-for-host",
+            new AcquireForHostBody(hostPid, force),
+            ct);
+        resp.EnsureSuccessStatusCode();
+        return (await resp.Content.ReadFromJsonAsync<SessionStateInfo>(cancellationToken: ct))!;
+    }
+
+    public async Task<SessionStateInfo> ReleaseAsync(string agent, string id, int hostPid, CancellationToken ct = default)
+    {
+        var resp = await _http.PostAsJsonAsync(
+            $"api/agents/{agent}/sessions/{id}/release",
+            new ReleaseFromHostBody(hostPid),
+            ct);
+        resp.EnsureSuccessStatusCode();
+        return (await resp.Content.ReadFromJsonAsync<SessionStateInfo>(cancellationToken: ct))!;
     }
 
     public async Task ResolveApprovalAsync(string agent, string id, string approvalId, string optionId, CancellationToken ct = default)
@@ -139,4 +240,16 @@ public sealed class HubClient
         string? Extra,
         string? UserAgent,
         string? Url);
+}
+
+/// <summary>
+/// Thrown by <see cref="HubClient.SendPromptAsync"/> when the agent
+/// refuses the prompt because a magpilot-host wrapper holds the session
+/// AND the wrapper failed to release within our timeout window. Callers
+/// (e.g. ChatView) can catch this to surface a meaningful UI hint plus
+/// an optional "Take over from terminal" affordance.
+/// </summary>
+public sealed class HostStillOwnedException(int hostPid, string message) : Exception(message)
+{
+    public int HostPid { get; } = hostPid;
 }
