@@ -8,10 +8,40 @@
     <RootNamespace>Magpilot.Host</RootNamespace>
     <AssemblyName>magpilot-host</AssemblyName>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- sch.pty.net's targets only copies native ConPTY DLLs when
+         PlatformTarget is explicit (i.e. NOT AnyCPU). x64 covers our
+         Windows + Linux + macOS targets; arm64 builds would need a
+         separate publish profile. Native files end up at
+         bin/<config>/net9.0/os64/conpty.dll where Pty.Net's P/Invoke
+         loader expects them. -->
+    <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Magpilot.Shared\Magpilot.Shared.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="sch.pty.net" Version="0.3.36-pre" />
+  </ItemGroup>
+
+  <!-- sch.pty.net's bundled CopyPtyNativeFiles target hooks into
+       BuildDependsOn / PostBuildEventDependsOn which the SDK-style
+       build no longer honors. Bring the ConPTY native files in
+       ourselves so Pty.Net's runtime P/Invoke loader finds them
+       under bin/<config>/<tfm>/os64/conpty.dll. Linux/macOS use libc
+       forkpty directly and don't need anything copied. -->
+  <ItemGroup Condition="'$(NuGetPackageRoot)' != ''">
+    <None Include="$(NuGetPackageRoot)sch.pty.net\0.3.36-pre\build\x64\os64\conpty.dll">
+      <Link>os64\conpty.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Include="$(NuGetPackageRoot)sch.pty.net\0.3.36-pre\build\x64\os64\OpenConsole.exe">
+      <Link>os64\OpenConsole.exe</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
   </ItemGroup>
 
 </Project>

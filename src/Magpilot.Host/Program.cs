@@ -186,86 +186,74 @@ static async Task<int> RunSessionLoopAsync(AgentClient agent, string sid, Wrappe
         // --resume=<sid> is in there exactly once.
         var argv = WithResumeFlag(opts.ForwardArgs, sid);
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = copilotPath,
-            UseShellExecute = false,
-            RedirectStandardInput  = false,
-            RedirectStandardOutput = false,
-            RedirectStandardError  = false,
-        };
-        foreach (var a in argv) psi.ArgumentList.Add(a);
-
-        using var copilot = Process.Start(psi)
-            ?? throw new InvalidOperationException($"Failed to start {copilotPath}");
-
-        // Listen for release-requested in the background; signal via cts.
-        using var sseCts = new CancellationTokenSource();
-        var preempted = new TaskCompletionSource<ReleaseRequested>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await foreach (var evt in agent.SubscribeAsync(sid, sseCts.Token))
-                {
-                    if (evt is ReleaseRequested rr)
-                    {
-                        preempted.TrySetResult(rr);
-                        break;
-                    }
-                }
-            }
-            catch (OperationCanceledException) { }
-            catch (Exception ex)
-            {
-                // Don't crash -- if the SSE drops we just lose preemption
-                // for this session, which is degraded but not fatal.
-                Console.Error.WriteLine($"magpilot-host: SSE subscribe failed: {ex.Message}");
-            }
-        });
-
-        var copilotExit = copilot.WaitForExitAsync();
-        var done = await Task.WhenAny(copilotExit, preempted.Task);
-        sseCts.Cancel();
-
-        if (done == copilotExit)
-        {
-            // Child exited on its own. Release ownership and return.
-            try { await agent.ReleaseAsync(sid, hostPid); }
-            catch (Exception ex) { Console.Error.WriteLine($"magpilot-host: release failed: {ex.Message}"); }
-            agent.Dispose();
-            return copilot.ExitCode;
-        }
-
-        // SSE arrived first -- web is preempting us.
-        var rrEvt = await preempted.Task;
-        Console.WriteLine();
-        Console.WriteLine("─── web took over this session ───");
-        Console.WriteLine($"   requester: {rrEvt.Requester}{(rrEvt.Force ? " (force)" : "")}");
-        // Send Ctrl+Break / SIGTERM to copilot (best v1 effort -- we
-        // don't have a PTY to inject /exit into stdin).
+        // Spawn copilot inside a PTY. PtyHost wires up stdin/stdout
+        // pumping and puts our terminal in raw mode so copilot's TUI
+        // sees keystrokes verbatim. Disposing the PtyHost restores the
+        // terminal mode -- so we always wrap in await using.
+        PtyHost copilotHost;
         try
         {
-            // Process.Kill(true) on .NET 9 uses TerminateProcess on Windows,
-            // SIGKILL on Unix. We want graceful first; try SIGTERM (Unix)
-            // or Ctrl+C event (Windows) before that.
-            if (OperatingSystem.IsWindows())
-            {
-                // Best we can do without PTY: kill the process tree.
-                copilot.Kill(entireProcessTree: true);
-            }
-            else
-            {
-                // SIGTERM by .NET API name on Unix: send via Process.Kill(false)
-                // is actually SIGKILL on Linux too. We have to P/Invoke kill(2)
-                // ourselves to send SIGTERM, but for v1 just use Kill().
-                copilot.Kill(entireProcessTree: true);
-            }
+            copilotHost = await PtyHost.SpawnAsync(copilotPath, argv, Environment.CurrentDirectory);
         }
-        catch { /* already dead */ }
-        try { await copilot.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(3)); } catch { }
-        try { await agent.ReleaseAsync(sid, hostPid); }
-        catch (Exception ex) { Console.Error.WriteLine($"magpilot-host: release failed: {ex.Message}"); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"magpilot-host: failed to spawn copilot in PTY: {ex.Message}");
+            agent.Dispose();
+            return 4;
+        }
+
+        await using (copilotHost)
+        {
+            // Listen for release-requested in the background; signal via cts.
+            using var sseCts = new CancellationTokenSource();
+            var preempted = new TaskCompletionSource<ReleaseRequested>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await foreach (var evt in agent.SubscribeAsync(sid, sseCts.Token))
+                    {
+                        if (evt is ReleaseRequested rr)
+                        {
+                            preempted.TrySetResult(rr);
+                            break;
+                        }
+                    }
+                }
+                catch (OperationCanceledException) { }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"magpilot-host: SSE subscribe failed: {ex.Message}");
+                }
+            });
+
+            var done = await Task.WhenAny(copilotHost.ExitTask, preempted.Task);
+            sseCts.Cancel();
+
+            if (done == copilotHost.ExitTask)
+            {
+                // Child exited on its own. Release ownership and return.
+                var exit = await copilotHost.ExitTask;
+                try { await agent.ReleaseAsync(sid, hostPid); }
+                catch (Exception ex) { Console.Error.WriteLine($"magpilot-host: release failed: {ex.Message}"); }
+                agent.Dispose();
+                return exit;
+            }
+
+            // SSE arrived first -- web is preempting us.
+            var rrEvt = await preempted.Task;
+            await copilotHost.ShutdownGracefullyAsync(TimeSpan.FromSeconds(rrEvt.Force ? 1 : 3));
+            // Banner uses Carriage Return to start at column 0 in case
+            // copilot left the cursor mid-line. Newlines are \r\n because
+            // the parent terminal is still in raw mode at this point.
+            Console.Out.Write("\r\n─── web took over this session ───\r\n");
+            Console.Out.Write($"   requester: {rrEvt.Requester}{(rrEvt.Force ? " (force)" : "")}\r\n");
+            Console.Out.Flush();
+
+            try { await agent.ReleaseAsync(sid, hostPid); }
+            catch (Exception ex) { Console.Error.WriteLine($"magpilot-host: release failed: {ex.Message}"); }
+        }
+        // PtyHost disposed here -- raw mode restored, cooked mode back.
 
         if (opts.ExitOnHandoff)
         {
@@ -273,7 +261,8 @@ static async Task<int> RunSessionLoopAsync(AgentClient agent, string sid, Wrappe
             return 0;
         }
 
-        // Sit on the resume prompt with a 10-min timeout.
+        // Sit on the resume prompt with a 10-min timeout. Console is
+        // back in cooked mode so Console.ReadLine works normally.
         Console.WriteLine();
         var timeout = TimeSpan.FromMinutes(10);
         Console.WriteLine($"  Press <enter> to take it back, or wait {(int)timeout.TotalMinutes}:00 to auto-exit");
