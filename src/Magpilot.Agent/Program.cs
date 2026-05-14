@@ -18,6 +18,8 @@ builder.Services.AddSingleton<FlavorCapabilities>();
 builder.Services.AddSingleton<AcpFlavorPool>();
 builder.Services.AddSingleton<AcpSessionManager>();
 builder.Services.AddSingleton<SessionScanner>();
+builder.Services.AddSingleton<HostOwnership>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<HostOwnership>());
 builder.Services.AddSingleton<SessionRegistry>();
 builder.Services.AddSingleton<HistoryReader>();
 builder.Services.AddHostedService<DiscoveryResponder>();

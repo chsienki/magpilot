@@ -30,12 +30,51 @@ public sealed class AcpSessionManager
     /// </summary>
     private readonly ConcurrentDictionary<string, AcpClient> _sessionClient = new();
 
+    /// <summary>
+    /// Per-session "is a turn currently running?" tracking. Set when
+    /// <see cref="PromptAsync"/> enters; cleared when it returns. Used by
+    /// the GET /api/sessions/{id}/state endpoint to report activity, and
+    /// by the magpilot-host's acquire-for-host flow to politely wait for
+    /// a turn boundary before taking ownership.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, InFlightEntry> _inFlight = new();
+
+    /// <summary>
+    /// Per-session signal that fires every time a turn completes or
+    /// errors. Used by <see cref="WaitForTurnBoundaryAsync"/> so callers
+    /// (e.g. acquire-for-host) can block until the agent is idle without
+    /// busy-polling.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, TaskCompletionSource> _turnDone = new();
+
     public AcpSessionManager(AcpFlavorPool pool, ILogger<AcpSessionManager> logger)
     {
         _pool = pool;
         _logger = logger;
         _pool.OnSessionUpdate += HandleUpdate;
         _pool.OnRequest += HandleRequestAsync;
+    }
+
+    /// <summary>
+    /// True if a turn is currently in flight on the agent's side for
+    /// the given session.
+    /// </summary>
+    public bool IsTurnInFlight(string sessionId, out InFlightEntry entry)
+        => _inFlight.TryGetValue(sessionId, out entry!);
+
+    /// <summary>
+    /// Wait until any in-flight turn for the session reaches a clean
+    /// boundary (TurnComplete or error). Returns immediately if no turn
+    /// is in flight. Honours <paramref name="ct"/> for the wait; on
+    /// cancellation the in-flight turn is NOT aborted -- it'll keep
+    /// running, but this caller stops waiting for it.
+    /// </summary>
+    public async Task WaitForTurnBoundaryAsync(string sessionId, CancellationToken ct)
+    {
+        if (!_inFlight.ContainsKey(sessionId)) return;
+        var tcs = _turnDone.GetOrAdd(sessionId, _ => new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+        using var reg = ct.Register(() => tcs.TrySetCanceled(ct));
+        await tcs.Task;
     }
 
     /// <summary>
@@ -80,10 +119,11 @@ public sealed class AcpSessionManager
         _sessionClient[sessionId] = client;
     }
 
-    public async Task PromptAsync(string sessionId, string text, CancellationToken ct)
+    public async Task PromptAsync(string sessionId, string text, CancellationToken ct, string? requester = null)
     {
-        _logger.LogDebug("PromptAsync sid={Sid} len={Len}", sessionId, text.Length);
+        _logger.LogDebug("PromptAsync sid={Sid} len={Len} requester={Requester}", sessionId, text.Length, requester ?? "(null)");
         var stopReason = "end_turn";
+        _inFlight[sessionId] = new InFlightEntry(requester, DateTimeOffset.UtcNow);
         try
         {
             var client = await ClientForAsync(sessionId, ct);
@@ -101,6 +141,13 @@ public sealed class AcpSessionManager
         {
             stopReason = "error";
             _logger.LogWarning(ex, "session/prompt failed for {Sid}", sessionId);
+        }
+        finally
+        {
+            _inFlight.TryRemove(sessionId, out _);
+            // Wake anyone waiting for the turn to finish.
+            if (_turnDone.TryRemove(sessionId, out var tcs))
+                tcs.TrySetResult();
         }
 
         // Notify subscribers so the SPA can clear its busy/thinking flags.
@@ -295,3 +342,10 @@ public sealed class AcpSessionManager
         };
     }
 }
+
+/// <summary>
+/// Snapshot of a single in-flight prompt/turn for a session, captured by
+/// <see cref="AcpSessionManager.PromptAsync"/>. Surfaced via
+/// <see cref="AcpSessionManager.IsTurnInFlight"/> for the GET /state endpoint.
+/// </summary>
+public readonly record struct InFlightEntry(string? Requester, DateTimeOffset StartedAt);

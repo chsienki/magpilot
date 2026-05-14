@@ -12,6 +12,34 @@ public sealed record ApprovalResponse(string OptionId);
 public sealed record SessionDetails(SessionInfo Info, string? AcpSessionId);
 
 /// <summary>
+/// Body for <c>POST /api/sessions/{id}/release-request</c>. Triggers a
+/// SSE <c>release_requested</c> event so any magpilot-host wrapper that
+/// owns the session can begin its graceful wind-down.
+/// </summary>
+public sealed record ReleaseRequestBody(
+    /// <summary>Free-form label identifying who's asking (e.g. "spa", "whatsapp", "cron").</summary>
+    string Requester,
+    /// <summary>If true, the requester would prefer the host abort its in-flight turn rather than wait.</summary>
+    bool Force = false);
+
+/// <summary>
+/// Body for <c>POST /api/sessions/{id}/acquire-for-host</c>. The wrapper
+/// supplies its own PID so the agent can verify liveness later. If the
+/// agent currently owns the session and a turn is in flight, the agent
+/// waits for the next turn boundary unless <see cref="Force"/> is true,
+/// in which case it sends an ACP cancel and proceeds after a short
+/// grace period.
+/// </summary>
+public sealed record AcquireForHostBody(int HostPid, bool Force = false);
+
+/// <summary>
+/// Body for <c>POST /api/sessions/{id}/release</c>. The wrapper calls
+/// this after its child copilot has exited cleanly, signalling that
+/// the agent may re-adopt the session.
+/// </summary>
+public sealed record ReleaseFromHostBody(int HostPid);
+
+/// <summary>
 /// Request body for the synchronous "ask Copilot a question and wait for the answer"
 /// endpoint. Hub creates an ephemeral session, sends the prompt, accumulates the
 /// streamed assistant output, and returns it as a single response.

@@ -156,6 +156,59 @@ public static class AgentEndpoints
             return Results.NoContent();
         });
 
+        // ----- magpilot-shim Phase 1 endpoints (cooperative single-owner handoff) -----
+        //
+        // The magpilot-host wrapper aliases `copilot` on the user's PATH and
+        // coordinates ownership transfers with this agent so that exactly one
+        // process drives a session at any time. Three endpoints + the
+        // ReleaseRequested SSE event implement the handoff dance:
+        //
+        //   GET   /sessions/{id}/state            -- read-only "who owns this?"
+        //   POST  /sessions/{id}/release-request  -- broadcast "host should give up"
+        //   POST  /sessions/{id}/acquire-for-host -- atomic combined release+claim
+        //   POST  /sessions/{id}/release          -- host says "I gave up, you take it"
+
+        api.MapGet("/sessions/{id}/state", (string id, SessionRegistry reg) =>
+        {
+            var state = reg.GetState(id);
+            return state is null ? Results.NotFound(new { error = $"Session {id} not on disk" }) : Results.Ok(state);
+        });
+
+        api.MapPost("/sessions/{id}/release-request", (string id, ReleaseRequestBody body, SessionRegistry reg, AcpSessionManager acp) =>
+        {
+            // Verify the session exists, then broadcast the ReleaseRequested
+            // event on its SSE stream so any subscribed magpilot-host can
+            // begin its graceful wind-down. Idempotent: if no host owns the
+            // session (or no host is subscribed), the event is a no-op.
+            if (reg.Get(id) is null)
+                return Results.NotFound(new { error = $"Session {id} not on disk" });
+            acp.PublishToSubscribers(id, new ReleaseRequested(body.Requester, body.Force));
+            return Results.Accepted();
+        });
+
+        api.MapPost("/sessions/{id}/acquire-for-host", async (string id, AcquireForHostBody body, SessionRegistry reg, CancellationToken ct) =>
+        {
+            try
+            {
+                var state = await reg.AcquireForHostAsync(id, body.HostPid, body.Force, ct);
+                return Results.Ok(state);
+            }
+            catch (FileNotFoundException ex) { return Results.NotFound(new { error = ex.Message }); }
+            catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
+        });
+
+        api.MapPost("/sessions/{id}/release", async (string id, ReleaseFromHostBody body, SessionRegistry reg, CancellationToken ct) =>
+        {
+            try
+            {
+                var state = await reg.ReleaseFromHostAsync(id, body.HostPid, ct);
+                return Results.Ok(state);
+            }
+            catch (FileNotFoundException ex) { return Results.NotFound(new { error = ex.Message }); }
+            catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
+        });
+        // --------------------------------------------------------------------
+
         api.MapPost("/sessions/{id}/messages", (string id, PromptRequest req, AcpSessionManager acp) =>
         {
             // Fire-and-forget: session/prompt returns when the turn completes

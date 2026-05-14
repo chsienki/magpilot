@@ -16,6 +16,7 @@ namespace Magpilot.Shared.Models;
 [JsonDerivedType(typeof(LoadStarted), "load_started")]
 [JsonDerivedType(typeof(HistoryDone), "history_done")]
 [JsonDerivedType(typeof(LoadFailed), "load_failed")]
+[JsonDerivedType(typeof(ReleaseRequested), "release_requested")]
 public abstract record StreamEvent;
 
 public sealed record AssistantDelta(string Text) : StreamEvent;
@@ -31,5 +32,16 @@ public sealed record HeartbeatEvent : StreamEvent;
 public sealed record LoadStarted : StreamEvent;
 public sealed record HistoryDone : StreamEvent;
 public sealed record LoadFailed(string Error) : StreamEvent;
+
+/// <summary>
+/// Notification fired by the agent when something (the SPA, WhatsApp,
+/// the cron sidecar, ...) wants to drive a session that a magpilot-host
+/// wrapper currently owns. The host is expected to gracefully wind down
+/// its child copilot process and POST /api/sessions/{id}/release so the
+/// agent can take over.
+/// </summary>
+/// <param name="Requester">Free-form label identifying who's asking (e.g. "spa", "whatsapp", "cron").</param>
+/// <param name="Force">If true, the requester would prefer the host abort its in-flight turn rather than wait for it to complete.</param>
+public sealed record ReleaseRequested(string Requester, bool Force) : StreamEvent;
 
 public sealed record ApprovalOption(string OptionId, string Label, string? Kind);
