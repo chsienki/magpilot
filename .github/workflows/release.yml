@@ -87,7 +87,7 @@ jobs:
         shell: pwsh
         run: |
           $ver = "${{ steps.version.outputs.version }}"
-          $exe = "installer-output\magpilot-setup-$ver.exe"
+          $exe = "installer\installer-output\magpilot-setup-$ver.exe"
           if (-not (Test-Path $exe)) { throw "Installer not found at $exe" }
           $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  magpilot-setup-$ver.exe" | Out-File -FilePath "$exe.sha256" -Encoding ascii -NoNewline
@@ -105,16 +105,16 @@ jobs:
               minProtocol = 1
               maxProtocol = 1
           }
-          $meta | ConvertTo-Json | Out-File -FilePath "installer-output\version.json" -Encoding ascii
+          $meta | ConvertTo-Json | Out-File -FilePath "installer\installer-output\version.json" -Encoding ascii
 
       - name: Upload installer + sha256 + version.json
         uses: actions/upload-artifact@v4
         with:
           name: magpilot-windows-x64
           path: |
-            installer-output/magpilot-setup-${{ steps.version.outputs.version }}.exe
-            installer-output/magpilot-setup-${{ steps.version.outputs.version }}.exe.sha256
-            installer-output/version.json
+            installer/installer-output/magpilot-setup-${{ steps.version.outputs.version }}.exe
+            installer/installer-output/magpilot-setup-${{ steps.version.outputs.version }}.exe.sha256
+            installer/installer-output/version.json
           if-no-files-found: error
 
   release:

@@ -5,7 +5,7 @@ installer for the Windows-side magpilot components (agent + launcher).
 
 ## What it produces
 
-`installer-output\magpilot-setup-<version>.exe` -- a per-machine installer
+`installer\installer-output\magpilot-setup-<version>.exe` -- a per-machine installer
 that:
 
 - Lays down `%ProgramFiles%\Magpilot\agent\` (self-contained .NET 9 publish
@@ -43,7 +43,7 @@ dotnet publish src\Magpilot.Host -c Release -r win-x64 --self-contained `
     /DAppVersion=$ver /DPublishDir="$PWD\publish" installer\magpilot.iss
 
 # Resulting installer:
-ls installer-output\magpilot-setup-$ver.exe
+ls installer\installer-output\magpilot-setup-$ver.exe
 ```
 
 `PublishSingleFile=false` is required because Pty.Net needs `os64\conpty.dll`

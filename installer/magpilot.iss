@@ -36,7 +36,7 @@ AppVersion={#AppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}/issues
-DefaultDirName={pf}\{#MyAppName}
+DefaultDirName={commonpf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputBaseFilename=magpilot-setup-{#AppVersion}
@@ -160,7 +160,7 @@ begin
   Result := True;
   if CurPageID = SettingsPage.ID then
   begin
-    if (Trim(SettingsPage.Values[1]) = '') and IsComponentSelected('agent') then
+    if (Trim(SettingsPage.Values[1]) = '') and WizardIsComponentSelected('agent') then
     begin
       MsgBox('Agent token must not be empty when the Agent component is installed.', mbError, MB_OK);
       Result := False;
@@ -210,7 +210,7 @@ begin
 
   if CurStep = ssPostInstall then
   begin
-    if IsComponentSelected('agent') then
+    if WizardIsComponentSelected('agent') then
     begin
       WriteEnvFile();
       if WizardIsTaskSelected('schedtask') then
@@ -241,7 +241,9 @@ begin
       Marker := ';' + Uppercase(PathStr) + ';';
       if Pos(';' + Uppercase(BinDir) + ';', Marker) > 0 then
       begin
-        NewPath := StringChange(';' + PathStr + ';', ';' + BinDir + ';', ';');
+        // StringChange's first param is `var`, so assign to NewPath first.
+        NewPath := ';' + PathStr + ';';
+        StringChange(NewPath, ';' + BinDir + ';', ';');
         // Trim leading/trailing semicolons added above.
         if Copy(NewPath, 1, 1) = ';' then NewPath := Copy(NewPath, 2, Length(NewPath));
         if Copy(NewPath, Length(NewPath), 1) = ';' then NewPath := Copy(NewPath, 1, Length(NewPath) - 1);
