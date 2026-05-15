@@ -2,13 +2,19 @@
 
 Deployment artifacts for running the hub on the docker LXC (102) in the home lab.
 
-## Layout (mirror of `/srv/openclaw`)
+## Layout
 
 ```
 /srv/magpilot/
   docker-compose.yml
   .env                 # MAGPILOT_AGENT_TOKEN=...
-  data/                # SQLite cache (hub.db)
+                       # MAGPILOT_HUB_BEARER=...
+                       # MAGPILOT_HUB_COOKIE_DOMAIN=.home.sienkiewi.cz
+                       # MAGPILOT_HUB_TRUSTED_PROXIES=127.0.0.1,::1
+                       # OAUTH_CLIENT_ID=...
+                       # OAUTH_CLIENT_SECRET=...
+                       # OAUTH_ALLOWED_GITHUB_USERS=chsienki
+  data/                # SQLite cache (hub.db, logs.db)
 ```
 
 ## Build + ship

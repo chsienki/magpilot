@@ -82,7 +82,11 @@ codebase** (MAUI Blazor Hybrid):
 runs on a docker LXC (CT 102), agents on each host (HENDRIK + a Linux
 container called `magnus`). Day-to-day usage covers chatting from any
 browser, hopping between Owned / Locked / Dormant sessions, full ACP
-tool-call streaming, central log viewer at `/admin/logs`.
+tool-call streaming, central log viewer at `/admin/logs`. As of
+2026-05-14, **GitHub OAuth** is wired (allowlisted username); the
+**magpilot-host wrapper** ships a coordinated `copilot` shim that
+preempts cooperatively with the SPA + WhatsApp via a single-owner
+handoff (no events.jsonl forks).
 
 What is **NOT yet wired**: the MAUI Android shell (the original phone
 target), real FCM/Web Push delivery, TLS for hub<->agents (still LAN +
@@ -99,14 +103,19 @@ magpilot/
    .github/copilot-instructions.md  <- orientation for AI agents working on this repo
    spikes/acp-smoke/         <- standalone ACP smoke test
    scripts/build-hub.ps1     <- builds web SPA + copies into hub wwwroot
+   scripts/test-shim-phase1.sh <- bash acceptance test for the shim endpoints
    src/
-      Magpilot.Shared/      <- DTOs, SSE event types
-      Magpilot.Agent/       <- per-host daemon (ACP wrapper + HTTP/SSE API)
+      Magpilot.Shared/      <- DTOs, SSE event types (incl. shim contract)
+      Magpilot.Agent/       <- per-host daemon (ACP wrapper + HTTP/SSE API
+                                + HostOwnership for the cooperative handoff)
       Magpilot.Hub/         <- central daemon (proxy, OAuth, SPA host,
                                 central /api/log sink + viewer)
+      Magpilot.Host/        <- magpilot-host wrapper (PATH-aliased to copilot
+                                so terminal sessions coordinate with the
+                                agent via the shim endpoints)
       Magpilot.UI/          <- shared Blazor components (chat, sessions,
-                                MagpilotTheme, ChatView, HubClient,
-                                HubLogClient, JsErrorBridge)
+                                MagpilotTheme, MagpieMark, ChatView,
+                                HubClient, HubLogClient, JsErrorBridge)
       Magpilot.Web/         <- Blazor WASM shell for the browser
    deploy/                   <- docker-compose + ship-image notes for the hub
 ```

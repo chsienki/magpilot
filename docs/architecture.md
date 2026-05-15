@@ -135,6 +135,34 @@ A sidecar plugs in by knowing:
 3. (Optionally) a pinned session id, so calls accumulate context across
    invocations instead of starting a fresh conversation each time.
 
+### Magpilot Host (`Magpilot.Host`, the wrapper)
+
+Console binary at `src/Magpilot.Host/`, assembly name `magpilot-host`.
+PATH-aliased to `copilot` on developer machines so any
+`copilot --resume=<id>` invocation runs the wrapper. The wrapper:
+
+1. Parses `--magpilot-*` flags (take, force, no-take, skip-check,
+   exit-on-handoff, status, help) and strips them before forwarding.
+2. Pings the agent. If unreachable, emits one warning and exec's the
+   real `copilot` binary as a transparent passthrough.
+3. For an explicit `--resume=<sid>`: calls `GET /sessions/{id}/state`.
+   If the session is currently agent-owned (or held by another local
+   process), it prints an interactive Y/n/f/d take-over prompt
+   (auto-answered by the `--magpilot-*` flags or refused on non-TTY).
+4. On accept: `POST /acquire-for-host`, then spawns the real
+   `copilot --resume=<sid>` inside a real PTY (via `sch.pty.net`).
+   Bidirectional byte pump between the user's terminal (in raw mode)
+   and the PTY master; window-resize watcher.
+5. Subscribes to the session's SSE stream. On `release_requested`:
+   writes `/exit\r` to the PTY master so copilot shuts down cleanly
+   (3s grace, 1s on Force, then `PTY.Kill`), prints a banner, calls
+   `POST /release`, and either exits (with `--magpilot-exit-on-handoff`)
+   or sits on a "Press <enter> to take it back" prompt.
+
+Single-owner invariant by construction: while the wrapper holds a
+session, the agent's `/messages`/`/interrupt`/`/approvals` endpoints
+return 409 to the SPA + WhatsApp + cron, so `events.jsonl` never forks.
+
 ## Auth model
 
 There are two unrelated auth boundaries:
@@ -177,12 +205,16 @@ All routes are under `/api`, all protected by `Authorization: Bearer <MAGPILOT_A
 | GET    | `/sessions`                                | List sessions on disk (with state, cwd, last-touched)      |
 | POST   | `/sessions`                                | Create a new session                                       |
 | GET    | `/sessions/{id}`                           | Get session metadata                                       |
+| GET    | `/sessions/{id}/state`                     | Rich ownership + activity view (see "Cooperative single-owner handoff" below). Returns `SessionStateInfo`. **NEW (shim Phase 1).** |
 | POST   | `/sessions/{id}/adopt`                     | Bring a dormant session live (re-attach the ACP child)     |
 | POST   | `/sessions/{id}/detach`                    | Detach without deleting on-disk state                      |
-| POST   | `/sessions/{id}/messages`                  | Send a prompt; returns 202; SSE delivers the reply         |
+| POST   | `/sessions/{id}/messages`                  | Send a prompt; returns 202; SSE delivers the reply. **Returns 409** + `HostOwnedResponse` when a magpilot-host wrapper holds the session (see handoff section). |
 | GET    | `/sessions/{id}/stream`                    | SSE stream of session events (deltas, tool calls, etc.)    |
-| POST   | `/sessions/{id}/interrupt`                 | Cancel the in-flight turn                                  |
-| POST   | `/sessions/{id}/approvals/{approvalId}`    | Resolve an approval prompt                                 |
+| POST   | `/sessions/{id}/interrupt`                 | Cancel the in-flight turn. **Returns 409** when host-owned. |
+| POST   | `/sessions/{id}/approvals/{approvalId}`    | Resolve an approval prompt. **Returns 409** when host-owned. |
+| POST   | `/sessions/{id}/release-request`           | Broadcast `release_requested` SSE event to subscribers (e.g. a magpilot-host wrapper) so they can begin graceful shutdown. **NEW (shim Phase 1).** |
+| POST   | `/sessions/{id}/acquire-for-host`          | Atomic combined op: agent waits for clean turn boundary (or aborts in-flight if `force=true`), drops its lock, marks the session host-owned. **NEW (shim Phase 1).** |
+| POST   | `/sessions/{id}/release`                   | Wrapper signals it has shut down its child; agent re-adopts. 409 if wrong `hostPid`. **NEW (shim Phase 1).** |
 | POST   | `/quick-prompt`                            | Synchronous "ask + answer" -- handles SSE internally       |
 
 ### `quick-prompt` -- the convenience door for non-SPA clients
@@ -353,30 +385,14 @@ dedicated "cron context" session is a future option.
   command, a Slack relay) is just another process that POSTs to
   `/api/quick-prompt`.
 
-## Multi-client coordination caveat (WA + SPA on the same session)
+## Multi-client coordination: SPA, WhatsApp, and magpilot-host
 
-The session-state design assumed one Owner client at a time (the SPA).
-Adding the WhatsApp sidecar as a second client of the same pinned session
-exposes a real edge:
-
-- ACP refuses to `session/load` a session that's already loaded.
-- The SPA (when state == Owned) skips `load=true` to avoid that rejection
-  and relies on the in-tab JS cache for history.
-- A fresh tab with no cache + an Owned session = empty UI, even though
-  `events.jsonl` on disk has full history.
-
-**Workaround in place**: Magnus's bootstrap deliberately leaves the
-session **Dormant** at boot. The first client to touch it (SPA or WA)
-triggers ACP load and gets the full history. Practical rule: after a
-Magnus restart, **open the SPA before sending WA messages** so the SPA
-gets the history into its tab cache. From that point on, WA messages
-flow into the SPA's open SSE stream and both clients stay consistent.
-
-## Multi-client coordination caveat (WA + SPA on the same session)
-
-The session-state design assumed one Owner client at a time (the SPA).
-Adding the WhatsApp sidecar as a second client of the same pinned session
-exposed two real edges, both fixed:
+The session-state design originally assumed one Owner client at a time
+(the SPA). Adding the WhatsApp sidecar as a second client of the same
+pinned session, and later a magpilot-host wrapper as a *terminal-side*
+driver of the same pinned session, exposed three real edges. All three
+are fixed; all three are worth understanding before you change either
+end of the contract.
 
 ### Edge 1: history empty in SPA when WA loaded the session first
 
@@ -386,24 +402,24 @@ exposed two real edges, both fixed:
 - A fresh tab with no cache + an Owned session = empty UI, even though
   `events.jsonl` on disk has full history.
 
-**Fix in place** (the proper one): the agent now exposes
-`GET /api/sessions/{id}/history` (`HistoryReader.cs`) which reads the
-session's `events.jsonl` directly and projects it into a flat
-`List<{Role,Text,ToolCallId}>`. The SPA falls back to that endpoint when
-state==Owned and there's no in-tab cache, then connects to `/stream`
-without `load=true` for live updates. ACP is bypassed entirely; the
-events file is the durable source of truth that ACP itself was going to
-replay anyway.
+**Fix in place**: the agent exposes `GET /api/sessions/{id}/history`
+(`HistoryReader.cs`) which reads the session's `events.jsonl` directly
+and projects it into a flat `List<{Role,Text,ToolCallId}>`. The SPA
+falls back to that endpoint when state==Owned and there's no in-tab
+cache, then connects to `/stream` without `load=true` for live updates.
+ACP is bypassed entirely; the events file is the durable source of
+truth that ACP itself was going to replay anyway.
 
 ### Edge 2: WA-side prompts not visible in SPA stream
 
-- ACP only emits `user_message_chunk` during history *replay* (session/load),
-  not during live prompts -- the prompt text IS the input.
-- The SPA renders the user's typed prompt locally before submitting; nothing
-  echoes it on the server side.
-- A WA prompt sent via `/api/quick-prompt` with a pinned `sessionId` would
-  cause Magnus to reply (visible in SPA via AssistantDelta), but the
-  user's question never reached the SPA's stream.
+- ACP only emits `user_message_chunk` during history *replay*
+  (session/load), not during live prompts -- the prompt text IS the
+  input.
+- The SPA renders the user's typed prompt locally before submitting;
+  nothing echoes it on the server side.
+- A WA prompt sent via `/api/quick-prompt` with a pinned `sessionId`
+  would cause Magnus to reply (visible in SPA via AssistantDelta), but
+  the user's question never reached the SPA's stream.
 
 **Fix in place**: agent's `quick-prompt` handler, when `sessionId` is
 pinned, publishes a synthesized `UserDelta(req.Prompt)` into the
@@ -411,6 +427,70 @@ session's broadcast channel before dispatching to ACP. All other
 subscribers (the SPA) see "the user said X" before the assistant
 deltas arrive. Used `AcpSessionManager.PublishToSubscribers` (a thin
 wrapper over the existing private Publish).
+
+### Edge 3: phone or SPA wants to drive a session a terminal owns
+
+The earlier "edges" both assumed the agent was always the driver. The
+shim project (`copilot-context/ideas/projects/magpilot-shim.md`)
+introduces a third class of client: a `magpilot-host` wrapper running
+in the user's terminal. When the user runs `copilot --resume=<sid>`
+(PATH-aliased to `magpilot-host`), the wrapper takes ownership of the
+session for an interactive terminal turn. While it's holding the
+session, the agent must NOT silently drive the same session from the
+SPA or WhatsApp, because that would fork `events.jsonl` (we proved it
+empirically -- both VS Code's "connect" feature and concurrent
+`copilot --resume` instances will fork the parentId chain because no
+one re-reads the file before writing).
+
+**Fix in place** (the cooperative single-owner handoff):
+
+1. Agent's `Sessions/HostOwnership.cs` keeps an in-memory
+   authoritative map of `sessionId -> hostPid`. The on-disk
+   `inuse.<PID>.lock` files are advisory only -- two PIDs can claim
+   the same session simultaneously and the file system does nothing
+   to prevent it. (Verified empirically 2026-05-13.)
+2. `POST /api/sessions/{id}/acquire-for-host { HostPid, Force }`
+   atomically waits for any in-flight ACP turn to reach a clean
+   boundary (or aborts it if `force=true`), drops the agent's
+   ownership, and records the host as owner. Returns the refreshed
+   `SessionStateInfo`.
+3. While host-owned, **`POST /messages`, `POST /interrupt`, and
+   `POST /approvals/{id}` return `409 Conflict`** with body
+   `HostOwnedResponse { Error, NeedsRelease=true, HostPid }`.
+   Callers (SPA's `HubClient.SendPromptAsync` and the WhatsApp
+   sidecar's `postPromptWithReleaseKnock`) react to 409 by:
+   - POSTing `/release-request { Requester, Force }` so the agent
+     broadcasts a `release_requested` SSE event the wrapper is
+     subscribed to.
+   - Polling `GET /state` every 500ms until `owner != "Host"` or
+     60s elapses.
+   - Retrying the original POST.
+4. The wrapper, on receiving `release_requested`, writes `/exit\r`
+   to the PTY master so copilot's TUI exits cleanly (3s grace, 1s
+   on Force, then `PTY.Kill`), prints a "─── web took over ───"
+   banner, and POSTs `/release { HostPid }` so the agent re-adopts
+   the session.
+5. The wrapper either exits (with `--magpilot-exit-on-handoff`) or
+   sits on a "Press <enter> to take it back" prompt with a 10-min
+   timeout.
+
+**End-to-end timing**: a measured-typical 409 -> release-request ->
+SSE -> wrapper exit -> retry -> 202 dance completes in ~3.4s.
+
+**SPA UX on 60s timeout**: `HubClient.SendPromptAsync` throws
+`HostStillOwnedException`. `Home.razor`'s `HandleSend` catches it and
+surfaces a `MudAlert` with a "Take over from terminal" button that
+calls `acquire-for-host` with `force=true`, immediately releases, and
+retries the prompt.
+
+**WhatsApp UX on 60s timeout**: a permanent WA chat message
+"❌ Terminal session (PID N) did not release within 60s. Your message
+was not delivered." (Force-take from WA isn't supported -- the user
+must come to the SPA for that.)
+
+> **If you add a new caller of `/messages` (or anything that drives
+> ACP), wrap it with the same retry-on-409 pattern.** Don't
+> re-implement ad hoc.
 
 ## How to add a new sidecar
 
@@ -496,12 +576,16 @@ The Magpilot SPA is a Blazor WebAssembly app served by the hub. As of
   (in `Home.razor`) to `MainLayout` via a cascading `ThemeState` record
   (`Magpilot.UI/ThemeState.cs`) -- this avoids a circular reference
   between `Magpilot.UI` (RCL) and `Magpilot.Web` (the WASM project).
-- **Layout**: `MudLayout` with `MudAppBar` (brand mark + selected host
-  chip + dark toggle + cloud-status icon) and a `MudDrawer` that becomes
-  off-canvas at viewports below `Breakpoint.Md`. Drawer holds the host
-  picker (`MudList` with online dot) and grouped session list
-  (`MudListSubheader` per state, `MudChip` for state, "Show N more"
-  button).
+- **Layout**: `MudLayout` with `MudAppBar` (selected host chip + dark
+  toggle + cloud-status icon -- the AppBar is intentionally text-first;
+  the magpie used to live here but was moved out during the brand
+  sweep) and a `MudDrawer` that becomes off-canvas at viewports below
+  `Breakpoint.Md`. Drawer holds a **two-pane** affair: the host picker
+  (`MudList` with online dot) OR the grouped session list for the
+  picked host (`MudListSubheader` per state, `MudChip` for state,
+  "Show N more" button), with a back-arrow header to flip between
+  them. The two panes are mutually exclusive within the drawer (not
+  stacked sections).
 - **Chat surface** (`Magpilot.UI/Components/ChatView.razor`): per-message
   `MudPaper` bubbles with role-aware avatars + alignment. User on the
   right with primary fill; assistant on the left outlined; thoughts in a
@@ -511,11 +595,28 @@ The Magpilot SPA is a Blazor WebAssembly app served by the hub. As of
   `<textarea>` (so the Enter/Shift+Enter shim in
   `Magpilot.Web/wwwroot/js/composer.js` still applies) paired with a
   `MudIconButton` paper-plane send.
-- **Logo**: the magpie SVG at `wwwroot/favicon-mark.svg` (a
-  background-stripped variant of `favicon.svg`) is mounted in the AppBar
-  with a layered `drop-shadow` halo so it doesn't disappear into the
-  primary-coloured bar.
-- **Static JS**: lives in `Magpilot.Web/wwwroot/js/` (e.g. `composer.js`)
-  rather than collocated as `*.razor.js` next to components -- the hub's
-  multi-stage Dockerfile trips BLAZOR106 on `_content/...` collocated
-  assets at the second publish step.
+- **Brand mark + MagpieMark component**: the magpie SVG lives in the
+  shared RCL at `Magpilot.UI/wwwroot/favicon-mark.svg` (served via
+  `_content/Magpilot.UI/favicon-mark.svg` to satellite SPAs). Inside
+  C# components, render it via `Magpilot.UI/Components/MagpieMark.razor`
+  -- a single source of truth with `Size` / `Glow` / `Class` parameters.
+  Used on the agents-list bullets, the Hosts header, the no-agents
+  empty state, and the loading-screen splash. Don't ship a local copy
+  of the SVG to a consumer; the RCL one is canonical.
+- **Brand-themed loader**: both SPAs (`Magpilot.Web/wwwroot/index.html`
+  + `Magnus.Web/wwwroot/index.html` in the magstronaut repo) replace
+  the default Blazor circle with a custom screen: the magpie mark
+  centered behind a teal arc driven by `--blazor-load-percentage`.
+  CSS lives in each app's `wwwroot/css/app.css`. Don't re-introduce
+  the default Blazor circle SVG.
+- **Take-over UX**: when `HubClient.SendPromptAsync` throws
+  `HostStillOwnedException` (the agent returned 409 because a
+  magpilot-host wrapper holds the session and the polite knock didn't
+  release within 60s), `Home.razor` surfaces a `MudAlert` above
+  ChatView with a "Take over from terminal" button that calls
+  `acquire-for-host?force=true`, immediately releases, and retries
+  the prompt. See "Multi-client coordination" above.
+- **Static JS**: lives in `Magpilot.Web/wwwroot/js/` (e.g. `composer.js`,
+  `error-capture.js`) rather than collocated as `*.razor.js` next to
+  components -- the hub's multi-stage Dockerfile trips BLAZOR106 on
+  `_content/...` collocated assets at the second publish step.

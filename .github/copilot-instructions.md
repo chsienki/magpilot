@@ -658,6 +658,33 @@ If you implement any of these, update `docs/plan.md` and this file.
 3. Don't commit without explicit user permission. The user prefers
    to review changes before they hit `main`.
 
+## Sibling docs (keep in sync)
+
+When you change anything in this file that describes the architecture,
+the wire contract, the project layout, or the SPA conventions, **also
+update the sibling docs in the same commit batch**. Their roles:
+
+| Path | Role | Update when... |
+|---|---|---|
+| `.github/copilot-instructions.md` (this file) | Orientation for AI agents working on the repo. Covers gotchas, pitfalls, and "do NOT relearn this by breaking it" notes. | Anything in this repo's *behaviour* changes (new endpoint, new pattern, new gotcha discovered, project layout shifts). |
+| `docs/architecture.md` | The public contract: the agent HTTP API table, the multi-client coordination story, the UI/SPA conventions. Has the wire-format truth in human-readable form. | Any new agent endpoint, any change to the 409 / SSE / multi-client coordination story, any new UI convention worth advertising. |
+| `docs/plan.md` | The original design rationale ("v5: Blazor Hybrid + Web"). Reads as a pitch document. Largely historical now -- shows the intent at the time of design. | Major architectural pivots only (a new top-level component, dropping a planned feature). The day-to-day churn lives in this file + architecture.md. |
+| `README.md` | Public-facing pitch + status + repository layout. Aimed at a human visitor to GitHub. | Status section changes (new components shipped, new headline capabilities); the repository layout block when projects are added/removed. |
+| `deploy/README.md` | Operational recipe for shipping the hub image to LXC 102. | Anything that changes the build/save/scp/load/recreate steps. |
+| (in magstronaut, NOT this repo) `magnus/README.md`, `whatsapp/README.md`, `cron/README.md`, `preflight/README.md` | Site-specific deployment recipes for the satellites. | Only update from inside the magstronaut repo when deploy plumbing changes. |
+
+> **Rule**: any non-trivial behavioural change to magpilot should touch
+> at minimum `.github/copilot-instructions.md` AND `docs/architecture.md`
+> in the same commit. The README.md status block is touched on
+> shippable milestones. plan.md is touched only on architectural
+> pivots, not on incremental feature work.
+
+The `copilot-context` repo (private, on user's local machine) holds
+project files that drive ongoing work
+(`copilot-context/ideas/projects/<name>.md`); keep the magpilot-side
+"Ideas backlog" section below in sync with their `Status:` and
+`Log:` entries when a project ships.
+
 ## Ideas backlog
 
 <!-- Mirrored from copilot-context/ideas/inbox.md. Newest at the bottom. -->
