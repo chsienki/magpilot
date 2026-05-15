@@ -119,39 +119,68 @@ begin
   end;
 end;
 
+// Generate a 32-char (128-bit) random hex token. Used as the default
+// agent bearer secret on fresh installs so the user has something
+// secure pre-filled and can either keep it (and copy it to the hub
+// config) or paste over it with an existing token to pair with a
+// hub that already knows the secret.
+function GenerateRandomToken(): String;
+var
+  i: Integer;
+  Hex: String;
+begin
+  Hex := '0123456789abcdef';
+  Result := '';
+  for i := 1 to 32 do
+    Result := Result + Hex[Random(16) + 1];
+end;
+
 var
   SettingsPage: TInputQueryWizardPage;
 
 procedure InitializeWizard();
-var
-  EnvPath, ExistingHubUrl, ExistingToken, ExistingPublic: String;
 begin
   SettingsPage := CreateInputQueryPage(
     wpSelectTasks,
     'Magpilot Settings',
-    'Configure how the agent talks to the hub.',
-    'These values are written to {app}\config\' + EnvFileName +
-    ' and re-read on every install (so re-running the installer or `magpilot --magpilot-update` preserves them).');
+    'Configure the agent. A random token is auto-generated; copy it to ' +
+    'your hub config (or paste in an existing token to pair with a hub ' +
+    'that already knows the secret).',
+    'These values are written to <install>\config\magpilot.env and ' +
+    're-read on every install (so re-running the installer or ' +
+    '`magpilot --magpilot-update` preserves them).');
   SettingsPage.Add('Hub URL (e.g. http://192.168.1.239:7088):', False);
-  SettingsPage.Add('Agent token (the bearer secret shared with the hub):', True);
+  SettingsPage.Add('Agent token (auto-generated; the bearer shared with the hub):', False);
   SettingsPage.Add('Public URL the hub uses to reach this agent:', False);
 
-  // Pre-populate from existing magpilot.env on upgrade.
-  EnvPath := ExpandConstant('{app}\config\' + EnvFileName);
-  if FileExists(EnvPath) then
+  // Defaults shown on first install. ShouldSkipPage overrides these from
+  // an existing magpilot.env if one is present (upgrade path).
+  SettingsPage.Values[0] := 'http://192.168.1.239:7088';
+  SettingsPage.Values[1] := GenerateRandomToken();
+  SettingsPage.Values[2] := 'http://' + GetComputerNameString + ':5099';
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+var
+  EnvPath, ExistingHubUrl, ExistingToken, ExistingPublic: String;
+begin
+  Result := False;
+  // First place {app} is safe to expand: ShouldSkipPage(SettingsPage.ID)
+  // runs after wpSelectDir, in both interactive and silent installs.
+  // Pre-populate from any pre-existing magpilot.env so silent re-installs
+  // (e.g. magpilot --magpilot-update) preserve hub URL + token.
+  if PageID = SettingsPage.ID then
   begin
-    ExistingHubUrl := ReadEnvKey(EnvPath, 'MAGPILOT_HUB_URL');
-    ExistingToken := ReadEnvKey(EnvPath, 'MAGPILOT_AGENT_TOKEN');
-    ExistingPublic := ReadEnvKey(EnvPath, 'MAGPILOT_AGENT_PUBLIC_URL');
-    SettingsPage.Values[0] := ExistingHubUrl;
-    SettingsPage.Values[1] := ExistingToken;
-    SettingsPage.Values[2] := ExistingPublic;
-  end
-  else
-  begin
-    SettingsPage.Values[0] := 'http://192.168.1.239:7088';
-    SettingsPage.Values[1] := '';
-    SettingsPage.Values[2] := 'http://' + GetComputerNameString + ':5099';
+    EnvPath := ExpandConstant('{app}\config\' + EnvFileName);
+    if FileExists(EnvPath) then
+    begin
+      ExistingHubUrl := ReadEnvKey(EnvPath, 'MAGPILOT_HUB_URL');
+      ExistingToken := ReadEnvKey(EnvPath, 'MAGPILOT_AGENT_TOKEN');
+      ExistingPublic := ReadEnvKey(EnvPath, 'MAGPILOT_AGENT_PUBLIC_URL');
+      if ExistingHubUrl <> '' then SettingsPage.Values[0] := ExistingHubUrl;
+      if ExistingToken <> ''  then SettingsPage.Values[1] := ExistingToken;
+      if ExistingPublic <> '' then SettingsPage.Values[2] := ExistingPublic;
+    end;
   end;
 end;
 
