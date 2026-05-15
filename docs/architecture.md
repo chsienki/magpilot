@@ -81,6 +81,20 @@ Responsibilities:
 - **Proxies** SPA-initiated calls to the right agent: browser hits
   `https://magpilot.../api/agents/magnus/sessions`, hub looks up `magnus`
   in the registry, forwards the call with the agent bearer token.
+- **Three named HttpClients per agent** (`agent`, `agent-action`,
+  `agent-stream`) registered in `Program.cs` and dispensed by
+  `AgentHttpClient.ClientFor(name, kind)`:
+
+  | Kind                       | Timeout       | Used for                                                                                        |
+  |----------------------------|---------------|-------------------------------------------------------------------------------------------------|
+  | `AgentClientKind.Read`     | 10s (default) | Control-plane GETs (registry, sessions list, host state). Fail-fast so a dead agent can't stall SPA aggregation. |
+  | `AgentClientKind.Action`   | 90s (default) | ACP-driving mutations: `POST /sessions`, `POST /sessions/{id}/adopt`. ACP can spend ~5-30s loading plugins; under 10s the hub returned 502 and marked the agent OFFLINE despite it being healthy. |
+  | `AgentClientKind.Stream`   | infinite      | SSE proxy + `quick-prompt` (long-poll service caller).                                          |
+
+  Tunable via `Hub:AgentHttpTimeoutSec` and `Hub:AgentActionTimeoutSec`.
+  **Regression rule:** any new mutating endpoint must request `Action`;
+  fire-and-forget routes like `/messages` (which return 202 immediately)
+  can stay on `Read`.
 - **OAuth** for browser users (GitHub OAuth, allowlisted username; or
   `MAGPILOT_DEV_BYPASS_AUTH=true` for `/dev-login`). Cookie auth.
 

@@ -67,7 +67,7 @@ public static class HubEndpoints
             (string name, NewSessionRequest req, AgentHttpClient http, AgentRegistry reg, CancellationToken ct) =>
                 Proxy(name, reg, async () =>
                 {
-                    var resp = await http.ClientFor(name).PostAsJsonAsync("api/sessions", req, ct);
+                    var resp = await http.ClientFor(name, AgentClientKind.Action).PostAsJsonAsync("api/sessions", req, ct);
                     return await Forward(resp);
                 }));
 
@@ -91,7 +91,7 @@ public static class HubEndpoints
             (string name, string id, AdoptRequest req, AgentHttpClient http, AgentRegistry reg, CancellationToken ct) =>
                 Proxy(name, reg, async () =>
                 {
-                    var resp = await http.ClientFor(name).PostAsJsonAsync($"api/sessions/{id}/adopt", req, ct);
+                    var resp = await http.ClientFor(name, AgentClientKind.Action).PostAsJsonAsync($"api/sessions/{id}/adopt", req, ct);
                     return await Forward(resp);
                 }));
 
@@ -173,7 +173,7 @@ public static class HubEndpoints
             (string name, QuickPromptRequest req, AgentHttpClient http, AgentRegistry reg, CancellationToken ct) =>
                 Proxy(name, reg, async () =>
                 {
-                    var client = http.ClientFor(name, streaming: true);
+                    var client = http.ClientFor(name, AgentClientKind.Stream);
                     var resp = await client.PostAsJsonAsync("api/quick-prompt", req, ct);
                     return await Forward(resp);
                 }));
@@ -183,7 +183,7 @@ public static class HubEndpoints
             async (string name, string id, AgentHttpClient http, AgentRegistry reg, HttpContext ctx, CancellationToken ct) =>
             {
                 // SSE uses the no-timeout client; the connection lifetime is controlled by the SPA.
-                using var client = http.ClientFor(name, streaming: true);
+                using var client = http.ClientFor(name, AgentClientKind.Stream);
                 var qs = ctx.Request.QueryString.HasValue ? ctx.Request.QueryString.Value : "";
                 using var req = new HttpRequestMessage(HttpMethod.Get, $"api/sessions/{id}/stream{qs}");
                 HttpResponseMessage resp;

@@ -12,10 +12,16 @@ builder.Services.AddSingleton<DiscoveryProber>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<DiscoveryProber>());
 builder.Services.AddSingleton<Magpilot.Hub.Logging.LogStore>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<Magpilot.Hub.Logging.LogStore>());
-// Short timeout for control-plane calls so a single dead agent can't stall
-// SPA aggregation. SSE proxy uses a separate client with no timeout.
+// Short timeout for read-only control-plane calls (e.g. listing sessions)
+// so a single dead agent can't stall SPA aggregation.
 var agentTimeoutSec = builder.Configuration.GetValue("Hub:AgentHttpTimeoutSec", 10);
 builder.Services.AddHttpClient("agent", c => c.Timeout = TimeSpan.FromSeconds(agentTimeoutSec));
+// Longer budget for mutating calls that drive ACP (session/new, session/load).
+// ACP's own session/new defaults to 120s and session/load to 300s; this client
+// must outlive the typical ACP wait or the hub will return 502 to the SPA and
+// mark a perfectly healthy agent offline. Tunable via Hub:AgentActionTimeoutSec.
+var agentActionTimeoutSec = builder.Configuration.GetValue("Hub:AgentActionTimeoutSec", 90);
+builder.Services.AddHttpClient("agent-action", c => c.Timeout = TimeSpan.FromSeconds(agentActionTimeoutSec));
 builder.Services.AddHttpClient("agent-stream", c => c.Timeout = Timeout.InfiniteTimeSpan);
 builder.Services.AddHttpClient("oauth");
 builder.Services.AddHubAuth(builder.Configuration);

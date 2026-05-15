@@ -409,6 +409,11 @@
     private PendingForceTake? _pendingForceTake;
     private string? _streamingFor;
     private int _streamGeneration;
+    // Number of consecutive auto-reconnect attempts since the last successful
+    // event. Reset to 0 whenever the stream pump receives any payload, or when
+    // the user navigates to a different session. Capped to avoid infinite
+    // reconnect loops if the agent is genuinely down.
+    private int _streamReconnectAttempts;
     private SessionInfo? _pendingOrphan;
     private bool _newSessionOpen;
     private string _newSessionCwd = "";
@@ -784,7 +789,7 @@
             .ToList();
     }
 
-    private async Task StartStreamingAsync(bool load = false, bool force = false, List<ChatMessage>? restoreFrom = null)
+    private async Task StartStreamingAsync(bool load = false, bool force = false, List<ChatMessage>? restoreFrom = null, bool isReconnect = false)
     {
         if (Agent is null || SessionId is null) return;
 
@@ -810,15 +815,17 @@
                 _messages.Add(new ChatMessage { Role = m.Role, Text = m.Text, ToolCallId = m.ToolCallId });
         }
         _loading = load;
+        if (!isReconnect) _streamReconnectAttempts = 0;
         _streamCts = new CancellationTokenSource();
         _streamingFor = $"{Agent}/{SessionId}";
         var ct = _streamCts.Token;
         var agent = Agent;
         var sid = SessionId;
         var streamId = ++_streamGeneration;
-        Console.WriteLine($"[stream {streamId}] start agent={agent} sid={sid} load={load}");
+        Console.WriteLine($"[stream {streamId}] start agent={agent} sid={sid} load={load} reconnect={isReconnect}");
         _ = Task.Run(async () =>
         {
+            var gotAnyEvent = false;
             try
             {
                 await foreach (var evt in Hub.StreamAsync(agent, sid, load, force, ct))
@@ -827,20 +834,67 @@
                     {
                         // A newer stream task has taken over; this one is stale.
                         Console.WriteLine($"[stream {streamId}] stale, dropping {evt.GetType().Name}");
-                        break;
+                        return;
                     }
+                    gotAnyEvent = true;
+                    _streamReconnectAttempts = 0;
                     await InvokeAsync(() => Apply(evt));
                 }
             }
-            catch (OperationCanceledException) { }
+            catch (OperationCanceledException)
+            {
+                // User navigated or component disposed. Don't reconnect.
+                return;
+            }
             catch (Exception ex)
             {
                 HubLog.LogError($"[stream {streamId}] {ex.Message}", ex.ToString(),
                     category: nameof(Home), sessionId: sid,
                     extra: new { agent, generation = streamId });
                 Console.Error.WriteLine($"[stream {streamId}] {ex.Message}");
+                return;
             }
-            Console.WriteLine($"[stream {streamId}] exit");
+
+            // Reached when the SSE stream ended without an exception. Either
+            // the underlying socket was torn down (e.g. mobile browser
+            // backgrounded the tab and Android Chrome killed the connection,
+            // surfaced by HubClient.StreamAsync as a silent yield-break) or
+            // the hub closed the stream cleanly. If the user is still on
+            // this session, transparently reconnect with the existing
+            // message snapshot so the chat doesn't appear frozen.
+            if (ct.IsCancellationRequested) return;
+            if (streamId != _streamGeneration) return;
+            if (_streamingFor != $"{agent}/{sid}") return;
+
+            var attempt = ++_streamReconnectAttempts;
+            const int maxAttempts = 8;
+            if (attempt > maxAttempts)
+            {
+                HubLog.LogError(
+                    $"[stream {streamId}] giving up after {attempt - 1} reconnect attempts",
+                    stack: null, category: nameof(Home), sessionId: sid,
+                    extra: new { agent, generation = streamId });
+                Console.Error.WriteLine($"[stream {streamId}] giving up after {attempt - 1} reconnect attempts");
+                return;
+            }
+
+            // Exponential backoff capped at 10s. Note: Task.Delay is heavily
+            // throttled while a tab is hidden, so a backgrounded phone won't
+            // burn battery on retry storms -- the delay naturally extends
+            // until the tab becomes visible again.
+            var delaySec = Math.Min(10, 1 << Math.Min(attempt - 1, 4));
+            Console.WriteLine($"[stream {streamId}] disconnected (gotAny={gotAnyEvent}); reconnect attempt {attempt} in {delaySec}s");
+            try { await Task.Delay(TimeSpan.FromSeconds(delaySec), ct); }
+            catch (OperationCanceledException) { return; }
+
+            if (ct.IsCancellationRequested) return;
+            if (streamId != _streamGeneration) return;
+            if (_streamingFor != $"{agent}/{sid}") return;
+
+            var snapshot = _messages
+                .Select(m => new ChatMessage { Role = m.Role, Text = m.Text, ToolCallId = m.ToolCallId })
+                .ToList();
+            await InvokeAsync(() => StartStreamingAsync(load: false, force: false, restoreFrom: snapshot, isReconnect: true));
         }, ct);
 
         if (load)

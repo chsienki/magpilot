@@ -183,7 +183,28 @@ public sealed class HubClient
         using var reader = new StreamReader(stream);
         while (!ct.IsCancellationRequested)
         {
-            var line = await reader.ReadLineAsync(ct);
+            string? line;
+            try
+            {
+                line = await reader.ReadLineAsync(ct);
+            }
+            catch (HttpRequestException)
+            {
+                // Underlying SSE socket was torn down (very common when a
+                // mobile browser backgrounds the tab and the OS drops the
+                // connection -- WASM resumes and ReadLineAsync surfaces a
+                // 'TypeError: network error'). Treat as end-of-stream so the
+                // caller can decide whether to reconnect, instead of
+                // bubbling up as an unhandled exception.
+                yield break;
+            }
+            catch (IOException)
+            {
+                // Same intent as above for native runtimes (MAUI host) where
+                // the failure mode is an IOException rather than a Browser
+                // HttpRequestException.
+                yield break;
+            }
             if (line is null) yield break;
             if (!line.StartsWith("data:", StringComparison.Ordinal)) continue;
             var json = line[5..].Trim();

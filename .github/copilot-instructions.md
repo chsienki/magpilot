@@ -84,13 +84,16 @@ src/
                                       SPA can rehydrate Owned-without-cache
     Logging/HubLoggerProvider.cs   <- mirrors Warning+ to hub /api/log/batch
   Magpilot.Hub/      <- central daemon: agent registry, proxy, SPA host, auth
+    Agents/AgentHttpClient.cs      <- ClientFor(name, kind): three named HttpClients
+                                      (Read 10s / Action 90s / Stream infinite).
+                                      See "Hub -> agent HTTP timeouts" gotcha.
     Logging/LogStore.cs            <- SQLite + FTS5 central log; trim loop
     Logging/LogModels.cs           <- ingest + query DTOs
     Api/LogEndpoints.cs            <- POST /api/log[/batch], GET /api/log[/sources]
-    Api/HubEndpoints.cs            <- proxies the agent endpoints, including
-                                      the four shim routes (/state,
-                                      /release-request, /acquire-for-host,
-                                      /release).
+    Api/HubEndpoints.cs            <- per-agent proxy. Routes pick AgentClientKind
+                                      per call. Forwards the four shim routes
+                                      (/state, /release-request, /acquire-for-host,
+                                      /release) verbatim via Forward(resp).
     Auth/HubAuth.cs                <- cookie auth + GitHub OAuth (with
                                       ReturnUrl bounce for satellite SPAs).
   Magpilot.Host/     <- magpilot-host wrapper (assembly: magpilot-host).
@@ -118,7 +121,8 @@ src/
                                       Asset served via RCL at
                                       _content/Magpilot.UI/favicon-mark.svg.
     Pages/Home.razor               <- main chat (per-session cache, SSE consumer,
-                                      three-way Owned routing -- see SPA section).
+                                      three-way Owned routing, auto-reconnect on
+                                      backgrounded-tab disconnects -- see SPA section).
                                       HandleSend catches HostStillOwnedException
                                       and surfaces a "Take over from terminal"
                                       MudAlert (see "Cooperative handoff").
@@ -133,6 +137,9 @@ src/
                                       "Take over from terminal" path.
                                       HostStillOwnedException is the typed
                                       surface for the polite-knock timeout.
+                                      StreamAsync silently yield-breaks on
+                                      browser-side network drops so Home.razor's
+                                      pump can transparently reconnect.
     Services/HubLogClient.cs       <- bounded queue + drain; posts /api/log
     Services/JsErrorBridge.cs      <- static [JSInvokable] for window.onerror
   Magpilot.Web/      <- Blazor WASM shell (built into Magpilot.Hub/wwwroot/)
@@ -288,6 +295,43 @@ them by breaking them.
   surfaces as `inFlight.driver` in the take-over prompt -- pass a
   meaningful label whenever you call it from a new code path.
 
+### Hub -> agent HTTP timeouts (three named clients, don't merge them)
+
+The hub talks to each agent over plain HTTP and the timeout budget
+is **deliberately split into three named `HttpClient`s** in
+`Magpilot.Hub.Program.cs`. Picking the wrong one causes either
+silent agent flakiness or stalled SPA aggregation -- both have
+already burned us in production.
+
+| Client name      | Default timeout | Tunable                        | Used for                                                                 |
+|------------------|-----------------|--------------------------------|--------------------------------------------------------------------------|
+| `agent`          | 10s             | `Hub:AgentHttpTimeoutSec`      | Fast read-only control-plane (GET `/api/sessions`, `/api/info`, etc.)    |
+| `agent-action`   | 90s             | `Hub:AgentActionTimeoutSec`    | Mutating ACP-driving calls (`POST /api/sessions`, `/sessions/{id}/adopt`) |
+| `agent-stream`   | infinite        | (n/a)                          | SSE proxy and `/quick-prompt` (turns can run minutes)                    |
+
+Pick via the `AgentClientKind` enum on `AgentHttpClient.ClientFor(name, kind)`:
+`Read` (default), `Action`, or `Stream`.
+
+**Why three not one:** `agent` has to fail fast (10s) so a single dead
+agent can't stall the SPA's host list. But `POST /api/sessions` on
+the agent calls ACP `session/new` which routinely takes 5-30s under
+plugin load -- if it shares the 10s budget, the hub raises
+`TaskCanceledException`, **catches it as "agent unreachable", marks
+the agent OFFLINE, and returns 502 to the SPA** even though the
+session is being created successfully on the agent. Symptom: SPA
+"new session" toast shows 502, agent disappears from the host list
+until the next discovery probe. If you see this regress, check
+that the relevant endpoint in `HubEndpoints.cs` still calls
+`http.ClientFor(name, AgentClientKind.Action)`.
+
+**Don't add a new mutating endpoint without thinking about which
+client it should use.** `/messages` is fire-and-forget on the agent
+(returns 202 immediately), so `Read` is fine. `/detach`,
+`/interrupt`, `/approvals/{id}` are all quick -- `Read`. Anything
+that triggers `session/new`, `session/load`, or other ACP work
+that can stall: `Action`. Anything that holds an open response
+body for a turn: `Stream`.
+
 ### Pinned sessions (long-lived) and `/quick-prompt`
 
 Beyond the ephemeral sessions the SPA creates, Magpilot supports
@@ -320,6 +364,35 @@ conversation instead of spawning a throwaway one.
   `_streamingFor` synchronously at the top of the routing branch,
   and uses a `_streamGeneration` counter so any stale pump bails on
   the next iteration.
+
+- **SSE auto-reconnect on backgrounded mobile tabs.** Android
+  Chrome (and iOS Safari) tear down the underlying SSE socket when
+  the user backgrounds the tab. On resume, the still-pumping
+  `await reader.ReadLineAsync(ct)` inside
+  `Magpilot.UI.Services.HubClient.StreamAsync` would otherwise
+  surface as a `BrowserHttpInterop` `HttpRequestException`
+  (`TypeError: network error`) and bubble up as an unhandled
+  exception, leaving the chat permanently frozen and spamming the
+  central log. Two-part fix in place:
+  1. `HubClient.StreamAsync` catches `HttpRequestException` /
+     `IOException` around the `ReadLineAsync` call and treats them
+     as a clean end-of-stream (`yield break`) instead of throwing.
+     Don't replace this with a re-throw -- the upstream connection
+     will be re-established by Home.razor.
+  2. `Home.razor`'s pump task, when the foreach exits naturally
+     (or via the silent yield-break above) AND the user is still on
+     the same session AND the CT isn't cancelled, transparently
+     restarts the stream with `load: false` and a snapshot of
+     `_messages` as `restoreFrom`. Backoff is exponential capped at
+     10s, with `_streamReconnectAttempts` resetting on any received
+     event. `Task.Delay` is throttled while the tab is hidden, so a
+     backgrounded phone naturally waits to reconnect until you
+     foreground it -- no battery-hungry retry storm.
+
+  **Important:** the `isReconnect` parameter on
+  `StartStreamingAsync` exists so a self-reconnect doesn't reset
+  the attempt counter -- a real navigation always passes
+  `isReconnect: false` (the default). Don't drop this distinction.
 
 ### Session classification (`SessionScanner`) and ownership
 
