@@ -143,43 +143,47 @@ begin
   SettingsPage := CreateInputQueryPage(
     wpSelectTasks,
     'Magpilot Settings',
-    'Configure the agent. A random token is auto-generated; copy it to ' +
-    'your hub config (or paste in an existing token to pair with a hub ' +
-    'that already knows the secret).',
+    'Configure the agent. The agent token is auto-generated; the hub ' +
+    'bearer comes from your hub config (leave blank to skip hub-mediated ' +
+    'log forwarding + autoupdate checks).',
     'These values are written to <install>\config\magpilot.env and ' +
     're-read on every install (so re-running the installer or ' +
     '`magpilot --magpilot-update` preserves them).');
   SettingsPage.Add('Hub URL (e.g. http://192.168.1.239:7088):', False);
-  SettingsPage.Add('Agent token (auto-generated; the bearer shared with the hub):', False);
+  SettingsPage.Add('Agent token (auto-generated; bearer the hub uses to call IN):', False);
+  SettingsPage.Add('Hub bearer (the hub''s MAGPILOT_HUB_BEARER, agent uses to call OUT):', True);
   SettingsPage.Add('Public URL the hub uses to reach this agent:', False);
 
   // Defaults shown on first install. ShouldSkipPage overrides these from
   // an existing magpilot.env if one is present (upgrade path).
   SettingsPage.Values[0] := 'http://192.168.1.239:7088';
   SettingsPage.Values[1] := GenerateRandomToken();
-  SettingsPage.Values[2] := 'http://' + GetComputerNameString + ':5099';
+  SettingsPage.Values[2] := '';
+  SettingsPage.Values[3] := 'http://' + GetComputerNameString + ':5099';
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
 var
-  EnvPath, ExistingHubUrl, ExistingToken, ExistingPublic: String;
+  EnvPath, ExistingHubUrl, ExistingToken, ExistingBearer, ExistingPublic: String;
 begin
   Result := False;
   // First place {app} is safe to expand: ShouldSkipPage(SettingsPage.ID)
   // runs after wpSelectDir, in both interactive and silent installs.
   // Pre-populate from any pre-existing magpilot.env so silent re-installs
-  // (e.g. magpilot --magpilot-update) preserve hub URL + token.
+  // (e.g. magpilot --magpilot-update) preserve hub URL + tokens.
   if PageID = SettingsPage.ID then
   begin
     EnvPath := ExpandConstant('{app}\config\' + EnvFileName);
     if FileExists(EnvPath) then
     begin
       ExistingHubUrl := ReadEnvKey(EnvPath, 'MAGPILOT_HUB_URL');
-      ExistingToken := ReadEnvKey(EnvPath, 'MAGPILOT_AGENT_TOKEN');
+      ExistingToken  := ReadEnvKey(EnvPath, 'MAGPILOT_AGENT_TOKEN');
+      ExistingBearer := ReadEnvKey(EnvPath, 'MAGPILOT_HUB_BEARER');
       ExistingPublic := ReadEnvKey(EnvPath, 'MAGPILOT_AGENT_PUBLIC_URL');
       if ExistingHubUrl <> '' then SettingsPage.Values[0] := ExistingHubUrl;
-      if ExistingToken <> ''  then SettingsPage.Values[1] := ExistingToken;
-      if ExistingPublic <> '' then SettingsPage.Values[2] := ExistingPublic;
+      if ExistingToken  <> '' then SettingsPage.Values[1] := ExistingToken;
+      if ExistingBearer <> '' then SettingsPage.Values[2] := ExistingBearer;
+      if ExistingPublic <> '' then SettingsPage.Values[3] := ExistingPublic;
     end;
   end;
 end;
@@ -209,8 +213,8 @@ begin
   Lines[1] := '# scheduled-task launch. Re-run the installer to change these.';
   Lines[2] := 'MAGPILOT_HUB_URL=' + SettingsPage.Values[0];
   Lines[3] := 'MAGPILOT_AGENT_TOKEN=' + SettingsPage.Values[1];
-  Lines[4] := 'MAGPILOT_AGENT_PUBLIC_URL=' + SettingsPage.Values[2];
-  Lines[5] := 'MAGPILOT_HUB_BEARER=' + SettingsPage.Values[1];
+  Lines[4] := 'MAGPILOT_HUB_BEARER=' + SettingsPage.Values[2];
+  Lines[5] := 'MAGPILOT_AGENT_PUBLIC_URL=' + SettingsPage.Values[3];
   SaveStringsToFile(EnvPath, Lines, False);
 end;
 
