@@ -1,7 +1,7 @@
 namespace Magpilot.Host;
 
 /// <summary>
-/// Parsed view of the magpilot-host wrapper's own command-line flags.
+/// Parsed view of the magpilot launcher's own command-line flags.
 /// All wrapper flags are prefixed <c>--magpilot-</c> so they can never
 /// collide with any present or future copilot flag, and they are
 /// stripped from argv before the underlying copilot binary is invoked.
@@ -21,6 +21,10 @@ public sealed record WrapperOptions(
     bool Status,
     /// <summary>Print wrapper-only flag help and exit.</summary>
     bool Help,
+    /// <summary>Print local + agent-reported version info and exit.</summary>
+    bool Version,
+    /// <summary>Download and run the latest installer from GitHub Releases, then exit.</summary>
+    bool Update,
     /// <summary>Argv with all <c>--magpilot-*</c> flags stripped, ready to forward to the real copilot binary.</summary>
     IReadOnlyList<string> ForwardArgs)
 {
@@ -29,6 +33,7 @@ public sealed record WrapperOptions(
         var take = false; var force = false; var noTake = false;
         var skipCheck = false; var exitOnHandoff = false;
         var status = false; var help = false;
+        var version = false; var update = false;
         var forward = new List<string>(argv.Length);
 
         foreach (var a in argv)
@@ -45,6 +50,8 @@ public sealed record WrapperOptions(
                 case "--magpilot-exit-on-handoff": exitOnHandoff = true; break;
                 case "--magpilot-status":          status = true; break;
                 case "--magpilot-help":            help = true; break;
+                case "--magpilot-version":         version = true; break;
+                case "--magpilot-update":          update = true; break;
                 default:
                     if (a.StartsWith("--magpilot-", StringComparison.Ordinal))
                         throw new ArgumentException($"Unknown wrapper flag: {a}. Try --magpilot-help.");
@@ -57,7 +64,7 @@ public sealed record WrapperOptions(
         if (take && noTake)
             throw new ArgumentException("Contradictory flags: --magpilot-take (or --magpilot-force) and --magpilot-no-take both set.");
 
-        return new WrapperOptions(take, force, noTake, skipCheck, exitOnHandoff, status, help, forward);
+        return new WrapperOptions(take, force, noTake, skipCheck, exitOnHandoff, status, help, version, update, forward);
     }
 
     /// <summary>
@@ -82,7 +89,7 @@ public sealed record WrapperOptions(
     }
 
     public static string HelpText => """
-        magpilot-host -- a thin wrapper around `copilot` that coordinates with magpilot-agent.
+        magpilot -- a thin wrapper around `copilot` that coordinates with magpilot-agent.
 
         Wrapper-only flags (all stripped before exec; everything else is forwarded to copilot):
 
@@ -92,11 +99,13 @@ public sealed record WrapperOptions(
           --magpilot-skip-check        bypass the agent entirely; exec real copilot as a passthrough
           --magpilot-exit-on-handoff   on web preemption, exit immediately (no resume prompt)
           --magpilot-status            don't spawn copilot; print agent reachability + sessions + exit
+          --magpilot-version           print local + agent-reported version info, then exit
+          --magpilot-update            download and run the latest installer from GitHub Releases, then exit
           --magpilot-help              print this help and exit
 
         Env:
           MAGPILOT_AGENT_URL           default http://127.0.0.1:5099
-          MAGPILOT_AGENT_TOKEN         required (the bearer token shared with the agent)
+          MAGPILOT_AGENT_TOKEN         required for state/acquire/release ops (the bearer shared with the agent)
           MAGPILOT_REAL_COPILOT        explicit path to the real copilot binary (optional)
 
         Combinations:

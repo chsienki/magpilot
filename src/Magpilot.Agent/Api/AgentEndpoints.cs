@@ -1,6 +1,8 @@
 using System.Text.Json;
 using Magpilot.Agent.Acp;
 using Magpilot.Agent.Sessions;
+using Magpilot.Agent.Update;
+using Magpilot.Shared;
 using Magpilot.Shared.Models;
 
 namespace Magpilot.Agent.Api;
@@ -9,6 +11,18 @@ public static class AgentEndpoints
 {
     public static void MapAgentApi(this IEndpointRouteBuilder routes)
     {
+        // Version endpoints are deliberately UNAUTHENTICATED. They expose
+        // no sensitive data (just the agent's own semver + protocol version
+        // and the hub-reported latest version), and the launcher needs to
+        // call them on every invocation to decide whether to print the
+        // upgrade banner -- including before the user has configured a
+        // bearer token. Keeping them outside the auth group means the
+        // launcher's banner path doesn't need MAGPILOT_AGENT_TOKEN set.
+        routes.MapGet("/api/version", () =>
+            new VersionInfo(Versioning.AssemblyVersion, Versioning.ProtocolVersion));
+        routes.MapGet("/api/version/latest", (LatestVersionCache cache) =>
+            cache.Get());
+
         var api = routes.MapGroup("/api").RequireAuthorization();
 
         api.MapGet("/info", (FlavorCapabilities flavors) => new
@@ -158,7 +172,7 @@ public static class AgentEndpoints
 
         // ----- magpilot-shim Phase 1 endpoints (cooperative single-owner handoff) -----
         //
-        // The magpilot-host wrapper aliases `copilot` on the user's PATH and
+        // The magpilot launcher aliases `copilot` on the user's PATH and
         // coordinates ownership transfers with this agent so that exactly one
         // process drives a session at any time. Three endpoints + the
         // ReleaseRequested SSE event implement the handoff dance:
@@ -177,7 +191,7 @@ public static class AgentEndpoints
         api.MapPost("/sessions/{id}/release-request", (string id, ReleaseRequestBody body, SessionRegistry reg, AcpSessionManager acp) =>
         {
             // Verify the session exists, then broadcast the ReleaseRequested
-            // event on its SSE stream so any subscribed magpilot-host can
+            // event on its SSE stream so any subscribed magpilot launcher can
             // begin its graceful wind-down. Idempotent: if no host owns the
             // session (or no host is subscribed), the event is a no-op.
             if (reg.Get(id) is null)
@@ -211,13 +225,13 @@ public static class AgentEndpoints
 
         api.MapPost("/sessions/{id}/messages", (string id, PromptRequest req, AcpSessionManager acp, HostOwnership hostOwn) =>
         {
-            // Refuse to drive the session if a magpilot-host wrapper
+            // Refuse to drive the session if a magpilot launcher
             // currently owns it. The caller (SPA, WhatsApp, cron) is
             // expected to react to 409 by firing /release-request and
             // polling /state until the host releases, then retrying.
             if (hostOwn.TryGet(id, out var entry))
                 return Results.Conflict(new HostOwnedResponse(
-                    Error: $"Session is held by magpilot-host PID {entry.HostPid}",
+                    Error: $"Session is held by magpilot launcher PID {entry.HostPid}",
                     NeedsRelease: true,
                     HostPid: entry.HostPid));
 
@@ -232,7 +246,7 @@ public static class AgentEndpoints
         {
             if (hostOwn.TryGet(id, out var entry))
                 return Results.Conflict(new HostOwnedResponse(
-                    Error: $"Session is held by magpilot-host PID {entry.HostPid}",
+                    Error: $"Session is held by magpilot launcher PID {entry.HostPid}",
                     NeedsRelease: true,
                     HostPid: entry.HostPid));
 
@@ -244,7 +258,7 @@ public static class AgentEndpoints
         {
             if (hostOwn.TryGet(id, out var entry))
                 return Results.Conflict(new HostOwnedResponse(
-                    Error: $"Session is held by magpilot-host PID {entry.HostPid}",
+                    Error: $"Session is held by magpilot launcher PID {entry.HostPid}",
                     NeedsRelease: true,
                     HostPid: entry.HostPid));
 

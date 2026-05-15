@@ -5,7 +5,7 @@ using System.Text.Json.Serialization;
 /// <summary>
 /// Detailed view of a single session's current ownership and activity,
 /// returned by <c>GET /api/sessions/{id}/state</c>. Used by the
-/// magpilot-host wrapper to decide whether to prompt the user before
+/// magpilot launcher to decide whether to prompt the user before
 /// taking over a session, and by the SPA's session list to render
 /// a richer "what's happening" badge per row.
 /// </summary>
@@ -36,7 +36,7 @@ public enum SessionOwner
     None,
     /// <summary>This magpilot agent's copilot --acp child is driving via ACP.</summary>
     Agent,
-    /// <summary>A magpilot-host wrapper has acquired the session for a local terminal.</summary>
+    /// <summary>A magpilot launcher has acquired the session for a local terminal.</summary>
     Host,
     /// <summary>Some other process holds an inuse.lock that we don't track (e.g. a raw <c>copilot</c> in a terminal).</summary>
     External,

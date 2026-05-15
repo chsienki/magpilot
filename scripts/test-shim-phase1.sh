@@ -3,7 +3,7 @@
 # ============================================================================
 #
 # Exercises the new agent endpoints introduced for the cooperative
-# single-owner handoff between magpilot-host and magpilot-agent. Run this
+# single-owner handoff between magpilot and magpilot-agent. Run this
 # against a local agent (defaults to http://127.0.0.1:5099) before declaring
 # Phase 1 done.
 #

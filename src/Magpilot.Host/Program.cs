@@ -2,8 +2,9 @@ using System.Diagnostics;
 using Magpilot.Host;
 using Magpilot.Shared.Models;
 
-// magpilot-host -- thin wrapper around `copilot` that coordinates with
-// magpilot-agent so a session is driven by exactly one process at a time.
+// magpilot launcher (assembly: magpilot, project: Magpilot.Host) -- thin
+// wrapper around `copilot` that coordinates with magpilot-agent so a session
+// is driven by exactly one process at a time.
 //
 // See magpilot-shim project doc in copilot-context for the full design.
 
@@ -11,7 +12,7 @@ WrapperOptions opts;
 try { opts = WrapperOptions.Parse(args); }
 catch (ArgumentException ex)
 {
-    Console.Error.WriteLine($"magpilot-host: {ex.Message}");
+    Console.Error.WriteLine($"magpilot: {ex.Message}");
     return 2;
 }
 
@@ -21,10 +22,25 @@ if (opts.Help)
     return 0;
 }
 
+if (opts.Version)
+{
+    return await VersionPrinter.RunAsync();
+}
+
+if (opts.Update)
+{
+    return await UpdateInstaller.RunAsync();
+}
+
 // --magpilot-skip-check wins over everything: degrade to a transparent
 // pass-through that just exec's the real copilot.
 if (opts.SkipCheck)
     return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null);
+
+// Best-effort: ask the local agent if a newer release is out and surface
+// it as a one-line banner. Fast (~500ms cap), silent on every error path,
+// and skipped under --magpilot-skip-check above.
+await UpdateBanner.MaybePrintAsync();
 
 // Try to talk to the agent. If unreachable, fall through to skip-check
 // behavior (with a warning) so an agent outage never blocks the user.
@@ -38,13 +54,13 @@ try
 catch (InvalidOperationException ex)
 {
     // Missing token etc. -- this is user error, not agent down.
-    Console.Error.WriteLine($"magpilot-host: {ex.Message}");
+    Console.Error.WriteLine($"magpilot: {ex.Message}");
     return 2;
 }
 catch (Exception ex)
 {
-    Console.Error.WriteLine($"magpilot-host: agent unreachable ({(agent?.BaseUrl ?? "?")}: {ex.GetType().Name}: {ex.Message}).");
-    Console.Error.WriteLine("magpilot-host: falling through. Use --magpilot-skip-check to silence.");
+    Console.Error.WriteLine($"magpilot: agent unreachable ({(agent?.BaseUrl ?? "?")}: {ex.GetType().Name}: {ex.Message}).");
+    Console.Error.WriteLine("magpilot: falling through. Use --magpilot-skip-check to silence.");
     agent?.Dispose();
     return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null);
 }
@@ -74,7 +90,7 @@ SessionStateInfo? state;
 try { state = await agent.GetStateAsync(sid); }
 catch (Exception ex)
 {
-    Console.Error.WriteLine($"magpilot-host: GET /state failed ({ex.GetType().Name}: {ex.Message}). Falling through.");
+    Console.Error.WriteLine($"magpilot: GET /state failed ({ex.GetType().Name}: {ex.Message}). Falling through.");
     agent.Dispose();
     return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null);
 }
@@ -94,14 +110,14 @@ if (state.Owner == SessionOwner.Agent || state.Owner == SessionOwner.Host || sta
     try { choice = TakeOverPrompt.Ask(state, opts); }
     catch (InvalidOperationException ex)
     {
-        Console.Error.WriteLine($"magpilot-host: {ex.Message}");
+        Console.Error.WriteLine($"magpilot: {ex.Message}");
         agent.Dispose();
         return 3;
     }
 
     if (choice == TakeOverPrompt.Choice.No)
     {
-        Console.WriteLine("magpilot-host: not taking over. Exiting.");
+        Console.WriteLine("magpilot: not taking over. Exiting.");
         agent.Dispose();
         return 0;
     }
@@ -116,18 +132,18 @@ if (state.Owner == SessionOwner.Agent || state.Owner == SessionOwner.Host || sta
 
     var force = choice == TakeOverPrompt.Choice.Force;
     var hostPid = Environment.ProcessId;
-    Console.WriteLine($"magpilot-host: {(force ? "force-acquiring" : "waiting for current turn to finish")}...");
+    Console.WriteLine($"magpilot: {(force ? "force-acquiring" : "waiting for current turn to finish")}...");
     try
     {
         state = await agent.AcquireForHostAsync(sid, hostPid, force);
     }
     catch (Exception ex)
     {
-        Console.Error.WriteLine($"magpilot-host: acquire failed ({ex.GetType().Name}: {ex.Message}).");
+        Console.Error.WriteLine($"magpilot: acquire failed ({ex.GetType().Name}: {ex.Message}).");
         agent.Dispose();
         return 4;
     }
-    Console.WriteLine($"magpilot-host: acquired (owner={state.Owner}). starting copilot...");
+    Console.WriteLine($"magpilot: acquired (owner={state.Owner}). starting copilot...");
 }
 
 // Spawn copilot --resume=<sid> with the user's terminal. Then watch for
@@ -145,7 +161,7 @@ static async Task<int> ExecRealCopilotAsync(IReadOnlyList<string> forwardArgs, A
     try { copilotPath = CopilotLocator.Find(); }
     catch (FileNotFoundException ex)
     {
-        Console.Error.WriteLine($"magpilot-host: {ex.Message}");
+        Console.Error.WriteLine($"magpilot: {ex.Message}");
         return 127;
     }
 
@@ -173,7 +189,7 @@ static async Task<int> RunSessionLoopAsync(AgentClient agent, string sid, Wrappe
     try { copilotPath = CopilotLocator.Find(); }
     catch (FileNotFoundException ex)
     {
-        Console.Error.WriteLine($"magpilot-host: {ex.Message}");
+        Console.Error.WriteLine($"magpilot: {ex.Message}");
         agent.Dispose();
         return 127;
     }
@@ -197,7 +213,7 @@ static async Task<int> RunSessionLoopAsync(AgentClient agent, string sid, Wrappe
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"magpilot-host: failed to spawn copilot in PTY: {ex.Message}");
+            Console.Error.WriteLine($"magpilot: failed to spawn copilot in PTY: {ex.Message}");
             agent.Dispose();
             return 4;
         }
@@ -223,7 +239,7 @@ static async Task<int> RunSessionLoopAsync(AgentClient agent, string sid, Wrappe
                 catch (OperationCanceledException) { }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"magpilot-host: SSE subscribe failed: {ex.Message}");
+                    Console.Error.WriteLine($"magpilot: SSE subscribe failed: {ex.Message}");
                 }
             });
 
@@ -235,7 +251,7 @@ static async Task<int> RunSessionLoopAsync(AgentClient agent, string sid, Wrappe
                 // Child exited on its own. Release ownership and return.
                 var exit = await copilotHost.ExitTask;
                 try { await agent.ReleaseAsync(sid, hostPid); }
-                catch (Exception ex) { Console.Error.WriteLine($"magpilot-host: release failed: {ex.Message}"); }
+                catch (Exception ex) { Console.Error.WriteLine($"magpilot: release failed: {ex.Message}"); }
                 agent.Dispose();
                 return exit;
             }
@@ -251,7 +267,7 @@ static async Task<int> RunSessionLoopAsync(AgentClient agent, string sid, Wrappe
             Console.Out.Flush();
 
             try { await agent.ReleaseAsync(sid, hostPid); }
-            catch (Exception ex) { Console.Error.WriteLine($"magpilot-host: release failed: {ex.Message}"); }
+            catch (Exception ex) { Console.Error.WriteLine($"magpilot: release failed: {ex.Message}"); }
         }
         // PtyHost disposed here -- raw mode restored, cooked mode back.
 
@@ -271,25 +287,25 @@ static async Task<int> RunSessionLoopAsync(AgentClient agent, string sid, Wrappe
         var winner = await Task.WhenAny(pressTask, Task.Delay(timeout));
         if (winner != pressTask)
         {
-            Console.WriteLine("magpilot-host: timed out. Exiting.");
+            Console.WriteLine("magpilot: timed out. Exiting.");
             agent.Dispose();
             return 0;
         }
 
         // User pressed enter: re-acquire (polite by default) and loop
         // back to spawn a fresh copilot --resume.
-        Console.WriteLine("magpilot-host: requesting take-back...");
+        Console.WriteLine("magpilot: requesting take-back...");
         try
         {
             await agent.AcquireForHostAsync(sid, hostPid, force: false);
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"magpilot-host: take-back failed: {ex.Message}");
+            Console.Error.WriteLine($"magpilot: take-back failed: {ex.Message}");
             agent.Dispose();
             return 5;
         }
-        Console.WriteLine("magpilot-host: reconnected. resuming copilot...");
+        Console.WriteLine("magpilot: reconnected. resuming copilot...");
         // Loop -> spawn copilot again
     }
 }

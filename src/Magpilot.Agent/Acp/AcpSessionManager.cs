@@ -34,7 +34,7 @@ public sealed class AcpSessionManager
     /// Per-session "is a turn currently running?" tracking. Set when
     /// <see cref="PromptAsync"/> enters; cleared when it returns. Used by
     /// the GET /api/sessions/{id}/state endpoint to report activity, and
-    /// by the magpilot-host's acquire-for-host flow to politely wait for
+    /// by the magpilot launcher's acquire-for-host flow to politely wait for
     /// a turn boundary before taking ownership.
     /// </summary>
     private readonly ConcurrentDictionary<string, InFlightEntry> _inFlight = new();

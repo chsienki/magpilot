@@ -22,6 +22,9 @@ builder.Services.AddSingleton<HostOwnership>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<HostOwnership>());
 builder.Services.AddSingleton<SessionRegistry>();
 builder.Services.AddSingleton<HistoryReader>();
+builder.Services.AddSingleton<Magpilot.Agent.Update.LatestVersionCache>();
+builder.Services.AddHttpClient("hub-update", c => c.Timeout = TimeSpan.FromSeconds(15));
+builder.Services.AddHostedService<Magpilot.Agent.Update.UpdatePoller>();
 builder.Services.AddHostedService<DiscoveryResponder>();
 builder.Services.AddHostedService<AcpStarter>();
 

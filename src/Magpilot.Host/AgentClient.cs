@@ -6,7 +6,7 @@ namespace Magpilot.Host;
 
 /// <summary>
 /// Thin HTTP client over the magpilot-agent's session endpoints, scoped
-/// to the operations the magpilot-host wrapper needs:
+/// to the operations the magpilot launcher needs:
 /// state lookup, release-request broadcast, atomic acquire-for-host,
 /// and release. Reads <c>MAGPILOT_AGENT_URL</c> + <c>MAGPILOT_AGENT_TOKEN</c>
 /// from env, defaults the URL to <c>http://127.0.0.1:5099</c>.

@@ -84,9 +84,12 @@ container called `magnus`). Day-to-day usage covers chatting from any
 browser, hopping between Owned / Locked / Dormant sessions, full ACP
 tool-call streaming, central log viewer at `/admin/logs`. As of
 2026-05-14, **GitHub OAuth** is wired (allowlisted username); the
-**magpilot-host wrapper** ships a coordinated `copilot` shim that
+**`magpilot` launcher** ships a coordinated `copilot` shim that
 preempts cooperatively with the SPA + WhatsApp via a single-owner
-handoff (no events.jsonl forks).
+handoff (no events.jsonl forks). The **Windows installer** + autoupdate
+path (`installer/magpilot.iss`, `magpilot --magpilot-update`,
+hub-mediated version check) is in place; HENDRIK runs the agent as a
+scheduled task at user logon.
 
 What is **NOT yet wired**: the MAUI Android shell (the original phone
 target), real FCM/Web Push delivery, TLS for hub<->agents (still LAN +
@@ -110,9 +113,9 @@ magpilot/
                                 + HostOwnership for the cooperative handoff)
       Magpilot.Hub/         <- central daemon (proxy, OAuth, SPA host,
                                 central /api/log sink + viewer)
-      Magpilot.Host/        <- magpilot-host wrapper (PATH-aliased to copilot
-                                so terminal sessions coordinate with the
-                                agent via the shim endpoints)
+      Magpilot.Host/        <- the `magpilot` launcher (assembly: magpilot.exe).
+                                Cooperative coord with the agent so a session
+                                is driven by exactly one process at a time.
       Magpilot.UI/          <- shared Blazor components (chat, sessions,
                                 MagpilotTheme, MagpieMark, ChatView,
                                 HubClient, HubLogClient, JsErrorBridge)

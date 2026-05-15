@@ -17,6 +17,10 @@ src/Magpilot.Hub/wwwroot/
 src/Magpilot.Hub/data/
 hub-data/
 
+# Local publish output (release builds; CI uploads to GitHub Release).
+publish/
+installer-output/
+
 spikes/node_modules/
 spikes/package-lock.json
 spikes/package.json

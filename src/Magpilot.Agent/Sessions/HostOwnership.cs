@@ -4,7 +4,7 @@ using System.Diagnostics;
 namespace Magpilot.Agent.Sessions;
 
 /// <summary>
-/// Tracks which sessions are currently held by a magpilot-host wrapper
+/// Tracks which sessions are currently held by a magpilot launcher
 /// process (i.e. an interactive copilot session that the user is
 /// driving in a terminal, with the wrapper coordinating with this
 /// agent).

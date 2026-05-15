@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>Magpilot.Host</RootNamespace>
-    <AssemblyName>magpilot-host</AssemblyName>
+    <AssemblyName>magpilot</AssemblyName>
     <InvariantGlobalization>true</InvariantGlobalization>
     <!-- sch.pty.net's targets only copies native ConPTY DLLs when
          PlatformTarget is explicit (i.e. NOT AnyCPU). x64 covers our

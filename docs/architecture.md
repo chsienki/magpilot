@@ -149,11 +149,13 @@ A sidecar plugs in by knowing:
 3. (Optionally) a pinned session id, so calls accumulate context across
    invocations instead of starting a fresh conversation each time.
 
-### Magpilot Host (`Magpilot.Host`, the wrapper)
+### Magpilot Host (`Magpilot.Host`, the launcher)
 
-Console binary at `src/Magpilot.Host/`, assembly name `magpilot-host`.
-PATH-aliased to `copilot` on developer machines so any
-`copilot --resume=<id>` invocation runs the wrapper. The wrapper:
+Console binary at `src/Magpilot.Host/`, assembly name `magpilot` (i.e.
+ships as `magpilot.exe`). Installed on developer machines as
+`magpilot` on PATH. **Does NOT shadow `copilot`** -- the user invokes
+the launcher explicitly with `magpilot [args]`; the real `copilot`
+binary stays as it is. The launcher:
 
 1. Parses `--magpilot-*` flags (take, force, no-take, skip-check,
    exit-on-handoff, status, help) and strips them before forwarding.
@@ -211,10 +213,15 @@ declare which agent they target rather than punching through the hub.
 
 ## The agent HTTP API (the public contract)
 
-All routes are under `/api`, all protected by `Authorization: Bearer <MAGPILOT_AGENT_TOKEN>`.
+All routes are under `/api`, all protected by `Authorization: Bearer <MAGPILOT_AGENT_TOKEN>`
+**except** the two version endpoints (`/version`, `/version/latest`),
+which are deliberately unauthenticated so the launcher's banner check
+works without a configured token.
 
 | Method | Path                                       | What it does                                              |
 |---|---|---|
+| GET    | `/version`                                 | Agent's own `{version, protocolVersion}`. **No auth.** Used by `magpilot --magpilot-version` and external probes. |
+| GET    | `/version/latest`                          | Hub-reported latest release (cached locally by `UpdatePoller`). **No auth.** Drives the launcher's upgrade banner + `--magpilot-update`. |
 | GET    | `/info`                                    | Agent name, OS, available flavors                          |
 | GET    | `/sessions`                                | List sessions on disk (with state, cwd, last-touched)      |
 | POST   | `/sessions`                                | Create a new session                                       |
@@ -222,11 +229,11 @@ All routes are under `/api`, all protected by `Authorization: Bearer <MAGPILOT_A
 | GET    | `/sessions/{id}/state`                     | Rich ownership + activity view (see "Cooperative single-owner handoff" below). Returns `SessionStateInfo`. **NEW (shim Phase 1).** |
 | POST   | `/sessions/{id}/adopt`                     | Bring a dormant session live (re-attach the ACP child)     |
 | POST   | `/sessions/{id}/detach`                    | Detach without deleting on-disk state                      |
-| POST   | `/sessions/{id}/messages`                  | Send a prompt; returns 202; SSE delivers the reply. **Returns 409** + `HostOwnedResponse` when a magpilot-host wrapper holds the session (see handoff section). |
+| POST   | `/sessions/{id}/messages`                  | Send a prompt; returns 202; SSE delivers the reply. **Returns 409** + `HostOwnedResponse` when a magpilot launcher holds the session (see handoff section). |
 | GET    | `/sessions/{id}/stream`                    | SSE stream of session events (deltas, tool calls, etc.)    |
 | POST   | `/sessions/{id}/interrupt`                 | Cancel the in-flight turn. **Returns 409** when host-owned. |
 | POST   | `/sessions/{id}/approvals/{approvalId}`    | Resolve an approval prompt. **Returns 409** when host-owned. |
-| POST   | `/sessions/{id}/release-request`           | Broadcast `release_requested` SSE event to subscribers (e.g. a magpilot-host wrapper) so they can begin graceful shutdown. **NEW (shim Phase 1).** |
+| POST   | `/sessions/{id}/release-request`           | Broadcast `release_requested` SSE event to subscribers (e.g. a magpilot launcher) so they can begin graceful shutdown. **NEW (shim Phase 1).** |
 | POST   | `/sessions/{id}/acquire-for-host`          | Atomic combined op: agent waits for clean turn boundary (or aborts in-flight if `force=true`), drops its lock, marks the session host-owned. **NEW (shim Phase 1).** |
 | POST   | `/sessions/{id}/release`                   | Wrapper signals it has shut down its child; agent re-adopts. 409 if wrong `hostPid`. **NEW (shim Phase 1).** |
 | POST   | `/quick-prompt`                            | Synchronous "ask + answer" -- handles SSE internally       |
@@ -399,11 +406,11 @@ dedicated "cron context" session is a future option.
   command, a Slack relay) is just another process that POSTs to
   `/api/quick-prompt`.
 
-## Multi-client coordination: SPA, WhatsApp, and magpilot-host
+## Multi-client coordination: SPA, WhatsApp, and the magpilot launcher
 
 The session-state design originally assumed one Owner client at a time
 (the SPA). Adding the WhatsApp sidecar as a second client of the same
-pinned session, and later a magpilot-host wrapper as a *terminal-side*
+pinned session, and later a magpilot launcher as a *terminal-side*
 driver of the same pinned session, exposed three real edges. All three
 are fixed; all three are worth understanding before you change either
 end of the contract.
@@ -446,9 +453,9 @@ wrapper over the existing private Publish).
 
 The earlier "edges" both assumed the agent was always the driver. The
 shim project (`copilot-context/ideas/projects/magpilot-shim.md`)
-introduces a third class of client: a `magpilot-host` wrapper running
+introduces a third class of client: a `magpilot` wrapper running
 in the user's terminal. When the user runs `copilot --resume=<sid>`
-(PATH-aliased to `magpilot-host`), the wrapper takes ownership of the
+(PATH-installed as `magpilot`), the wrapper takes ownership of the
 session for an interactive terminal turn. While it's holding the
 session, the agent must NOT silently drive the same session from the
 SPA or WhatsApp, because that would fork `events.jsonl` (we proved it
@@ -625,7 +632,7 @@ The Magpilot SPA is a Blazor WebAssembly app served by the hub. As of
   the default Blazor circle SVG.
 - **Take-over UX**: when `HubClient.SendPromptAsync` throws
   `HostStillOwnedException` (the agent returned 409 because a
-  magpilot-host wrapper holds the session and the polite knock didn't
+  magpilot launcher holds the session and the polite knock didn't
   release within 60s), `Home.razor` surfaces a `MudAlert` above
   ChatView with a "Take over from terminal" button that calls
   `acquire-for-host?force=true`, immediately releases, and retries

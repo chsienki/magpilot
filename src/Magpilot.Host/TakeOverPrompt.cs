@@ -75,7 +75,7 @@ public static class TakeOverPrompt
             state.InFlight is { } inf
                 ? $"agent ({inf.Driver ?? "unknown"}, mid-turn {DescribeAgo(inf.StartedAtMs)})"
                 : "agent (idle)",
-        SessionOwner.Host => $"another magpilot-host (PID {state.HostPid})",
+        SessionOwner.Host => $"another magpilot launcher (PID {state.HostPid})",
         SessionOwner.External => $"another terminal (PID {state.Info.OwnerPid})",
         _ => "no-one",
     };

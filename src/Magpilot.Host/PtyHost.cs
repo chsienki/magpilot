@@ -46,7 +46,7 @@ public sealed class PtyHost : IAsyncDisposable
         var (cols, rows) = TryGetWindowSize();
         var options = new PtyOptions
         {
-            Name = "magpilot-host-pty",
+            Name = "magpilot-pty",
             Cwd = cwd,
             Cols = cols,
             Rows = rows,

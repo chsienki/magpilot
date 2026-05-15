@@ -1,6 +1,8 @@
 using System.Net.Http.Json;
 using Magpilot.Hub.Agents;
 using Magpilot.Hub.Discovery;
+using Magpilot.Hub.Updates;
+using Magpilot.Shared;
 using Magpilot.Shared.Models;
 
 namespace Magpilot.Hub.Api;
@@ -13,6 +15,40 @@ public static class HubEndpoints
 
         api.MapGet("/me", (HttpContext ctx) =>
             Results.Ok(new { identity = ctx.User.Identity?.Name }));
+
+        // Hub's view of the latest released agent/launcher version. Populated
+        // by ReleaseTracker (background polls of GitHub Releases). The agent
+        // calls this every ~15min via its UpdatePoller and caches the result;
+        // the SPA can also call it for an "update available" indicator.
+        //
+        // Optional ?from=X.Y.Z lets the caller report its current version so
+        // the hub can compute UpdateAvailable for that specific caller. Without
+        // ?from we just report what we know with UpdateAvailable=false.
+        api.MapGet("/agent-version", (ReleaseCache cache, string? from) =>
+        {
+            var cached = cache.Get();
+            if (cached is null)
+            {
+                // No release polled yet (or the configured repo has no
+                // releases). Always return 200 with a sane default so
+                // callers never have to handle 404.
+                return Results.Ok(new LatestVersionInfo(
+                    LatestVersion: "",
+                    MinProtocol: Versioning.ProtocolVersion,
+                    MaxProtocol: Versioning.ProtocolVersion,
+                    UpdateAvailable: false));
+            }
+
+            var updateAvailable = false;
+            if (!string.IsNullOrEmpty(from)
+                && Version.TryParse(from, out var fromV)
+                && Version.TryParse(cached.LatestVersion, out var latestV))
+            {
+                updateAvailable = latestV > fromV;
+            }
+
+            return Results.Ok(cached with { UpdateAvailable = updateAvailable });
+        });
 
         api.MapGet("/agents", (AgentRegistry reg) => reg.List());
 

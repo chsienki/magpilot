@@ -35,10 +35,10 @@ public sealed record LoadFailed(string Error) : StreamEvent;
 
 /// <summary>
 /// Notification fired by the agent when something (the SPA, WhatsApp,
-/// the cron sidecar, ...) wants to drive a session that a magpilot-host
-/// wrapper currently owns. The host is expected to gracefully wind down
-/// its child copilot process and POST /api/sessions/{id}/release so the
-/// agent can take over.
+/// the cron sidecar, ...) wants to drive a session that a magpilot
+/// launcher currently owns. The launcher is expected to gracefully wind
+/// down its child copilot process and POST /api/sessions/{id}/release so
+/// the agent can take over.
 /// </summary>
 /// <param name="Requester">Free-form label identifying who's asking (e.g. "spa", "whatsapp", "cron").</param>
 /// <param name="Force">If true, the requester would prefer the host abort its in-flight turn rather than wait for it to complete.</param>

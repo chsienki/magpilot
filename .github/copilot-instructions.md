@@ -76,7 +76,7 @@ src/
                                       ReleaseFromHostAsync.
     Sessions/HostOwnership.cs      <- AUTHORITATIVE in-memory map of
                                       sessionId -> hostPid for sessions
-                                      a magpilot-host wrapper holds. The
+                                      a magpilot launcher holds. The
                                       filesystem inuse.lock files are
                                       advisory (see "lock files are NOT
                                       a mutex" gotcha below).
@@ -96,8 +96,9 @@ src/
                                       /release) verbatim via Forward(resp).
     Auth/HubAuth.cs                <- cookie auth + GitHub OAuth (with
                                       ReturnUrl bounce for satellite SPAs).
-  Magpilot.Host/     <- magpilot-host wrapper (assembly: magpilot-host).
-                       Aliased as `copilot` on PATH; coordinates with
+  Magpilot.Host/     <- the `magpilot` launcher (assembly: magpilot.exe).
+                       PATH-installed as `magpilot` (NOT as `copilot` -- it
+                       does not shadow the real binary). Coordinates with
                        the agent so a session is driven by exactly one
                        process at a time. See the "Cooperative single-
                        owner handoff" section below.
@@ -186,6 +187,32 @@ go through the hub's API. For end-to-end UI dev use the inspect skill
 (`run-and-inspect`) against `Magpilot.Web` proxied to the hub, or
 just rebuild SPA + restart hub.
 
+### Dev loop with the installed agent
+
+Once HENDRIK is on the installed scheduled-task agent (see "Windows
+packaging" below), routine code iteration **must NOT** go through the
+push -> CI -> publish -> install loop. That's the slow path; reserve
+it for shipping a release.
+
+For day-to-day dev:
+
+1. **Stop the installed scheduled-task agent** before iterating:
+   `Stop-ScheduledTask -TaskName MagpilotAgent` (or `Stop-Process -Id <pid>`).
+   It's a normal MagpilotAgent task that owns TCP 5099, so leaving it
+   running just blocks the port and locks `bin/` for rebuilds.
+2. Edit + run from source: `dotnet run --project src/Magpilot.Agent` in
+   an async PowerShell session (the same way pre-installer HENDRIK ran
+   it). Same env vars as the table below; same port `:5099`.
+3. Iterate, build, test, commit, push.
+4. **Re-start the installed agent** when done:
+   `Start-ScheduledTask -TaskName MagpilotAgent`. Only run
+   `magpilot --magpilot-update` if a published release actually warrants
+   pulling the new installer.
+
+Same pattern in **magstronaut**: stop the installed agent on the dev
+machine, point your local `dotnet run` at the same port, then restart
+the installed task afterwards.
+
 ### Deploying the hub to the LXC
 
 `deploy/README.md` is the canonical recipe. Short version:
@@ -217,8 +244,111 @@ plain `dotnet run` in an `async` PowerShell session named `agent`.
 | `MAGPILOT_HUB_COOKIE_DOMAIN` | hub (optional) | Sets the auth cookie's `Domain` attribute. Use a leading-dot value like `.home.sienkiewi.cz` to share sign-in across satellite SPAs hosted on sibling subdomains (e.g. magnus.home.sienkiewi.cz). Leave unset for plain dev runs at localhost. |
 | `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET` | hub | GitHub OAuth App credentials. Without these the hub serves `/login -> 'OAUTH_CLIENT_ID not configured'`. |
 | `OAUTH_ALLOWED_GITHUB_USERS` | hub | Comma list of GitHub logins the hub allows. Anyone else gets denied after OAuth. |
-| `MAGPILOT_AGENT_URL` | magpilot-host wrapper | Default `http://127.0.0.1:5099`. Where the wrapper reaches its local agent. |
-| `MAGPILOT_REAL_COPILOT` | magpilot-host wrapper (optional) | Explicit path to the real `copilot` binary. Useful when the wrapper is aliased to `copilot` and PATH resolution would recurse. |
+| `MAGPILOT_RELEASE_REPO` | hub (optional) | GitHub `owner/repo` the hub's `ReleaseTracker` polls for the latest magpilot release. Defaults to `chsienki/magpilot`. |
+| `MAGPILOT_GITHUB_TOKEN` | hub (optional) | Bearer token for the GitHub API call. Bumps the unauthenticated 60 req/h limit to 5,000 req/h. We poll once an hour so it's rarely needed. |
+| `MAGPILOT_AGENT_URL` | magpilot launcher | Default `http://127.0.0.1:5099`. Where the wrapper reaches its local agent. |
+| `MAGPILOT_REAL_COPILOT` | magpilot launcher (optional) | Explicit path to the real `copilot` binary. Useful when the wrapper is on PATH and you want to override the autodetect of the real copilot binary. |
+
+## Windows packaging + autoupdate
+
+The repo ships a Windows installer + a hub-mediated autoupdate path.
+The whole story is documented in detail in `installer/README.md`; the
+short version that matters for AI agents working on this repo:
+
+### Versioning
+
+- `VERSION` (top-level text file) is the **single source of truth** for
+  the release semver. One line, e.g. `0.1.0`. Same pattern as
+  `chsienki/WhichBox`.
+- `Directory.Build.props` reads it and propagates `<Version>` +
+  `<InformationalVersion>` to every project. Every assembly stamps the
+  same version. Inspect with
+  `(Get-Item bin/.../X.dll).VersionInfo.ProductVersion`.
+- `Magpilot.Shared.Versioning` exposes `AssemblyVersion` (strips the
+  `+gitsha` suffix the SDK appends) and `ProtocolVersion` (an int that
+  bumps **only** on incompatible wire-contract changes; baseline is 1).
+- Bumping a release is a deliberate act: edit `VERSION`, commit,
+  `git tag vX.Y.Z`, `git push --tags`. The release workflow validates
+  the tag matches `VERSION` and refuses to build if they're out of sync.
+  No bump-version script needed.
+
+### Update flow
+
+```
+GitHub Releases <--(every 1h)-- Hub.ReleaseTracker --> ReleaseCache
+                                                          |
+              GET /api/agent-version?from=<ver>           |
+   Agent.UpdatePoller (every 15min) <-----<--<--<--<--<--+
+            |
+            v
+       LatestVersionCache
+            |
+            v
+   GET /api/version/latest (NO auth) <----- magpilot launcher
+                                            (every invocation: 500ms timeout,
+                                             prints banner if updateAvailable;
+                                             also drives --magpilot-update)
+```
+
+Endpoints added by the packaging work:
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `GET /api/version` (agent) | none | Agent's own `{version, protocolVersion}` |
+| `GET /api/version/latest` (agent) | none | Hub-reported latest, cached locally |
+| `GET /api/agent-version?from=X.Y.Z` (hub) | cookie or bearer | Hub's view of latest release; computes `updateAvailable` for the caller |
+
+The agent's version endpoints are deliberately **unauthenticated** so
+the launcher can show its banner without `MAGPILOT_AGENT_TOKEN` set.
+
+### Launcher subcommands
+
+| Flag | Purpose |
+|---|---|
+| `magpilot --magpilot-version` | Print local + agent-reported version info |
+| `magpilot --magpilot-update` | Download + run the latest installer silently (validates SHA256 against the GitHub release asset) |
+| `magpilot --magpilot-help` | Wrapper-only flag help |
+
+The banner check fires on **every** non-help, non-skip-check invocation
+with a 500ms timeout. Failures are silent. See `Magpilot.Host/UpdateBanner.cs`.
+
+### Installer
+
+- `installer/magpilot.iss` (Inno Setup, per-machine, admin install).
+- `installer/{install-task,uninstall-task,firewall}.ps1` (helpers).
+- Components: `Magpilot Agent`, `Magpilot Launcher`. Tasks: PATH,
+  scheduled task at user logon, firewall rules.
+- Custom Settings page collects hub URL + agent token + public URL,
+  writes them to `%ProgramFiles%\Magpilot\config\magpilot.env`. On
+  upgrade (silent or interactive) the existing file is read and values
+  are pre-populated, so `magpilot --magpilot-update` preserves them.
+- The agent runs as a **scheduled task at user logon** (NOT SYSTEM),
+  so `~/.copilot/` is reachable. Task name: `MagpilotAgent`.
+
+### Release workflow
+
+`.github/workflows/release.yml` triggers on `v*.*.*` tag push:
+
+1. `validate-version` (ubuntu) -- asserts tag matches `VERSION`.
+2. `build` (windows-latest) -- self-contained `dotnet publish` of agent
+   + launcher, install Inno Setup via `choco`, run `iscc.exe`, compute
+   SHA256, generate `version.json`.
+3. `release` (ubuntu) -- generate changelog from `git log`, create a
+   **draft** GitHub release with `magpilot-setup-X.Y.Z.exe`,
+   `magpilot-setup-X.Y.Z.exe.sha256`, and `version.json` as assets.
+
+Releases are **draft** by default -- the user reviews + publishes
+manually, the same way commits are reviewed before push.
+
+### Ship checklist
+
+When making a release:
+
+1. Edit `VERSION` to the new semver.
+2. Commit ("bump VERSION to X.Y.Z" is a fine message).
+3. `git tag vX.Y.Z`, `git push --tags`.
+4. Wait for the Action; review the draft release; publish it.
+5. On the dev machine: `magpilot --magpilot-update` to test.
 
 ## Architectural rules and gotchas
 
@@ -418,7 +548,7 @@ Owned=0, Locked=1, Dormant=2.)
 >
 > **Authoritative ownership lives in agent memory, NOT in the
 > filesystem.** `Sessions/HostOwnership.cs` keeps the canonical map
-> of `sessionId -> hostPid` for sessions a `magpilot-host` wrapper
+> of `sessionId -> hostPid` for sessions a `magpilot` wrapper
 > currently drives. All ACP-driving endpoints (`/messages`,
 > `/interrupt`, `/approvals/{id}`) consult it and return 409
 > Conflict + `HostOwnedResponse { needsRelease, hostPid }` when
@@ -488,9 +618,9 @@ Always go through `HubClient` (or extend it). This bit `Logs.razor`
 on 2026-05-11 -- it injected bare `HttpClient` and exploded on
 every navigation to `/admin/logs` until rerouted.
 
-### Cooperative single-owner handoff (magpilot-host)
+### Cooperative single-owner handoff (magpilot launcher)
 
-The shim project. A `magpilot-host` wrapper (in `src/Magpilot.Host`)
+The shim project. A `magpilot` wrapper (in `src/Magpilot.Host`)
 PATH-aliased as `copilot` coordinates with the agent so a session is
 driven by exactly one process at any moment. Web/SPA + WhatsApp
 preempt cooperatively at clean turn boundaries instead of the agent
@@ -708,7 +838,7 @@ Invoke-RestMethod -Uri http://192.168.1.239:81/api/nginx/proxy-hosts/7 `
 - Sidecar-side log forwarders (the hub sink + agent forwarder are
   in; sidecars are still TODO).
 - Win32 Job Object for ACP-child cleanup on Windows agents.
-- magpilot-host wrapper extras: `--magpilot-status` only prints
+- magpilot launcher extras: `--magpilot-status` only prints
   reachability so far (full session listing TBD); no-args picker
   (list sessions for cwd) + `--continue` not implemented; wrapper
   doesn't post to `/api/log` audit trail yet.
@@ -775,7 +905,7 @@ project files in chsienki/copilot-context/ideas/projects/:
   `MagpieMark` component in Magpilot.UI; brand-themed loader; bird
   on agents-list bullets + empty states.
 - **magpilot-shim** -- SHIPPED 2026-05-14 across Phase 1 (agent
-  endpoints), Phase 2/2.5 (magpilot-host wrapper with PTY), Phase 3
+  endpoints), Phase 2/2.5 (magpilot launcher with PTY), Phase 3
   (SPA + WhatsApp polite-knock + take-over UX). Project file in
   copilot-context has the full design + log; the `Magpilot.Host`
   project + `HostOwnership` service + `/state`/`/release-request`/

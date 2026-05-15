@@ -57,7 +57,7 @@ public sealed class HubClient
     public async Task SendPromptAsync(string agent, string id, string text, CancellationToken ct = default)
     {
         // Retry-on-409: the agent refuses prompts when the session is held
-        // by a magpilot-host wrapper. We knock politely (release-request)
+        // by a magpilot launcher. We knock politely (release-request)
         // then poll state until the host releases, then retry. On final
         // timeout we throw HostStillOwnedException so callers can surface
         // a useful error to the user.
@@ -99,7 +99,7 @@ public sealed class HubClient
     }
 
     /// <summary>
-    /// Force-acquire a session held by a magpilot-host wrapper, then send
+    /// Force-acquire a session held by a magpilot launcher, then send
     /// the prompt. Used by the SPA's "Take over from terminal" button --
     /// bypasses the polite release-request and aborts any in-flight turn
     /// the wrapper had running.
@@ -130,7 +130,7 @@ public sealed class HubClient
 
     /// <summary>
     /// Broadcast a <c>release_requested</c> SSE event so any subscribed
-    /// magpilot-host wrapper can begin its graceful shutdown.
+    /// magpilot launcher can begin its graceful shutdown.
     /// </summary>
     public async Task FireReleaseRequestAsync(string agent, string id, string requester, bool force, CancellationToken ct = default)
     {
@@ -265,7 +265,7 @@ public sealed class HubClient
 
 /// <summary>
 /// Thrown by <see cref="HubClient.SendPromptAsync"/> when the agent
-/// refuses the prompt because a magpilot-host wrapper holds the session
+/// refuses the prompt because a magpilot launcher holds the session
 /// AND the wrapper failed to release within our timeout window. Callers
 /// (e.g. ChatView) can catch this to surface a meaningful UI hint plus
 /// an optional "Take over from terminal" affordance.

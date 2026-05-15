@@ -1,0 +1,167 @@
+name: Release
+
+# Tag-triggered release pipeline. Mirrors chsienki/WhichBox's pattern:
+#
+#   1. validate-version: ensure the pushed tag matches the VERSION file.
+#   2. build (windows-latest): self-contained publish of agent + launcher,
+#      run iscc on installer/magpilot.iss, compute SHA256, generate
+#      version.json.
+#   3. release (ubuntu): generate changelog, create a DRAFT GitHub release
+#      with the installer + sha256 + version.json as assets.
+#
+# Releases are draft by default -- the user reviews + publishes manually.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  validate-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate tag matches VERSION
+        run: |
+          ROOT_VERSION="$(cat VERSION | tr -d '[:space:]')"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "Tag:     $TAG_VERSION"
+          echo "VERSION: $ROOT_VERSION"
+          if [ "$TAG_VERSION" != "$ROOT_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match VERSION ($ROOT_VERSION). Update VERSION first or re-tag."
+            exit 1
+          fi
+
+  build:
+    needs: validate-version
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: echo "version=$(cat VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+      # PublishSingleFile=false because Pty.Net needs os64\conpty.dll +
+      # OpenConsole.exe physically next to magpilot.exe (SingleFile would
+      # extract per-run and slow startup). Same for the agent (it has no
+      # native deps but we keep both publishes consistent).
+      - name: Publish Magpilot.Agent (win-x64)
+        run: >
+          dotnet publish src/Magpilot.Agent/Magpilot.Agent.csproj
+          -c Release -r win-x64 --self-contained
+          -p:PublishSingleFile=false
+          -o publish/agent
+
+      - name: Publish Magpilot.Host launcher (win-x64)
+        run: >
+          dotnet publish src/Magpilot.Host/Magpilot.Host.csproj
+          -c Release -r win-x64 --self-contained
+          -p:PublishSingleFile=false
+          -o publish/bin
+
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+              throw "Inno Setup 6 not found at $iscc"
+          }
+          & $iscc /DAppVersion=${{ steps.version.outputs.version }} /DPublishDir="$PWD\publish" installer\magpilot.iss
+
+      - name: Compute SHA256
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.version.outputs.version }}"
+          $exe = "installer-output\magpilot-setup-$ver.exe"
+          if (-not (Test-Path $exe)) { throw "Installer not found at $exe" }
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  magpilot-setup-$ver.exe" | Out-File -FilePath "$exe.sha256" -Encoding ascii -NoNewline
+
+      - name: Write version.json
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.version.outputs.version }}"
+          # MinProtocol/MaxProtocol track Magpilot.Shared.Versioning.ProtocolVersion.
+          # Bump these in lockstep with that constant when the wire contract
+          # changes incompatibly. Baseline is 1; future versions widen the
+          # range as the hub gains support for older agents.
+          $meta = [pscustomobject]@{
+              version     = $ver
+              minProtocol = 1
+              maxProtocol = 1
+          }
+          $meta | ConvertTo-Json | Out-File -FilePath "installer-output\version.json" -Encoding ascii
+
+      - name: Upload installer + sha256 + version.json
+        uses: actions/upload-artifact@v4
+        with:
+          name: magpilot-windows-x64
+          path: |
+            installer-output/magpilot-setup-${{ steps.version.outputs.version }}.exe
+            installer-output/magpilot-setup-${{ steps.version.outputs.version }}.exe.sha256
+            installer-output/version.json
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version
+        id: version
+        run: echo "version=$(cat VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate changelog
+        run: |
+          PREV_TAG=$(git tag --sort=-v:refname | grep '^v' | sed -n '2p')
+          if [ -n "$PREV_TAG" ]; then
+            CHANGES=$(git log --pretty=format:"- %s" "$PREV_TAG..${{ github.ref_name }}" | grep -v "^- bump VERSION" || true)
+          else
+            CHANGES=$(git log --pretty=format:"- %s" "${{ github.ref_name }}" | grep -v "^- bump VERSION" || true)
+          fi
+          {
+            echo "## What's new"
+            echo ""
+            echo "$CHANGES"
+            echo ""
+            echo "## Install"
+            echo ""
+            echo "Download \`magpilot-setup-${{ steps.version.outputs.version }}.exe\` and run it."
+            echo ""
+            echo "Existing installs can update in-place with \`magpilot --magpilot-update\` (no manual download required)."
+          } > /tmp/release-body.md
+
+      - name: Create draft GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Magpilot ${{ steps.version.outputs.version }}
+          body_path: /tmp/release-body.md
+          draft: true
+          files: artifacts/*
+          fail_on_unmatched_files: true

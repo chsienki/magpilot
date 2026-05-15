@@ -13,7 +13,7 @@ public sealed record SessionDetails(SessionInfo Info, string? AcpSessionId);
 
 /// <summary>
 /// Body for <c>POST /api/sessions/{id}/release-request</c>. Triggers a
-/// SSE <c>release_requested</c> event so any magpilot-host wrapper that
+/// SSE <c>release_requested</c> event so any magpilot launcher that
 /// owns the session can begin its graceful wind-down.
 /// </summary>
 public sealed record ReleaseRequestBody(
@@ -43,7 +43,7 @@ public sealed record ReleaseFromHostBody(int HostPid);
 /// Response body returned by ACP-driving endpoints (<c>POST /messages</c>,
 /// <c>POST /interrupt</c>, <c>POST /approvals/{id}</c>) with status code
 /// <c>409 Conflict</c> when the session is currently held by a
-/// magpilot-host wrapper. Callers (SPA, WhatsApp) react by firing
+/// magpilot launcher. Callers (SPA, WhatsApp) react by firing
 /// <c>POST /release-request</c> and polling <c>GET /state</c> until the
 /// host releases, then retrying the original POST.
 /// </summary>

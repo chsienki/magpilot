@@ -1,0 +1,18 @@
+<Project>
+
+  <!--
+    Single source of truth for the magpilot release version. Reads the
+    top-level VERSION file and propagates it to every project's
+    AssemblyVersion / FileVersion / InformationalVersion. Bumping a
+    release == edit VERSION, commit, tag vX.Y.Z, push.
+
+    Same pattern as chsienki/WhichBox.
+  -->
+
+  <PropertyGroup>
+    <_MagpilotVersionFile>$(MSBuildThisFileDirectory)VERSION</_MagpilotVersionFile>
+    <Version Condition="Exists('$(_MagpilotVersionFile)')">$([System.IO.File]::ReadAllText('$(_MagpilotVersionFile)').Trim())</Version>
+    <InformationalVersion>$(Version)</InformationalVersion>
+  </PropertyGroup>
+
+</Project>

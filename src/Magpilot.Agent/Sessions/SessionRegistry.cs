@@ -144,7 +144,7 @@ public sealed class SessionRegistry
 
     /// <summary>
     /// Compute the rich ownership + activity view of a session for the
-    /// magpilot-host wrapper or SPA. Cheap: filesystem stat + a few
+    /// magpilot launcher or SPA. Cheap: filesystem stat + a few
     /// in-memory lookups + an events.jsonl tail read.
     /// </summary>
     public SessionStateInfo? GetState(string sessionId)
@@ -193,7 +193,7 @@ public sealed class SessionRegistry
     }
 
     /// <summary>
-    /// Hand off a session to a magpilot-host wrapper. Atomic combined op:
+    /// Hand off a session to a magpilot launcher. Atomic combined op:
     /// waits for any in-flight turn to reach a clean boundary (or aborts
     /// it if <paramref name="force"/> is true), drops our agent-side
     /// ownership, and records the host as the new owner.
