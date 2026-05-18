@@ -916,3 +916,5 @@ project files in chsienki/copilot-context/ideas/projects/:
 are the magpilot-side pointer so this codebase's agents remember
 they exist and don't accidentally re-litigate them.)
 - 2026-05-11: Magpilot UI as a Razor Class Library that magnus references directly -- no copies of code in magnus
+- 2026-05-18: visible indication when loading previous chats (load time scales with chat length, currently looks frozen)
+- 2026-05-18: cache chat in local storage so only the delta of new items needs to load on subsequent opens
