@@ -244,17 +244,17 @@ public sealed class AcpSessionManager
             "agent_message_chunk" => new AssistantDelta(ExtractText(update["content"]) ?? ""),
             "agent_thought_chunk" => new ThoughtDelta(ExtractText(update["content"]) ?? ""),
             "user_message_chunk"  => new UserDelta(ExtractText(update["content"]) ?? ""),
-            "tool_call_start"     => new ToolCallStart(
+            // ACP uses `tool_call` (status: pending) for new tool calls
+            // and `tool_call_update` (status: in_progress | completed |
+            // failed) for subsequent updates -- NOT the *_start / *_end
+            // suffix variants. Map both to our existing StreamEvent
+            // surface so SSE consumers (SPA, WhatsApp sidecar) see clean
+            // ToolCallStart/End/Progress events at the right boundaries.
+            "tool_call" => new ToolCallStart(
                 update["toolCallId"]?.GetValue<string>() ?? "",
                 update["title"]?.GetValue<string>() ?? update["kind"]?.GetValue<string>() ?? "tool",
                 update["rawInput"]?.ToJsonString()),
-            "tool_call_progress"  => new ToolCallProgress(
-                update["toolCallId"]?.GetValue<string>() ?? "",
-                update["content"]?.ToJsonString()),
-            "tool_call_end"       => new ToolCallEnd(
-                update["toolCallId"]?.GetValue<string>() ?? "",
-                update["rawOutput"]?.ToJsonString(),
-                update["status"]?.GetValue<string>() != "failed"),
+            "tool_call_update" => MapToolCallUpdate(update),
             _ => null,
         };
         if (evt is null) return;
@@ -264,6 +264,20 @@ public sealed class AcpSessionManager
         if (list is null) return;
         foreach (var ch in list)
             ch.Writer.TryWrite(evt);
+    }
+
+    private static StreamEvent MapToolCallUpdate(JsonNode update)
+    {
+        var id = update["toolCallId"]?.GetValue<string>() ?? "";
+        var status = update["status"]?.GetValue<string>();
+        if (status is "completed" or "failed")
+        {
+            return new ToolCallEnd(
+                id,
+                update["rawOutput"]?.ToJsonString(),
+                status == "completed");
+        }
+        return new ToolCallProgress(id, update["content"]?.ToJsonString());
     }
 
     private static string? ExtractText(JsonNode? content)

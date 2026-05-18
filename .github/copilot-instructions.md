@@ -371,6 +371,11 @@ them by breaking them.
   return 202 immediately, await the prompt in a background `Task`,
   and tell the SPA the turn ended via an SSE `TurnComplete`
   event. Never let the request thread sit on `await session/prompt`.
+- **ACP `sessionUpdate` kind values for tools are `tool_call` + `tool_call_update`, NOT `tool_call_start` / `tool_call_progress` / `tool_call_end`.** The latter (suffix variants) are what `Magpilot.Shared.Models.StreamEvent` calls them on the SSE wire, and they're the names the [ACP spec](https://agentclientprotocol.com/) uses in prose, but the actual JSON `sessionUpdate` field that Copilot CLI emits is the un-suffixed pair:
+  * `"sessionUpdate":"tool_call"` with `"status":"pending"` -- a new tool call (built-in or MCP).
+  * `"sessionUpdate":"tool_call_update"` with `"status":"in_progress"|"completed"|"failed"` -- subsequent updates.
+  
+  `AcpSessionManager.HandleUpdate` maps `tool_call -> ToolCallStart`, `tool_call_update -> ToolCallEnd` (for completed/failed) or `ToolCallProgress` (otherwise). **This silently broke for ~weeks before 2026-05-18**: the original switch was wired to the suffix variants, every tool_call was discarded as unknown, the SPA's live stream had no block delimiter for built-in tools (bash, etc.) so multi-step assistant responses concatenated into one bubble, and the WhatsApp sidecar's per-response flush trigger fired only on `thought_delta` (which doesn't always interleave). Fixed by mapping the correct kinds; if you ever see "live stream is one bubble but refresh shows N bubbles", suspect this regressed.
 - ACP streams thoughts and assistant content as **separate** updates:
   `agent_message_chunk` -> `MessageDelta`, `agent_thought_chunk` ->
   `ThoughtDelta`. Both are mapped in `HandleUpdate`. The UI renders
