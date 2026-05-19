@@ -932,3 +932,4 @@ they exist and don't accidentally re-litigate them.)
 - 2026-05-18: cache chat in local storage so only the delta of new items needs to load on subsequent opens
 - 2026-05-18: online indicator via heartbeat; show 'click to reconnect' if the SSE stream drops (especially important for long-lived Magnus session)
 - 2026-05-18: agent/hub connect handshake -- either a single condensed token bundling all connection info, or a UDP discovery mode (think WPS but for agents and the hub) so users don't have to copy a bunch of random strings
+- 2026-05-18: refresh button for the session list so you can see newer sessions without refreshing the whole page
