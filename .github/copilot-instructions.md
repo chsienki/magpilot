@@ -226,6 +226,25 @@ the installed task afterwards.
 which is real source. Only exclude `src/Magpilot.Hub/wwwroot/` (the
 build output). The `.gitignore` reflects this.
 
+**Critical `bin`/`obj` poisoning when building from magstronaut**:
+the magstronaut root has a `.dockerignore` that excludes `**/bin/`
+and `**/obj/`. Don't remove it. Without it, builds for satellites
+that span both repos (e.g. `magnus-web`, whose `Dockerfile` build
+context is the magstronaut root so it can `COPY` from the magpilot
+submodule) ingest the local Windows-side `obj/` cache of
+`Magpilot.UI`. Inside the container, `dotnet publish` ends up
+**mixing fresh-compiled .wasm with stale cached scoped-CSS bundles**:
+the rendered DOM has scoped attributes (b-XXXXXXXX) from the new
+compile, but the served `Magpilot.UI.<hash>.bundle.scp.css` has
+attributes from the old obj/ cache. Result: every scoped CSS rule
+fails to match -- chat-view layout is gone, "no scrolling, wrong
+sized message bars", silently. Hit on 2026-05-18; fixed by the
+.dockerignore. Same trap doesn't bite the hub itself (it does
+`dotnet publish` locally via `scripts/build-hub.ps1` and the Docker
+image only ships the publish output), but the rule is worth keeping
+in mind if you ever add another satellite that builds via Docker
+from the magstronaut root.
+
 The agent runs on each host directly (no docker). HENDRIK runs the
 **installed `MagpilotAgent` scheduled task** (registered by
 `installer/magpilot.iss` at user logon, NOT SYSTEM, so `~/.copilot/`
