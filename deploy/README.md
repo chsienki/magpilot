@@ -50,16 +50,29 @@ proxy_read_timeout 3600s;
 proxy_send_timeout 3600s;
 ```
 
-## HENDRIK agent prerequisites
+## HENDRIK agent (Windows)
+
+HENDRIK runs the **installed `MagpilotAgent` scheduled task**, shipped
+by the magpilot Windows installer (`installer/magpilot.iss`, GitHub
+release `vX.Y.Z` -> `magpilot-setup-X.Y.Z.exe`).
 
 ```powershell
-$env:MAGPILOT_AGENT_TOKEN      = '<shared-secret>'
-$env:MAGPILOT_AGENT_PUBLIC_URL = 'http://192.168.1.248:5099'
+# First install (or download from a published GitHub release):
+& 'D:\path\to\magpilot-setup-X.Y.Z.exe'
+# Wizard collects: Hub URL, Agent token, Hub bearer, Public URL.
+# All written to %ProgramFiles%\Magpilot\config\magpilot.env.
 
-New-NetFirewallRule -DisplayName 'Magpilot Agent (TCP 5099)' `
-    -Direction Inbound -Protocol TCP -LocalPort 5099 -Action Allow `
-    -RemoteAddress 192.168.1.0/24,192.168.4.0/24
-New-NetFirewallRule -DisplayName 'Magpilot Agent Discovery (UDP 47823)' `
-    -Direction Inbound -Protocol UDP -LocalPort 47823 -Action Allow `
-    -RemoteAddress 192.168.1.0/24,192.168.4.0/24
+# In-place upgrade:
+magpilot --magpilot-update
+
+# Manual operations:
+Stop-ScheduledTask  -TaskName MagpilotAgent
+Start-ScheduledTask -TaskName MagpilotAgent
+Get-ScheduledTaskInfo -TaskName MagpilotAgent | Select LastRunTime, LastTaskResult
 ```
+
+The installer registers two inbound firewall rules (TCP 5099 + UDP
+47823) restricted to RFC1918 ranges. For dev iteration: stop the
+scheduled task, run `dotnet run --project src/Magpilot.Agent` locally,
+then restart the task. See the magpilot copilot-instructions for the
+full dev-loop story.

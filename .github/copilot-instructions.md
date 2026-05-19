@@ -226,8 +226,14 @@ the installed task afterwards.
 which is real source. Only exclude `src/Magpilot.Hub/wwwroot/` (the
 build output). The `.gitignore` reflects this.
 
-The agent runs on each host directly (no docker). On HENDRIK it is a
-plain `dotnet run` in an `async` PowerShell session named `agent`.
+The agent runs on each host directly (no docker). HENDRIK runs the
+**installed `MagpilotAgent` scheduled task** (registered by
+`installer/magpilot.iss` at user logon, NOT SYSTEM, so `~/.copilot/`
+is reachable). See `installer/README.md` for the install + upgrade
+recipe; `magpilot --magpilot-update` handles in-place upgrades. The
+older "run as `dotnet run` in an async pwsh session named `agent`"
+pattern is the dev-loop, NOT the deployed state -- see "Dev loop
+with the installed agent" above.
 
 ## Environment variables
 
