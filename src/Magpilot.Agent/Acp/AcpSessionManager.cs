@@ -304,6 +304,30 @@ public sealed class AcpSessionManager
                 o["kind"]?.GetValue<string>()
             ));
         }
+
+        // MAGPILOT_AUTO_APPROVE=true short-circuits the approval flow:
+        // every session/request_permission picks an "allow"-flavored
+        // option immediately. Intended for trusted always-on agents
+        // like Magnus, where the trust boundary is the container itself
+        // (everything inside is already authorized -- there's no human
+        // sitting in front of a SPA to click "approve"). Without this
+        // env var, /quick-prompt callers (WhatsApp sidecar, cron jobs)
+        // can't drive any tool that requires permission (e.g. `edit`
+        // on a file outside the session's cwd), because the approval
+        // request fans out to SSE subscribers that have no UI to
+        // answer, and times out after 5 minutes to a deny.
+        if (string.Equals(
+            Environment.GetEnvironmentVariable("MAGPILOT_AUTO_APPROVE"),
+            "true",
+            StringComparison.OrdinalIgnoreCase))
+        {
+            var pick = PickAllow(options);
+            _logger.LogInformation(
+                "Auto-approving permission request for session {Sid} -> {OptionId} (MAGPILOT_AUTO_APPROVE=true)",
+                sessionId, pick);
+            return BuildOutcome(pick, options);
+        }
+
         var approvalId = Guid.NewGuid().ToString("N");
         var tcs = new TaskCompletionSource<ApprovalResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (_approvalLock) _pendingApprovals[approvalId] = tcs;
@@ -339,6 +363,24 @@ public sealed class AcpSessionManager
             lock (_approvalLock) _pendingApprovals.Remove(approvalId);
             return BuildOutcome("reject_once", options);
         }
+    }
+
+    /// <summary>
+    /// Pick the most permissive "allow" option from the offered set.
+    /// Prefers allow_always (so the model doesn't keep asking for the
+    /// same kind of action), falls back to allow_once, then the first
+    /// option that contains "allow" in its id, then the first option,
+    /// then a literal "allow_once" string as a last resort.
+    /// </summary>
+    private static string PickAllow(IReadOnlyList<ApprovalOption> options)
+    {
+        var always = options.FirstOrDefault(o => o.OptionId == "allow_always");
+        if (always is not null) return always.OptionId;
+        var once = options.FirstOrDefault(o => o.OptionId == "allow_once");
+        if (once is not null) return once.OptionId;
+        var anyAllow = options.FirstOrDefault(o => o.OptionId.Contains("allow", StringComparison.OrdinalIgnoreCase));
+        if (anyAllow is not null) return anyAllow.OptionId;
+        return options.FirstOrDefault()?.OptionId ?? "allow_once";
     }
 
     private static JsonNode BuildOutcome(string optionId, IReadOnlyList<ApprovalOption> options)
