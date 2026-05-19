@@ -78,19 +78,35 @@ if (opts.Status)
     return 0;
 }
 
-// Resolve the session id from forward args. Phase-2 v1 only handles the
-// explicit --resume=<sid> case; --continue and the no-args picker are
-// follow-ups (we just spawn fresh copilot for those).
+// Resolve the session id from forward args. We only know it up front
+// for explicit --resume=<UUID> -- everything else (--resume="some name",
+// --continue, no args + interactive picker, new session) needs the
+// post-spawn detection path so we can still register HostOwnership with
+// the agent and the SPA shows it as Host-owned instead of Locked.
 var sid = opts.ExtractResumeSessionId();
+
+// PTY+detection only works when we own the terminal. Redirected stdio
+// (e.g. `echo /help | magpilot`) skips it and falls back to the
+// transparent passthrough -- the launcher can't see the bytes anyway.
+var canPty = !Console.IsInputRedirected && !Console.IsOutputRedirected;
+
 if (string.IsNullOrEmpty(sid))
 {
-    // No specific session to coordinate -- just exec real copilot.
-    // Fresh sessions don't need the take-over prompt.
-    agent.Dispose();
-    return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null);
+    if (!canPty)
+    {
+        // Non-interactive: just exec copilot. No coordination, but the
+        // user didn't ask for it.
+        agent.Dispose();
+        return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null);
+    }
+    // No specific session known up front. Spawn copilot in a PTY and
+    // post-spawn-detect whichever session it ends up holding (fresh,
+    // picker-selected, --continue, etc.). Detection times out gracefully
+    // if copilot exits before taking a lock (e.g. `magpilot --version`).
+    return await RunSessionLoopWithDetectionAsync(agent, opts);
 }
 
-// We have a target session. Look it up.
+// We have a target session id. Look it up.
 SessionStateInfo? state;
 try { state = await agent.GetStateAsync(sid); }
 catch (Exception ex)
