@@ -30,7 +30,7 @@ internal static class UpdateInstaller
 
     public static async Task<int> RunAsync()
     {
-        var baseUrl = (Environment.GetEnvironmentVariable("MAGPILOT_AGENT_URL")
+        var baseUrl = (InstallConfig.ResolveValue("MAGPILOT_AGENT_URL")
             ?? "http://127.0.0.1:5099").TrimEnd('/');
         using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
 
@@ -156,7 +156,7 @@ internal static class VersionPrinter
         Console.WriteLine($"magpilot {Versioning.AssemblyVersion} (protocol {Versioning.ProtocolVersion})");
         try
         {
-            var baseUrl = (Environment.GetEnvironmentVariable("MAGPILOT_AGENT_URL")
+            var baseUrl = (InstallConfig.ResolveValue("MAGPILOT_AGENT_URL")
                 ?? "http://127.0.0.1:5099").TrimEnd('/');
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
             var info = await http.GetFromJsonAsync<LatestVersionInfo>(

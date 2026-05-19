@@ -17,11 +17,13 @@ public sealed class AgentClient : IDisposable
 
     public AgentClient(string? agentUrl = null, string? agentToken = null)
     {
-        agentUrl   ??= Environment.GetEnvironmentVariable("MAGPILOT_AGENT_URL")   ?? "http://127.0.0.1:5099";
-        agentToken ??= Environment.GetEnvironmentVariable("MAGPILOT_AGENT_TOKEN") ?? "";
+        agentUrl   ??= InstallConfig.ResolveValue("MAGPILOT_AGENT_URL")   ?? "http://127.0.0.1:5099";
+        agentToken ??= InstallConfig.ResolveValue("MAGPILOT_AGENT_TOKEN") ?? "";
         if (string.IsNullOrEmpty(agentToken))
             throw new InvalidOperationException(
-                "MAGPILOT_AGENT_TOKEN env var is required (or pass --magpilot-skip-check to bypass the agent entirely).");
+                "MAGPILOT_AGENT_TOKEN is not set (checked env + installer's magpilot.env). " +
+                "Set the env var, fix the value in {install}\\config\\magpilot.env, " +
+                "or pass --magpilot-skip-check to bypass the agent entirely.");
 
         _http = new HttpClient { BaseAddress = new Uri(agentUrl.TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(15) };
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", agentToken);
