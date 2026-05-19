@@ -29,6 +29,26 @@
                 <MudIcon Icon="@Icons.Material.Filled.ChevronRight" Size="Size.Small" Class="mx-1" />
                 <MudText Typo="Typo.body2" Class="text-truncate" Style="max-width: 40vw;">@_currentSessionTitle</MudText>
             }
+            @if (SessionId is not null)
+            {
+                <MudTooltip Text="@StreamStatusTooltip()">
+                    @switch (_streamStatus)
+                    {
+                        case StreamStatus.Connected:
+                            <MudIcon Icon="@Icons.Material.Filled.Circle" Color="Color.Success" Size="Size.Small" Class="ml-2" />
+                            break;
+                        case StreamStatus.Reconnecting:
+                            <MudProgressCircular Color="Color.Warning" Size="Size.Small" Indeterminate="true" Class="ml-2" />
+                            break;
+                        case StreamStatus.Offline:
+                            <MudIconButton Icon="@Icons.Material.Filled.CloudOff"
+                                           Color="Color.Error" Size="Size.Small" Class="ml-2"
+                                           OnClick="HandleReconnectClick"
+                                           aria-label="Reconnect" />
+                            break;
+                    }
+                </MudTooltip>
+            }
         }
         <MudSpacer />
         <MudTooltip Text="View central logs">
@@ -332,6 +352,23 @@
                            Value="_showThoughts" ValueChanged="@SetShowThoughts"
                            Label="Show thinking" />
             </div>
+            @if (_streamStatus == StreamStatus.Offline)
+            {
+                <MudAlert Severity="Severity.Error" Dense="true" Class="mx-3 my-2"
+                          ContentAlignment="HorizontalAlignment.Left">
+                    <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
+                        <MudText Typo="Typo.body2">
+                            Connection to the agent dropped and didn't recover.
+                        </MudText>
+                        <MudSpacer />
+                        <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Error"
+                                   StartIcon="@Icons.Material.Filled.Refresh"
+                                   OnClick="HandleReconnectClick">
+                            Reconnect
+                        </MudButton>
+                    </MudStack>
+                </MudAlert>
+            }
             @if (_pendingForceTake is { } pending)
             {
                 <MudAlert Severity="Severity.Warning" Dense="true" Class="mx-3 my-2"
@@ -414,6 +451,20 @@
     // the user navigates to a different session. Capped to avoid infinite
     // reconnect loops if the agent is genuinely down.
     private int _streamReconnectAttempts;
+    /// <summary>
+    /// User-visible connection state for the currently-open session's SSE
+    /// stream. Drives the AppBar status pill + the "give up" alert.
+    /// Connected = any event received in the last reconnect cycle.
+    /// Reconnecting = stream dropped, exponential backoff in progress.
+    /// Offline = exhausted maxAttempts reconnect tries, user action required.
+    /// </summary>
+    private enum StreamStatus { Connected, Reconnecting, Offline }
+    private StreamStatus _streamStatus = StreamStatus.Connected;
+    /// <summary>
+    /// Next retry timestamp during Reconnecting. Used to render a
+    /// countdown in the status pill tooltip. Null when not reconnecting.
+    /// </summary>
+    private DateTime? _reconnectNextAttemptAt;
     private SessionInfo? _pendingOrphan;
     private bool _newSessionOpen;
     private string _newSessionCwd = "";
@@ -815,7 +866,12 @@
                 _messages.Add(new ChatMessage { Role = m.Role, Text = m.Text, ToolCallId = m.ToolCallId });
         }
         _loading = load;
-        if (!isReconnect) _streamReconnectAttempts = 0;
+        if (!isReconnect)
+        {
+            _streamReconnectAttempts = 0;
+            _streamStatus = StreamStatus.Connected;
+            _reconnectNextAttemptAt = null;
+        }
         _streamCts = new CancellationTokenSource();
         _streamingFor = $"{Agent}/{SessionId}";
         var ct = _streamCts.Token;
@@ -838,6 +894,11 @@
                     }
                     gotAnyEvent = true;
                     _streamReconnectAttempts = 0;
+                    if (_streamStatus != StreamStatus.Connected)
+                    {
+                        _streamStatus = StreamStatus.Connected;
+                        _reconnectNextAttemptAt = null;
+                    }
                     await InvokeAsync(() => Apply(evt));
                 }
             }
@@ -875,6 +936,9 @@
                     stack: null, category: nameof(Home), sessionId: sid,
                     extra: new { agent, generation = streamId });
                 Console.Error.WriteLine($"[stream {streamId}] giving up after {attempt - 1} reconnect attempts");
+                _streamStatus = StreamStatus.Offline;
+                _reconnectNextAttemptAt = null;
+                await InvokeAsync(StateHasChanged);
                 return;
             }
 
@@ -884,6 +948,9 @@
             // until the tab becomes visible again.
             var delaySec = Math.Min(10, 1 << Math.Min(attempt - 1, 4));
             Console.WriteLine($"[stream {streamId}] disconnected (gotAny={gotAnyEvent}); reconnect attempt {attempt} in {delaySec}s");
+            _streamStatus = StreamStatus.Reconnecting;
+            _reconnectNextAttemptAt = DateTime.UtcNow.AddSeconds(delaySec);
+            await InvokeAsync(StateHasChanged);
             try { await Task.Delay(TimeSpan.FromSeconds(delaySec), ct); }
             catch (OperationCanceledException) { return; }
 
@@ -1048,6 +1115,36 @@
     }
 
     private void HandleCancelForceTake() { _pendingForceTake = null; StateHasChanged(); }
+
+    /// <summary>
+    /// User-driven reconnect from the AppBar pill or the Offline alert.
+    /// Resets the attempt counter and re-issues StartStreamingAsync as a
+    /// fresh stream (not isReconnect, so the counter starts at 0 and the
+    /// status flips back to Connected on the first received event).
+    /// Restores the in-memory message snapshot so the user doesn't see
+    /// the chat blank for a beat.
+    /// </summary>
+    private async Task HandleReconnectClick()
+    {
+        if (Agent is null || SessionId is null) return;
+        _streamReconnectAttempts = 0;
+        _streamStatus = StreamStatus.Reconnecting;
+        _reconnectNextAttemptAt = null;
+        var snapshot = _messages
+            .Select(m => new ChatMessage { Role = m.Role, Text = m.Text, ToolCallId = m.ToolCallId })
+            .ToList();
+        await StartStreamingAsync(load: false, force: false, restoreFrom: snapshot, isReconnect: true);
+    }
+
+    private string StreamStatusTooltip() => _streamStatus switch
+    {
+        StreamStatus.Connected => "Connected",
+        StreamStatus.Reconnecting when _reconnectNextAttemptAt is { } at =>
+            $"Reconnecting (next attempt in {Math.Max(0, (int)(at - DateTime.UtcNow).TotalSeconds)}s)...",
+        StreamStatus.Reconnecting => "Reconnecting...",
+        StreamStatus.Offline => "Connection dropped. Click to retry.",
+        _ => "",
+    };
 
     private static string TruncatePreview(string s) =>
         s.Length <= 60 ? s : s[..57] + "...";

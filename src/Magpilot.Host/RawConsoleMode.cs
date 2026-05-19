@@ -18,6 +18,7 @@ public sealed class RawConsoleMode : IDisposable
     private readonly bool _isWindows;
     private uint _origStdinMode, _origStdoutMode;
     private nint _stdinHandle, _stdoutHandle;
+    private uint _origConsoleCp, _origConsoleOutputCp;
     private object? _origTermios;
 
     public RawConsoleMode()
@@ -64,6 +65,12 @@ public sealed class RawConsoleMode : IDisposable
     [DllImport("kernel32.dll", SetLastError = true)] private static extern nint GetStdHandle(int nStdHandle);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetConsoleMode(nint hConsoleHandle, out uint lpMode);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetConsoleMode(nint hConsoleHandle, uint dwMode);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern uint GetConsoleCP();
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern uint GetConsoleOutputCP();
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetConsoleCP(uint wCodePageID);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetConsoleOutputCP(uint wCodePageID);
+
+    private const uint CP_UTF8 = 65001;
 
     private void EnterWindows()
     {
@@ -82,12 +89,25 @@ public sealed class RawConsoleMode : IDisposable
             raw |= ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN;
             SetConsoleMode(_stdoutHandle, raw);
         }
+
+        // Force the console code page to UTF-8 so the bytes copilot's TUI
+        // emits (box-drawing characters, bullets, em-dashes, etc.) are
+        // rendered correctly. Without this, a default cmd.exe / pwsh inherits
+        // CP-437 / CP-1252 and each 3-byte UTF-8 sequence shows up as garbled
+        // "Gamma-o-acute" goo. Restored on exit so we don't pollute the
+        // parent shell.
+        _origConsoleCp       = GetConsoleCP();
+        _origConsoleOutputCp = GetConsoleOutputCP();
+        if (_origConsoleCp       != CP_UTF8) SetConsoleCP(CP_UTF8);
+        if (_origConsoleOutputCp != CP_UTF8) SetConsoleOutputCP(CP_UTF8);
     }
 
     private void RestoreWindows()
     {
         if (_origStdinMode  != 0 && _stdinHandle  != 0) SetConsoleMode(_stdinHandle,  _origStdinMode);
         if (_origStdoutMode != 0 && _stdoutHandle != 0) SetConsoleMode(_stdoutHandle, _origStdoutMode);
+        if (_origConsoleCp       != 0 && _origConsoleCp       != CP_UTF8) SetConsoleCP(_origConsoleCp);
+        if (_origConsoleOutputCp != 0 && _origConsoleOutputCp != CP_UTF8) SetConsoleOutputCP(_origConsoleOutputCp);
     }
 
     // --------------- Unix (Linux/macOS) ----------------
