@@ -32,6 +32,11 @@ if (opts.Update)
     return await UpdateInstaller.RunAsync();
 }
 
+if (opts.Claim is not null)
+{
+    return await MagpilotClaim.RunAsync(opts.Claim);
+}
+
 // --magpilot-skip-check wins over everything: degrade to a transparent
 // pass-through that just exec's the real copilot.
 if (opts.SkipCheck)
@@ -97,10 +102,12 @@ catch (Exception ex)
 
 if (state is null)
 {
-    // Session unknown to the agent (not on disk). Let copilot deal with
-    // it -- it'll either find it locally or error helpfully.
-    agent.Dispose();
-    return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null);
+    // Session unknown to the agent (not on disk yet). Either the user
+    // passed a name/--continue that copilot will resolve internally, or
+    // the session genuinely doesn't exist. Spawn in PTY and post-spawn-
+    // detect the resulting session so we can still register HostOwnership
+    // and participate in cooperative handoff.
+    return await RunSessionLoopWithDetectionAsync(agent, opts);
 }
 
 // If owned by the agent or another host, prompt to take over.
@@ -321,4 +328,135 @@ static IReadOnlyList<string> WithResumeFlag(IReadOnlyList<string> forwardArgs, s
     var copy = new List<string>(forwardArgs.Count + 1) { $"--resume={sid}" };
     copy.AddRange(forwardArgs);
     return copy;
+}
+
+/// <summary>
+/// Spawn copilot WITHOUT knowing the session id up front (user passed
+/// --resume=&lt;name&gt;, --continue, no flag at all, etc.). Post-spawn-
+/// detect which session copilot took the lock for, register host
+/// ownership with the agent, then drop into the same SSE handoff +
+/// take-back loop as RunSessionLoopAsync. If detection times out, we
+/// just let copilot run unsupervised (no coordination, like the old
+/// behaviour) so the user isn't blocked.
+/// </summary>
+static async Task<int> RunSessionLoopWithDetectionAsync(AgentClient agent, WrapperOptions opts)
+{
+    string copilotPath;
+    try { copilotPath = CopilotLocator.Find(); }
+    catch (FileNotFoundException ex)
+    {
+        Console.Error.WriteLine($"magpilot: {ex.Message}");
+        agent.Dispose();
+        return 127;
+    }
+
+    var hostPid = Environment.ProcessId;
+
+    PtyHost copilotHost;
+    try
+    {
+        copilotHost = await PtyHost.SpawnAsync(copilotPath, opts.ForwardArgs, Environment.CurrentDirectory);
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"magpilot: failed to spawn copilot in PTY: {ex.Message}");
+        agent.Dispose();
+        return 4;
+    }
+
+    await using (copilotHost)
+    {
+        // Background-detect which session copilot ended up taking, then
+        // register HostOwnership with the agent. We use the copilot
+        // child's PID as the host PID so the agent's liveness sweep
+        // doesn't prune the entry the moment our launcher dies (which
+        // it doesn't here, but matches the claim semantics: the
+        // wrapper PID and the copilot PID are functionally equivalent
+        // from the agent's POV, the sweep only cares that *something*
+        // alive owns the session). Once registration completes, we
+        // start listening for release_requested SSE events.
+        using var sseCts = new CancellationTokenSource();
+        var preempted = new TaskCompletionSource<ReleaseRequested>(TaskCreationOptions.RunContinuationsAsynchronously);
+        string? detectedSid = null;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                detectedSid = await PostSpawnDetector.WaitForSessionAsync(copilotHost.Pid, sseCts.Token);
+                if (detectedSid is null)
+                {
+                    Console.Error.WriteLine(
+                        $"\r\nmagpilot: post-spawn detection timed out. " +
+                        "Session not registered for cooperative handoff; SPA may show it as Locked.\r\n");
+                    return;
+                }
+
+                try
+                {
+                    await agent.AcquireForHostAsync(detectedSid, copilotHost.Pid, force: false);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"\r\nmagpilot: acquire-for-host on detected session {detectedSid} failed: {ex.Message}\r\n");
+                    return;
+                }
+
+                // Now that we know the sid, subscribe to its SSE so we
+                // can react to release_requested events.
+                try
+                {
+                    await foreach (var evt in agent.SubscribeAsync(detectedSid, sseCts.Token))
+                    {
+                        if (evt is ReleaseRequested rr)
+                        {
+                            preempted.TrySetResult(rr);
+                            break;
+                        }
+                    }
+                }
+                catch (OperationCanceledException) { }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"\r\nmagpilot: SSE subscribe failed: {ex.Message}\r\n");
+                }
+            }
+            catch (OperationCanceledException) { }
+        });
+
+        var done = await Task.WhenAny(copilotHost.ExitTask, preempted.Task);
+        sseCts.Cancel();
+
+        if (done == copilotHost.ExitTask)
+        {
+            var exit = await copilotHost.ExitTask;
+            if (detectedSid is not null)
+            {
+                try { await agent.ReleaseAsync(detectedSid, copilotHost.Pid); }
+                catch (Exception ex) { Console.Error.WriteLine($"magpilot: release failed: {ex.Message}"); }
+            }
+            agent.Dispose();
+            return exit;
+        }
+
+        // SSE preempt arrived first. Detection necessarily completed
+        // (otherwise we couldn't have subscribed); detectedSid is non-null.
+        var rrEvt = await preempted.Task;
+        await copilotHost.ShutdownGracefullyAsync(TimeSpan.FromSeconds(rrEvt.Force ? 1 : 3));
+        Console.Out.Write("\r\n--- web took over this session ---\r\n");
+        Console.Out.Write($"   requester: {rrEvt.Requester}{(rrEvt.Force ? " (force)" : "")}\r\n");
+        Console.Out.Flush();
+
+        if (detectedSid is not null)
+        {
+            try { await agent.ReleaseAsync(detectedSid, copilotHost.Pid); }
+            catch (Exception ex) { Console.Error.WriteLine($"magpilot: release failed: {ex.Message}"); }
+        }
+    }
+
+    // The detection-path doesn't support the post-handoff "press enter
+    // to take it back" loop -- the user's original argv (e.g. --continue)
+    // may not be re-runnable, and we'd risk landing in a different
+    // session. Exit cleanly.
+    agent.Dispose();
+    return 0;
 }

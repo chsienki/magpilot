@@ -25,6 +25,8 @@ public sealed record WrapperOptions(
     bool Version,
     /// <summary>Download and run the latest installer from GitHub Releases, then exit.</summary>
     bool Update,
+    /// <summary>One-shot: register an already-running copilot session as host-owned (no spawn).</summary>
+    string? Claim,
     /// <summary>Argv with all <c>--magpilot-*</c> flags stripped, ready to forward to the real copilot binary.</summary>
     IReadOnlyList<string> ForwardArgs)
 {
@@ -34,6 +36,7 @@ public sealed record WrapperOptions(
         var skipCheck = false; var exitOnHandoff = false;
         var status = false; var help = false;
         var version = false; var update = false;
+        string? claim = null;
         var forward = new List<string>(argv.Length);
 
         foreach (var a in argv)
@@ -53,6 +56,11 @@ public sealed record WrapperOptions(
                 case "--magpilot-version":         version = true; break;
                 case "--magpilot-update":          update = true; break;
                 default:
+                    if (a.StartsWith("--magpilot-claim=", StringComparison.Ordinal))
+                    {
+                        claim = a["--magpilot-claim=".Length..];
+                        break;
+                    }
                     if (a.StartsWith("--magpilot-", StringComparison.Ordinal))
                         throw new ArgumentException($"Unknown wrapper flag: {a}. Try --magpilot-help.");
                     forward.Add(a);
@@ -64,7 +72,7 @@ public sealed record WrapperOptions(
         if (take && noTake)
             throw new ArgumentException("Contradictory flags: --magpilot-take (or --magpilot-force) and --magpilot-no-take both set.");
 
-        return new WrapperOptions(take, force, noTake, skipCheck, exitOnHandoff, status, help, version, update, forward);
+        return new WrapperOptions(take, force, noTake, skipCheck, exitOnHandoff, status, help, version, update, claim, forward);
     }
 
     /// <summary>
@@ -101,6 +109,9 @@ public sealed record WrapperOptions(
           --magpilot-status            don't spawn copilot; print agent reachability + sessions + exit
           --magpilot-version           print local + agent-reported version info, then exit
           --magpilot-update            download and run the latest installer from GitHub Releases, then exit
+          --magpilot-claim=<sid>       one-shot: register a stranded already-running copilot session
+                                       as host-owned in the agent (no spawn). The agent's PID-liveness
+                                       sweep handles cleanup when the copilot child eventually exits.
           --magpilot-help              print this help and exit
 
         Env:
