@@ -6,6 +6,23 @@
 
 <div class="chat-view-mud">
     <div class="messages-mud" @ref="_messagesEl">
+        @if (HasMore)
+        {
+            <div class="d-flex justify-center pa-2">
+                @if (_loadingMore)
+                {
+                    <MudProgressCircular Size="Size.Small" Indeterminate="true" Color="Color.Default" />
+                }
+                else
+                {
+                    <MudButton Size="Size.Small" Variant="Variant.Text" Color="Color.Default"
+                               StartIcon="@Icons.Material.Filled.History"
+                               OnClick="HandleLoadMoreClick">
+                        Load older messages
+                    </MudButton>
+                }
+            </div>
+        }
         @foreach (var m in Messages)
         {
             var isThought = m.Role.Equals("thought", StringComparison.OrdinalIgnoreCase);
@@ -129,12 +146,34 @@
     [Parameter] public bool ShowThoughts { get; set; } = true;
     [Parameter] public EventCallback<string> OnSend { get; set; }
     [Parameter] public EventCallback<(string ApprovalId, string OptionId)> OnApproval { get; set; }
+    /// <summary>
+    /// True if there are older messages on the server that aren't yet
+    /// loaded into <see cref="Messages"/>. Drives the "Load older
+    /// messages" button + the auto-load-on-scroll-to-top trigger.
+    /// </summary>
+    [Parameter] public bool HasMore { get; set; }
+    /// <summary>
+    /// Fired when the user scrolls within ~120px of the top, OR clicks
+    /// the explicit "Load older messages" button. The host should:
+    ///   1. fetch the next older page of history
+    ///   2. snapshot scroll position with <see cref="SnapshotScrollAsync"/>
+    ///   3. prepend the fetched messages into the front of
+    ///      <see cref="Messages"/>
+    ///   4. call <see cref="RestoreScrollAfterPrependAsync"/> so the
+    ///      user's visual anchor stays put.
+    ///   5. update <see cref="HasMore"/>.
+    /// </summary>
+    [Parameter] public EventCallback OnLoadMore { get; set; }
 
     private string _draft = "";
     private ElementReference _textarea;
     private ElementReference _messagesEl;
     private IJSObjectReference? _composerModule;
+    private IJSObjectReference? _scrollModule;
+    private IJSObjectReference? _scrollWatcher;
+    private DotNetObjectReference<ChatView>? _selfRef;
     private int _lastMessageCount;
+    private bool _loadingMore;
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -143,27 +182,105 @@
             _composerModule = await JS.InvokeAsync<IJSObjectReference>(
                 "import", "./js/composer.js");
             await _composerModule.InvokeVoidAsync("preventBareEnterNewline", _textarea);
+            _scrollModule = await JS.InvokeAsync<IJSObjectReference>(
+                "import", "./js/history-scroll.js");
+            _selfRef = DotNetObjectReference.Create(this);
+            _scrollWatcher = await _scrollModule.InvokeAsync<IJSObjectReference>(
+                "watchScrollTop", _messagesEl, _selfRef);
             Messages.CollectionChanged += (_, _) => InvokeAsync(StateHasChanged);
         }
 
         // Auto-scroll on every render where the message count grew. Cheap;
         // covers both adds and incremental streaming because Apply() in
-        // Home.razor calls StateHasChanged on each delta.
+        // Home.razor calls StateHasChanged on each delta. Skipped during
+        // a load-more cycle (the host handles scroll position via
+        // SnapshotScrollAsync + RestoreScrollAfterPrependAsync) so we
+        // don't yank the user to the bottom when they scrolled up.
         var current = Messages.Count;
         if (current != _lastMessageCount)
         {
+            var grew = current > _lastMessageCount;
             _lastMessageCount = current;
-            try { await JS.InvokeVoidAsync("magpilot.scrollToBottom", _messagesEl); }
-            catch { /* JS not ready yet on first paint */ }
+            if (grew && !_loadingMore)
+            {
+                try { await JS.InvokeVoidAsync("magpilot.scrollToBottom", _messagesEl); }
+                catch { /* JS not ready yet on first paint */ }
+            }
         }
     }
 
     public async ValueTask DisposeAsync()
     {
+        if (_scrollWatcher is not null)
+        {
+            try { await _scrollWatcher.InvokeVoidAsync("dispose"); } catch { /* shutdown */ }
+            try { await _scrollWatcher.DisposeAsync(); } catch { }
+        }
+        if (_scrollModule is not null)
+        {
+            try { await _scrollModule.DisposeAsync(); } catch { /* shutdown */ }
+        }
         if (_composerModule is not null)
         {
             try { await _composerModule.DisposeAsync(); } catch { /* shutdown */ }
         }
+        _selfRef?.Dispose();
+    }
+
+    /// <summary>
+    /// JS-invokable. Fired by the scroll watcher when the user scrolls
+    /// near the top. Delegates to <see cref="OnLoadMore"/> with the
+    /// load-more guard set so we don't double-fire while a fetch is in
+    /// flight.
+    /// </summary>
+    [JSInvokable]
+    public async Task OnNearTop()
+    {
+        if (!HasMore || _loadingMore) return;
+        await TriggerLoadMore();
+    }
+
+    private async Task HandleLoadMoreClick()
+    {
+        if (!HasMore || _loadingMore) return;
+        await TriggerLoadMore();
+    }
+
+    private async Task TriggerLoadMore()
+    {
+        _loadingMore = true;
+        StateHasChanged();
+        try
+        {
+            await OnLoadMore.InvokeAsync();
+        }
+        finally
+        {
+            _loadingMore = false;
+            StateHasChanged();
+        }
+    }
+
+    /// <summary>
+    /// Capture the current scroll position so the host can restore the
+    /// user's visual anchor after prepending older messages.
+    /// </summary>
+    public async ValueTask<object?> SnapshotScrollAsync()
+    {
+        if (_scrollModule is null) return null;
+        return await _scrollModule.InvokeAsync<object?>("snapshotScroll", _messagesEl);
+    }
+
+    /// <summary>
+    /// Restore the visual anchor captured by <see cref="SnapshotScrollAsync"/>
+    /// after prepending older messages. Call this on the render cycle
+    /// AFTER the prepend has hit the DOM (typically right after the
+    /// awaited fetch + the synchronous Insert calls).
+    /// </summary>
+    public async ValueTask RestoreScrollAfterPrependAsync(object? snapshot)
+    {
+        if (_scrollModule is null || snapshot is null) return;
+        await _scrollModule.InvokeVoidAsync("restoreScrollAfterPrepend", _messagesEl, snapshot);
     }
 
     private async Task OnKeyDown(KeyboardEventArgs e)

@@ -49,8 +49,32 @@ public static class AgentEndpoints
         // for hydrating an Owned session that another client (e.g. the WA
         // sidecar) loaded into ACP first -- ACP refuses to load again, so
         // we bypass it entirely.
-        api.MapGet("/sessions/{id}/history", (string id, HistoryReader reader) =>
-            Results.Ok(reader.Read(id)));
+        // Reads the persisted message history for a session straight from
+        // events.jsonl. Bypasses ACP entirely (which would refuse a
+        // session/load on an already-loaded session). Paging:
+        //   ?tail=N       -- most recent N entries (default 50)
+        //   ?before=X&limit=N -- N entries immediately older than ordinal X
+        //   ?all=true     -- full history (use sparingly; legacy)
+        // Returns HistoryPage { entries, oldestCursor, hasMore }.
+        api.MapGet("/sessions/{id}/history", (
+            string id,
+            HistoryReader reader,
+            int? tail,
+            int? before,
+            int? limit,
+            bool? all) =>
+        {
+            if (all == true)
+            {
+                var full = reader.Read(id);
+                return Results.Ok(new HistoryReader.HistoryPage(full, 0, false));
+            }
+            if (before is int beforeCursor)
+            {
+                return Results.Ok(reader.ReadBefore(id, beforeCursor, limit ?? 50));
+            }
+            return Results.Ok(reader.ReadTail(id, tail ?? 50));
+        });
 
         api.MapPost("/sessions", async (NewSessionRequest req, SessionRegistry reg, AcpSessionManager acp, CancellationToken ct) =>
         {

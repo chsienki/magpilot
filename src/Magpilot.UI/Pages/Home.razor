@@ -388,11 +388,14 @@
                     </MudStack>
                 </MudAlert>
             }
-            <ChatView Messages="@_messages"
+            <ChatView @ref="_chatView"
+                      Messages="@_messages"
                       PendingApproval="@_pendingApproval"
                       Disabled="@(_busy || _loading)"
                       Thinking="@_thinking"
                       ShowThoughts="@_showThoughts"
+                      HasMore="@_hasMore"
+                      OnLoadMore="HandleLoadOlder"
                       OnSend="HandleSend"
                       OnApproval="HandleApproval" />
         }
@@ -436,6 +439,13 @@
     private bool _busy;
     private bool _loading;
     private bool _thinking;
+    // Paging cursor for the demand-load-older flow (see HandleLoadOlder).
+    // _oldestCursor is the ordinal id of the oldest entry currently in
+    // _messages; pass back as ?before= on the next history call. Reset
+    // (along with _hasMore) when the session changes -- see StartStreamingAsync.
+    private int _oldestCursor;
+    private bool _hasMore;
+    private ChatView? _chatView;
     /// <summary>
     /// When the agent refuses a prompt because a magpilot launcher holds
     /// the session AND the wrapper failed to release within the polite-knock
@@ -638,12 +648,17 @@
                 List<ChatMessage>? fromDisk = null;
                 try
                 {
-                    var rows = await Hub.GetHistoryAsync(Agent, SessionId);
-                    if (rows is not null)
+                    // Tail-load: only the most recent 50 entries. Older
+                    // demand-load via HandleLoadOlder when the user
+                    // scrolls near the top.
+                    var page = await Hub.GetHistoryAsync(Agent, SessionId, tail: 50);
+                    if (page is not null)
                     {
-                        fromDisk = rows
+                        fromDisk = page.Entries
                             .Select(r => new ChatMessage { Role = r.Role, Text = r.Text, ToolCallId = r.ToolCallId })
                             .ToList();
+                        _oldestCursor = page.OldestCursor;
+                        _hasMore = page.HasMore;
                     }
                 }
                 catch (Exception ex)
@@ -871,6 +886,13 @@
             _streamReconnectAttempts = 0;
             _streamStatus = StreamStatus.Connected;
             _reconnectNextAttemptAt = null;
+            // Reset paging cursor on a real session switch. The Owned-
+            // without-cache branch in OnParametersSetAsync re-populates
+            // it from the first /history?tail=50 page; other branches
+            // (cached restore or ACP session/load) leave _hasMore=false
+            // because they replay full history through the live stream.
+            _oldestCursor = 0;
+            _hasMore = false;
         }
         _streamCts = new CancellationTokenSource();
         _streamingFor = $"{Agent}/{SessionId}";
@@ -1145,6 +1167,49 @@
         StreamStatus.Offline => "Connection dropped. Click to retry.",
         _ => "",
     };
+
+    /// <summary>
+    /// Demand-load the next older page of history. Invoked by ChatView
+    /// when the user scrolls near the top (or clicks the "Load older
+    /// messages" button). Preserves the user's visual anchor by
+    /// snapshotting scroll position before the prepend and restoring
+    /// after.
+    /// </summary>
+    private async Task HandleLoadOlder()
+    {
+        if (Agent is null || SessionId is null || !_hasMore || _chatView is null) return;
+        var snapshot = await _chatView.SnapshotScrollAsync();
+        try
+        {
+            var page = await Hub.GetHistoryAsync(
+                Agent, SessionId,
+                before: _oldestCursor, limit: 50);
+            if (page is null || page.Entries.Count == 0)
+            {
+                _hasMore = false;
+                return;
+            }
+            for (var i = page.Entries.Count - 1; i >= 0; i--)
+            {
+                var r = page.Entries[i];
+                _messages.Insert(0, new ChatMessage
+                {
+                    Role = r.Role,
+                    Text = r.Text,
+                    ToolCallId = r.ToolCallId,
+                });
+            }
+            _oldestCursor = page.OldestCursor;
+            _hasMore = page.HasMore;
+        }
+        catch (Exception ex)
+        {
+            HubLog.LogError($"HandleLoadOlder failed: {ex.Message}", ex.ToString(),
+                category: nameof(Home), sessionId: SessionId,
+                extra: new { agent = Agent });
+        }
+        await _chatView.RestoreScrollAfterPrependAsync(snapshot);
+    }
 
     private static string TruncatePreview(string s) =>
         s.Length <= 60 ? s : s[..57] + "...";

@@ -28,14 +28,31 @@ public sealed class HubClient
 
     /// <summary>
     /// Read the persisted message history for a session straight from the
-    /// agent's events.jsonl projection. Used to rehydrate an Owned session
-    /// in a fresh browser tab when the in-memory cache is empty (we can't
-    /// re-trigger ACP's session/load to replay it).
+    /// agent's events.jsonl projection. Defaults to the most recent 50
+    /// entries; pass <paramref name="tail"/> to override or
+    /// <paramref name="before"/> to demand-load older entries.
     /// </summary>
-    public Task<List<HistoryEntry>?> GetHistoryAsync(string agent, string sessionId, CancellationToken ct = default) =>
-        _http.GetFromJsonAsync<List<HistoryEntry>>($"api/agents/{agent}/sessions/{sessionId}/history", ct);
+    /// <param name="tail">If set, return the most recent N entries (default 50).</param>
+    /// <param name="before">If set, return up to <paramref name="limit"/> entries immediately older than this ordinal cursor. Pass the previous page's <see cref="HistoryPage.OldestCursor"/>.</param>
+    /// <param name="limit">Page size when <paramref name="before"/> is set (default 50).</param>
+    public Task<HistoryPage?> GetHistoryAsync(
+        string agent,
+        string sessionId,
+        int? tail = null,
+        int? before = null,
+        int? limit = null,
+        CancellationToken ct = default)
+    {
+        var qs = new List<string>();
+        if (before is int b) { qs.Add($"before={b}"); if (limit is int l) qs.Add($"limit={l}"); }
+        else if (tail is int t) { qs.Add($"tail={t}"); }
+        var url = $"api/agents/{agent}/sessions/{sessionId}/history";
+        if (qs.Count > 0) url += "?" + string.Join("&", qs);
+        return _http.GetFromJsonAsync<HistoryPage>(url, ct);
+    }
 
-    public sealed record HistoryEntry(string Role, string Text, string? ToolCallId = null);
+    public sealed record HistoryEntry(int Id, string Role, string Text, string? ToolCallId = null);
+    public sealed record HistoryPage(IReadOnlyList<HistoryEntry> Entries, int OldestCursor, bool HasMore);
 
     public async Task<SessionInfo?> NewSessionAsync(string agent, string? cwd, bool useAgency = false, CancellationToken ct = default)
     {

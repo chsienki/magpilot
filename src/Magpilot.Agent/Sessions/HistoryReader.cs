@@ -16,6 +16,25 @@ namespace Magpilot.Agent.Sessions;
 /// the SPA can't request load=true to retrieve history. Reading the
 /// canonical events.jsonl bypasses ACP entirely; the file is the durable
 /// source of truth that ACP itself was going to replay anyway.
+///
+/// Paging: long-lived pinned sessions (Magnus) can grow into thousands of
+/// messages; sending the entire projection on every fresh tab open is
+/// painful on mobile. <see cref="ReadTail"/> returns the most recent N
+/// entries and <see cref="ReadBefore"/> returns the N entries immediately
+/// older than a given ordinal cursor, so the SPA can demand-load as the
+/// user scrolls up.
+///
+/// Cursor model: each projected <see cref="HistoryEntry"/> gets a stable
+/// ordinal <see cref="HistoryEntry.Id"/> -- its position in the
+/// canonical projection of events.jsonl. The file is append-only, so the
+/// projection is deterministic across calls. <see cref="HistoryPage.OldestCursor"/>
+/// is the ordinal of the first entry returned, suitable for passing back
+/// as the <c>before</c> param on the next paging call.
+///
+/// Performance: every call re-streams events.jsonl. For O(thousands of
+/// entries) this is fine. If we ever hit O(100k+) sessions, the next
+/// step is an in-memory LRU cache of recent projections keyed by
+/// (sessionId, fileLastModified). Not built yet -- profile first.
 /// </summary>
 public sealed class HistoryReader
 {
@@ -24,14 +43,57 @@ public sealed class HistoryReader
     public HistoryReader(ILogger<HistoryReader> log) => _log = log;
 
     /// <summary>One row in the projected history. Mirrors the SPA's ChatMessage shape.</summary>
-    public sealed record HistoryEntry(string Role, string Text, string? ToolCallId = null);
+    /// <param name="Id">Stable ordinal cursor: position in the canonical projection of events.jsonl. Pass back as <c>before</c> on the next paging call.</param>
+    public sealed record HistoryEntry(int Id, string Role, string Text, string? ToolCallId = null);
+
+    /// <summary>A page of history with cursor + has-more flag.</summary>
+    /// <param name="Entries">The page, oldest-first.</param>
+    /// <param name="OldestCursor">Ordinal of the first entry returned. Use as <c>before</c> on the next call.</param>
+    /// <param name="HasMore">True if there are older entries before <see cref="OldestCursor"/>.</param>
+    public sealed record HistoryPage(
+        IReadOnlyList<HistoryEntry> Entries,
+        int OldestCursor,
+        bool HasMore);
 
     /// <summary>
-    /// Read and project the events for the given session id. Returns an
-    /// empty list if the session dir or events.jsonl doesn't exist (e.g.
-    /// a session that was created but never used).
+    /// Return the most recent <paramref name="limit"/> entries for the
+    /// session. If the session has fewer entries, returns all of them and
+    /// sets <see cref="HistoryPage.HasMore"/> = false.
     /// </summary>
-    public IReadOnlyList<HistoryEntry> Read(string sessionId)
+    public HistoryPage ReadTail(string sessionId, int limit)
+    {
+        if (limit <= 0) limit = 50;
+        var all = ProjectAll(sessionId);
+        var start = Math.Max(0, all.Count - limit);
+        var entries = all.GetRange(start, all.Count - start);
+        return new HistoryPage(entries, start, start > 0);
+    }
+
+    /// <summary>
+    /// Return the <paramref name="limit"/> entries immediately preceding
+    /// the <paramref name="before"/> ordinal cursor (i.e. older than it,
+    /// not including it). Pass the previous call's
+    /// <see cref="HistoryPage.OldestCursor"/> as <paramref name="before"/>.
+    /// </summary>
+    public HistoryPage ReadBefore(string sessionId, int before, int limit)
+    {
+        if (limit <= 0) limit = 50;
+        if (before <= 0) return new HistoryPage([], 0, false);
+        var all = ProjectAll(sessionId);
+        var end = Math.Min(before, all.Count);
+        var start = Math.Max(0, end - limit);
+        var entries = all.GetRange(start, end - start);
+        return new HistoryPage(entries, start, start > 0);
+    }
+
+    /// <summary>
+    /// Legacy: return the full projection. Kept for callers that
+    /// explicitly want everything (rare). Prefer <see cref="ReadTail"/>
+    /// for first-paint and <see cref="ReadBefore"/> for paging.
+    /// </summary>
+    public IReadOnlyList<HistoryEntry> Read(string sessionId) => ProjectAll(sessionId);
+
+    private List<HistoryEntry> ProjectAll(string sessionId)
     {
         var sessionRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -73,7 +135,7 @@ public sealed class HistoryReader
                         // synthesized current_datetime block).
                         var content = data["content"]?.GetValue<string>();
                         if (!string.IsNullOrEmpty(content))
-                            rows.Add(new HistoryEntry("user", content));
+                            rows.Add(new HistoryEntry(rows.Count, "user", content));
                         break;
                     }
                 case "assistant.message":
@@ -82,11 +144,11 @@ public sealed class HistoryReader
                         // "Show thinking" is on) precedes the spoken reply.
                         var reasoning = data["reasoningText"]?.GetValue<string>();
                         if (!string.IsNullOrWhiteSpace(reasoning))
-                            rows.Add(new HistoryEntry("thought", reasoning));
+                            rows.Add(new HistoryEntry(rows.Count, "thought", reasoning));
 
                         var content = data["content"]?.GetValue<string>();
                         if (!string.IsNullOrEmpty(content))
-                            rows.Add(new HistoryEntry("assistant", content));
+                            rows.Add(new HistoryEntry(rows.Count, "assistant", content));
 
                         // toolRequests: the model called one or more tools
                         // before this message. We surface them as compact
@@ -98,7 +160,7 @@ public sealed class HistoryReader
                                 if (r is null) continue;
                                 var toolCallId = r["toolCallId"]?.GetValue<string>();
                                 var toolName = r["name"]?.GetValue<string>() ?? "tool";
-                                rows.Add(new HistoryEntry("tool", $"[start] {toolName}", toolCallId));
+                                rows.Add(new HistoryEntry(rows.Count, "tool", $"[start] {toolName}", toolCallId));
                             }
                         }
                         break;
@@ -107,7 +169,7 @@ public sealed class HistoryReader
                     {
                         var toolCallId = data["toolCallId"]?.GetValue<string>();
                         var success = data["success"]?.GetValue<bool>() ?? false;
-                        rows.Add(new HistoryEntry("tool", $"[end] {(success ? "ok" : "fail")}", toolCallId));
+                        rows.Add(new HistoryEntry(rows.Count, "tool", $"[end] {(success ? "ok" : "fail")}", toolCallId));
                         break;
                     }
                 // session.start/resume/model_change, system.message,
