@@ -6,13 +6,27 @@
 # can read the user's ~/.copilot/ profile (auth tokens, settings.json,
 # session-state). Loads MAGPILOT_HUB_URL etc. from the installer-written
 # magpilot.env file.
+#
+# User resolution chain (most specific first):
+#   1. -User <DOMAIN\name> parameter (the installer passes this when it
+#      can determine the unelevated caller's identity).
+#   2. Win32_ComputerSystem.UserName -- the console-logged-in user.
+#      Works when someone is actually signed in to the desktop.
+#   3. quser-discovered active interactive session.
+#   4. $env:USERDOMAIN\$env:USERNAME, but ONLY if it's NOT a machine
+#      account (machine accounts end with '$' and Register-ScheduledTask
+#      will reject them with "No mapping between account names and
+#      security IDs was done").
+#   5. Fail with a clear error message + exit code 2.
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
     [string]$InstallDir,
 
-    [string]$TaskName = 'MagpilotAgent'
+    [string]$TaskName = 'MagpilotAgent',
+
+    [string]$User
 )
 
 $ErrorActionPreference = 'Stop'
@@ -52,12 +66,81 @@ if (Test-Path `$envFile) {
 "@
 Set-Content -Path $wrapperPath -Value $wrapperBody -Encoding UTF8
 
-# Resolve the interactive user. SYSTEM-launched installer needs us to look
-# up the *console* user, not whoever launched powershell.exe.
-$consoleUser = (Get-CimInstance -ClassName Win32_ComputerSystem).UserName
+function Test-IsMachineAccount {
+    param([string]$Name)
+    if (-not $Name) { return $true }
+    # MACHINE$ or DOMAIN\MACHINE$ both end with '$'.
+    return $Name.TrimEnd().EndsWith('$')
+}
+
+function Resolve-InstallUser {
+    param([string]$Explicit)
+
+    # 1. Explicit -User wins, but only if it's a real account.
+    if ($Explicit -and -not (Test-IsMachineAccount $Explicit)) {
+        return $Explicit
+    }
+
+    # 2. Console-logged-in user via Win32_ComputerSystem.
+    $consoleUser = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
+    if ($consoleUser -and -not (Test-IsMachineAccount $consoleUser)) {
+        return $consoleUser
+    }
+
+    # 3. quser-discovered active interactive session. Output looks like:
+    #      USERNAME              SESSIONNAME        ID  STATE   IDLE TIME  LOGON TIME
+    #     >chris                 console             1  Active      none   5/22/2026 ...
+    # The first column is the username (preceded by '>' for the current
+    # session); SESSIONNAME 'console' or 'rdp-tcp#N' marks an interactive
+    # logon. Tolerate quser missing or returning no rows.
+    try {
+        $quser = & quser 2>$null
+        if ($quser) {
+            foreach ($line in $quser | Select-Object -Skip 1) {
+                $trimmed = $line.TrimStart('>').Trim()
+                $parts = $trimmed -split '\s{2,}'
+                if ($parts.Count -ge 4 -and $parts[3] -eq 'Active') {
+                    $name = $parts[0].Trim()
+                    if ($name -and -not (Test-IsMachineAccount $name)) {
+                        # quser returns the username unqualified; prepend
+                        # the local machine name so Register-ScheduledTask
+                        # gets a fully-qualified principal.
+                        return "$env:COMPUTERNAME\$name"
+                    }
+                }
+            }
+        }
+    } catch {
+        # quser may be absent (Windows Home) or fail in some sessions.
+        # Fall through to the env-var heuristic.
+    }
+
+    # 4. Env-var fallback (the interactive UAC-elevated install case;
+    # both USERDOMAIN and USERNAME reflect the elevated user, which IS
+    # the right answer).
+    $fromEnv = "$env:USERDOMAIN\$env:USERNAME"
+    if ($fromEnv -and -not (Test-IsMachineAccount $fromEnv)) {
+        return $fromEnv
+    }
+
+    # 5. Give up with a clear message.
+    return $null
+}
+
+$consoleUser = Resolve-InstallUser -Explicit $User
 if (-not $consoleUser) {
-    # Fallback: use the user whose env we loaded ($env:USERNAME).
-    $consoleUser = "$env:USERDOMAIN\$env:USERNAME"
+    Write-Error @'
+install-task.ps1: could not determine which user to register the agent task for.
+None of these worked:
+  - the -User parameter (not passed)
+  - Win32_ComputerSystem.UserName (no console session)
+  - quser (no active interactive sessions)
+  - $env:USERDOMAIN\$env:USERNAME (resolved to a machine account)
+
+Re-run with `-User "DOMAIN\name"` (e.g. `-User "SANDBOX\chris"`) to register
+the agent for a specific user.
+'@
+    exit 2
 }
 
 Write-Host "Registering scheduled task '$TaskName' as $consoleUser"
@@ -96,3 +179,4 @@ Start-Sleep -Seconds 4
 $info = Get-ScheduledTaskInfo -TaskName $TaskName
 Write-Host "  LastRunTime:    $($info.LastRunTime)"
 Write-Host "  LastTaskResult: $($info.LastTaskResult)"
+

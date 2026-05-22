@@ -224,13 +224,44 @@ var
   Cmd: String;
 begin
   Cmd := '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '" ' + Args;
+  Log('RunPwsh: ' + Cmd);
   if not Exec('powershell.exe', Cmd, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-    Log('Failed to launch ' + ScriptPath);
+    Log('  failed to launch ' + ScriptPath)
+  else
+    Log('  exit code: ' + IntToStr(ResultCode));
+end;
+
+// Capture an environment variable from the installer's host process.
+// {%USERNAME} expands at install-script-PARSE time, which doesn't let us
+// distinguish 'SYSTEM' from a real user. GetEnv is evaluated when this
+// runs, so we get the actual environment of the installer process.
+function GetCallerUser(): String;
+var
+  user, domain: String;
+begin
+  user   := GetEnv('USERNAME');
+  domain := GetEnv('USERDOMAIN');
+  if (user = '') or (Length(user) = 0) then
+    Result := ''
+  else if Copy(user, Length(user), 1) = '$' then
+    // Machine account (e.g. SANDBOX$). Don't claim it as the install
+    // user; let install-task.ps1's discovery chain pick a real user.
+    Result := ''
+  else if domain <> '' then
+    Result := domain + '\' + user
+  else
+    Result := user;
+end;
+
+function BoolStr(b: Boolean): String;
+begin
+  if b then Result := 'true' else Result := 'false';
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
+  installUser, installTaskArgs: String;
 begin
   if CurStep = ssInstall then
   begin
@@ -243,12 +274,31 @@ begin
 
   if CurStep = ssPostInstall then
   begin
+    Log('ssPostInstall hook entered.');
+    Log('  WizardIsComponentSelected(agent)=' + BoolStr(WizardIsComponentSelected('agent')));
+    Log('  WizardIsTaskSelected(schedtask)=' + BoolStr(WizardIsTaskSelected('schedtask')));
+    Log('  WizardIsTaskSelected(firewall)=' + BoolStr(WizardIsTaskSelected('firewall')));
+
     if WizardIsComponentSelected('agent') then
     begin
       WriteEnvFile();
+      Log('  WriteEnvFile done.');
+
+      // Pass -User if we have a real one. install-task.ps1 has its own
+      // discovery chain when -User is empty (Win32_ComputerSystem, quser,
+      // env fallback) and refuses to register against a machine account.
+      installUser := GetCallerUser();
+      installTaskArgs := '-InstallDir "' + ExpandConstant('{app}') + '"';
+      if installUser <> '' then
+      begin
+        installTaskArgs := installTaskArgs + ' -User "' + installUser + '"';
+        Log('  install-task user: ' + installUser);
+      end
+      else
+        Log('  install-task user: <unset, install-task.ps1 will auto-discover>');
+
       if WizardIsTaskSelected('schedtask') then
-        RunPwsh(ExpandConstant('{app}\install-task.ps1'),
-          '-InstallDir "' + ExpandConstant('{app}') + '"');
+        RunPwsh(ExpandConstant('{app}\install-task.ps1'), installTaskArgs);
       if WizardIsTaskSelected('firewall') then
         RunPwsh(ExpandConstant('{app}\firewall.ps1'), '-Action Add');
     end;
