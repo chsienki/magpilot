@@ -84,3 +84,34 @@ EV/OV code-signing is not worth the cost.
   uninstall-task.ps1
   firewall.ps1
 ```
+
+## Headless / SSH-driven install
+
+The wizard expects a UAC-elevated console session. If you want to
+install without one (e.g. via `ssh` + a one-shot scheduled task
+running as SYSTEM, or any other automation that bypasses a console
+user), you have to tell `install-task.ps1` which user the agent
+should run as -- the installer can't figure it out from a SYSTEM
+context (Win32_ComputerSystem.UserName is null, the env-var fallback
+resolves to the machine account `MACHINE$` which Windows refuses as
+a task principal).
+
+Two ways to handle this:
+
+1. **Pass the user via the installer's env.** Before invoking the
+   installer, set `USERNAME` and `USERDOMAIN` to a real user
+   (e.g. inside the SSH session, the user shell already has these
+   set correctly). The `.iss` `GetCallerUser()` helper reads
+   `GetEnv("USERNAME") / GetEnv("USERDOMAIN")` and passes them to
+   `install-task.ps1` as `-User`.
+2. **Re-run `install-task.ps1` manually after the installer.**
+   Invoke `install-task.ps1 -InstallDir 'C:\Program Files\Magpilot' -User 'DOMAIN\name'`
+   from an elevated context (e.g. SSH + a SYSTEM-context scheduled
+   task that runs the script with the explicit `-User`). This is
+   the reliable path; see `installer/` history for the
+   `hand-register-task.ps1` pattern.
+
+When `install-task.ps1` can't determine a user, it exits with code
+2 and prints a clear error telling you to pass `-User`. The
+installer's main log (`/LOG=<path>`) captures all `RunPwsh` exit
+codes so silent failures are diagnosable.

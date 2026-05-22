@@ -350,6 +350,18 @@ with a 500ms timeout. Failures are silent. See `Magpilot.Host/UpdateBanner.cs`.
   are pre-populated, so `magpilot --magpilot-update` preserves them.
 - The agent runs as a **scheduled task at user logon** (NOT SYSTEM),
   so `~/.copilot/` is reachable. Task name: `MagpilotAgent`.
+- `install-task.ps1` resolves which user to register the task for via
+  a chain: `-User` parameter (the installer passes this from
+  `GetEnv("USERNAME")/GetEnv("USERDOMAIN")` when those name a real
+  user) -> `Win32_ComputerSystem.UserName` (console-logged-in) ->
+  `quser` active interactive session -> `$env:USERDOMAIN\$env:USERNAME`
+  IF NOT a machine account -> exit 2 with a clear error. The
+  machine-account refusal matters because `Register-ScheduledTask
+  -UserId MACHINE$` fails with "No mapping between account names and
+  security IDs" and Inno's Exec swallows the exit code, so the
+  installer would otherwise "succeed" while leaving the agent
+  unscheduled. See `installer/README.md` -> "Headless / SSH-driven
+  install" for the workarounds.
 
 ### Release workflow
 
