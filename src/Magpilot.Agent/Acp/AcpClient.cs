@@ -197,23 +197,72 @@ public sealed class AcpClient : IAsyncDisposable
 
             using var fs = File.OpenRead(settingsPath);
             var root = JsonNode.Parse(fs);
-            if (root?["installedPlugins"] is not JsonArray plugins) return "";
+            if (root is null) return "";
 
+            // settings.json schemas we have to handle:
+            //
+            //   OLD (pre-2026-05): installedPlugins is an array; each
+            //   entry has { owner, name, enabled, cache_path }.
+            //
+            //   NEW (2026-05+):    enabledPlugins is a string-bool map
+            //   keyed by "<name>@<owner>" -> true. Cache paths are NOT
+            //   in settings.json anymore; the convention is
+            //   <home>/.copilot/installed-plugins/<owner>/<name>/.
+            //
+            // Try the new schema first (current default), fall back to
+            // the old one so any user who hasn't been migrated still
+            // gets skills loaded.
             var args = new StringBuilder();
             int loaded = 0;
-            foreach (var p in plugins)
+            var pluginsRoot = Path.Combine(home, ".copilot", "installed-plugins");
+
+            if (root["enabledPlugins"] is JsonObject enabled)
             {
-                if (p is null) continue;
-                if (p["enabled"]?.GetValue<bool>() != true) continue;
-                var cache = p["cache_path"]?.GetValue<string>();
-                if (string.IsNullOrEmpty(cache) || !Directory.Exists(cache)) continue;
-                if (args.Length > 0) args.Append(' ');
-                args.Append("--plugin-dir ");
-                args.Append(QuoteIfNeeded(cache));
-                loaded++;
+                foreach (var kvp in enabled)
+                {
+                    if (kvp.Value?.GetValue<bool>() != true) continue;
+                    var key = kvp.Key;
+                    // Key shape: "<name>@<owner>". Split on the last '@'
+                    // in case the name itself contains one (defensive).
+                    var at = key.LastIndexOf('@');
+                    if (at <= 0 || at >= key.Length - 1) continue;
+                    var name  = key[..at];
+                    var owner = key[(at + 1)..];
+                    var cache = Path.Combine(pluginsRoot, owner, name);
+                    if (!Directory.Exists(cache)) continue;
+                    if (args.Length > 0) args.Append(' ');
+                    args.Append("--plugin-dir ");
+                    args.Append(QuoteIfNeeded(cache));
+                    loaded++;
+                }
             }
+            else if (root["installedPlugins"] is JsonArray plugins)
+            {
+                foreach (var p in plugins)
+                {
+                    if (p is null) continue;
+                    if (p["enabled"]?.GetValue<bool>() != true) continue;
+                    var cache = p["cache_path"]?.GetValue<string>();
+                    if (string.IsNullOrEmpty(cache) || !Directory.Exists(cache)) continue;
+                    if (args.Length > 0) args.Append(' ');
+                    args.Append("--plugin-dir ");
+                    args.Append(QuoteIfNeeded(cache));
+                    loaded++;
+                }
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "settings.json has neither enabledPlugins nor installedPlugins; ACP child will run without skills");
+                return "";
+            }
+
             if (loaded > 0)
                 _logger.LogInformation("Forwarding {Count} enabled plugin(s) to ACP child via --plugin-dir", loaded);
+            else
+                _logger.LogWarning(
+                    "settings.json had enabledPlugins/installedPlugins but 0 resolved to existing plugin-dirs; " +
+                    "expected layout is {Root}/<owner>/<name>/", pluginsRoot);
             return args.ToString();
         }
         catch (Exception ex)
