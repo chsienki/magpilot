@@ -36,7 +36,12 @@ namespace Magpilot.Host;
 internal static class AgentLauncher
 {
     private static readonly TimeSpan QuickProbeTimeout = TimeSpan.FromMilliseconds(750);
-    private static readonly TimeSpan StartupTimeout    = TimeSpan.FromSeconds(15);
+    // Generous timeout because the agent's AcpStarter synchronously spawns
+    // copilot --acp and waits for the initialize round-trip during
+    // IHostedService.StartAsync, which blocks Kestrel. 45s comfortably
+    // covers a cold start including plugin loading; user only pays this
+    // once per agent restart.
+    private static readonly TimeSpan StartupTimeout    = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan ProbePollInterval = TimeSpan.FromMilliseconds(500);
 
     /// <summary>
@@ -65,6 +70,7 @@ internal static class AgentLauncher
         Console.Error.WriteLine($"magpilot: agent not running; started via {howStarted}, waiting up to {(int)StartupTimeout.TotalSeconds}s...");
 
         var deadline = DateTime.UtcNow + StartupTimeout;
+        var nextProgressTick = DateTime.UtcNow + TimeSpan.FromSeconds(5);
         while (DateTime.UtcNow < deadline)
         {
             await Task.Delay(ProbePollInterval);
@@ -73,8 +79,17 @@ internal static class AgentLauncher
                 Console.Error.WriteLine("magpilot: agent ready.");
                 return true;
             }
+            // Print a one-character progress tick every 5s so the user
+            // knows we're still waiting, not hung. Stays on the same
+            // line (no \r so it doesn't interfere with their scrollback).
+            if (DateTime.UtcNow >= nextProgressTick)
+            {
+                Console.Error.Write(".");
+                nextProgressTick = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+            }
         }
 
+        Console.Error.WriteLine();
         Console.Error.WriteLine($"magpilot: agent did not become reachable within {(int)StartupTimeout.TotalSeconds}s.");
         return false;
     }
