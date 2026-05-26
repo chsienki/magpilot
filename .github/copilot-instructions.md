@@ -271,7 +271,7 @@ with the installed agent" above.
 | `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET` | hub | GitHub OAuth App credentials. Without these the hub serves `/login -> 'OAUTH_CLIENT_ID not configured'`. |
 | `OAUTH_ALLOWED_GITHUB_USERS` | hub | Comma list of GitHub logins the hub allows. Anyone else gets denied after OAuth. |
 | `MAGPILOT_RELEASE_REPO` | hub (optional) | GitHub `owner/repo` the hub's `ReleaseTracker` polls for the latest magpilot release. Defaults to `chsienki/magpilot`. |
-| `MAGPILOT_GITHUB_TOKEN` | hub (optional) | Bearer token for the GitHub API call. Bumps the unauthenticated 60 req/h limit to 5,000 req/h. We poll once an hour so it's rarely needed. |
+| `MAGPILOT_GITHUB_TOKEN` | hub (optional) | Bearer token for the GitHub API call. **Required** if the configured release repo is private -- anonymous calls to `releases/latest` return 404 against private repos, which ReleaseTracker logs as a Warning in `/admin/logs`. Also bumps the unauthenticated 60 req/h limit to 5,000 req/h. |
 | `MAGPILOT_AGENT_URL` | magpilot launcher | Default `http://127.0.0.1:5099`. Where the wrapper reaches its local agent. |
 | `MAGPILOT_REAL_COPILOT` | magpilot launcher (optional) | Explicit path to the real `copilot` binary. Useful when the wrapper is on PATH and you want to override the autodetect of the real copilot binary. |
 
@@ -362,6 +362,39 @@ with a 500ms timeout. Failures are silent. See `Magpilot.Host/UpdateBanner.cs`.
   installer would otherwise "succeed" while leaving the agent
   unscheduled. See `installer/README.md` -> "Headless / SSH-driven
   install" for the workarounds.
+
+### Autoupdate visibility: two ways the chain silently breaks
+
+The hub-mediated autoupdate path relies on `releases/latest` returning
+a non-draft, non-prerelease release for the configured
+`MAGPILOT_RELEASE_REPO`. Two failure modes have actually bitten us:
+
+- **Repo is private + hub has no `MAGPILOT_GITHUB_TOKEN`** -- GH API
+  returns 404 to anonymous callers against private repos.
+  `ReleaseTracker` used to log this at Information (invisible in
+  `/admin/logs`); now it logs at Warning so it shows up. Either set
+  `MAGPILOT_GITHUB_TOKEN` on the hub or make the repo public.
+- **All releases are drafts** -- `releases/latest` skips drafts by
+  design, returns 404 even with auth. Symptom: hub returns
+  `latestVersion: ""`, no update banner ever fires, every install in
+  the field silently lags HEAD. Publish the draft (`gh release edit
+  vX.Y.Z --draft=false`).
+
+When in doubt: `Invoke-RestMethod 'http://192.168.1.239:7088/api/agent-version'
+-Headers @{Authorization='Bearer <HUB_BEARER>'}` -- if `latestVersion`
+is `""`, the hub doesn't see a release; check `/admin/logs?level=Warning`
+for the ReleaseTracker explanation.
+
+Wire-contract gotcha that compounds this: an agent that's been
+stuck on an old version may also be running an OLD wire shape. e.g.
+`/api/sessions/{id}/history` was `IReadOnlyList<HistoryEntry>` pre-
+`cd323a6` and `HistoryPage` after. The SPA pinned to the new shape
+crashes on the old. So a quietly-broken autoupdate path doesn't
+just leave you missing features -- it can crash live sessions when
+the SPA moves ahead of the agent. The longer-term fix is to bump
+`Versioning.ProtocolVersion` whenever the wire breaks; for now,
+treat "everyone visible in /api/agents reports the same Version" as
+the smoke test.
 
 ### Release workflow
 

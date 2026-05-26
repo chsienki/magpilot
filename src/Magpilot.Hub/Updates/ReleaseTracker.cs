@@ -68,7 +68,17 @@ public sealed class ReleaseTracker(
         using var resp = await http.SendAsync(req, ct);
         if (resp.StatusCode == HttpStatusCode.NotFound)
         {
-            log.LogInformation("No releases yet for {Repo}", _repo);
+            // 404 from GH releases/latest means EITHER (a) the repo has
+            // zero published non-prerelease releases, OR (b) the repo is
+            // private and we're polling anonymously (no
+            // MAGPILOT_GITHUB_TOKEN set). Both are misconfigurations
+            // worth surfacing -- they silently break the autoupdate path
+            // for all clients. Log at Warning so /admin/logs shows it.
+            log.LogWarning(
+                "GitHub releases/latest 404 for {Repo}. Either no published " +
+                "release exists yet, or the repo is private and " +
+                "MAGPILOT_GITHUB_TOKEN is not set on the hub. Autoupdate banners " +
+                "will not fire until this is resolved.", _repo);
             return;
         }
         resp.EnsureSuccessStatusCode();
