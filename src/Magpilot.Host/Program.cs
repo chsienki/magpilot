@@ -47,14 +47,15 @@ if (opts.SkipCheck)
 // and skipped under --magpilot-skip-check above.
 await UpdateBanner.MaybePrintAsync();
 
-// Try to talk to the agent. If unreachable, fall through to skip-check
-// behavior (with a warning) so an agent outage never blocks the user.
+// Try to talk to the agent. If unreachable, attempt to start the
+// installed MagpilotAgent scheduled task (or fall back to direct exec)
+// so users don't have to remember to `Start-ScheduledTask` manually.
+// If it still can't be reached, fall through to skip-check behavior
+// so an agent outage never blocks the user.
 AgentClient? agent = null;
 try
 {
     agent = new AgentClient();
-    using var pingCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-    await agent.PingAsync(pingCts.Token);
 }
 catch (InvalidOperationException ex)
 {
@@ -62,12 +63,35 @@ catch (InvalidOperationException ex)
     Console.Error.WriteLine($"magpilot: {ex.Message}");
     return 2;
 }
-catch (Exception ex)
+
+try
 {
-    Console.Error.WriteLine($"magpilot: agent unreachable ({(agent?.BaseUrl ?? "?")}: {ex.GetType().Name}: {ex.Message}).");
-    Console.Error.WriteLine("magpilot: falling through. Use --magpilot-skip-check to silence.");
-    agent?.Dispose();
-    return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null);
+    using var pingCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+    await agent.PingAsync(pingCts.Token);
+}
+catch (Exception firstPingEx)
+{
+    var started = await AgentLauncher.EnsureRunningAsync();
+    if (!started)
+    {
+        Console.Error.WriteLine($"magpilot: agent unreachable ({agent.BaseUrl}: {firstPingEx.GetType().Name}: {firstPingEx.Message}).");
+        Console.Error.WriteLine("magpilot: falling through. Use --magpilot-skip-check to silence.");
+        agent.Dispose();
+        return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null);
+    }
+
+    // Agent came up; verify the bearer still works (rare second failure).
+    try
+    {
+        using var pingCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        await agent.PingAsync(pingCts.Token);
+    }
+    catch (Exception secondPingEx)
+    {
+        Console.Error.WriteLine($"magpilot: agent answered /healthz but auth ping failed: {secondPingEx.Message}");
+        agent.Dispose();
+        return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null);
+    }
 }
 
 if (opts.Status)
