@@ -438,6 +438,19 @@
     private CancellationTokenSource? _streamCts;
     private bool _busy;
     private bool _loading;
+    /// <summary>
+    /// When true, content events (user/assistant/thought/tool/approval)
+    /// arriving on the stream between LoadStarted and HistoryDone are
+    /// dropped instead of appended to <see cref="_messages"/>. Set by
+    /// <see cref="StartStreamingAsync"/> whenever the caller is loading
+    /// the session into ACP (<c>load: true</c>) but has already populated
+    /// the visible chat from <c>restoreFrom</c> (i.e. the paged
+    /// /history?tail=50 disk projection). Without this, opening a large
+    /// Dormant session re-streams every historical event on top of the
+    /// tail snapshot -- doubling the chat AND defeating the whole
+    /// point of paging.
+    /// </summary>
+    private bool _suppressReplayEvents;
     private bool _thinking;
     // Paging cursor for the demand-load-older flow (see HandleLoadOlder).
     // _oldestCursor is the ordinal id of the oldest entry currently in
@@ -628,8 +641,13 @@
             // requesting a load -- ACP would reject session/load on an
             // already-loaded session.
             //
-            // For Dormant sessions, request load=true so ACP replays
-            // history through the live stream.
+            // For Dormant sessions, request load=true so ACP loads the
+            // session into its multiplex child -- BUT also pre-fetch the
+            // tail of /history so we can paint the chat instantly and
+            // suppress the giant replay storm that session/load would
+            // otherwise stream in (see _suppressReplayEvents). Without
+            // this, opening a long-running Dormant session animates every
+            // historical event on top of itself.
             //
             // For Owned-without-cache (a fresh browser tab opening a
             // session that was loaded into ACP by another client, e.g.
@@ -645,34 +663,47 @@
             }
             else if (!hasCache && info?.State == SessionState.Owned)
             {
-                List<ChatMessage>? fromDisk = null;
-                try
-                {
-                    // Tail-load: only the most recent 50 entries. Older
-                    // demand-load via HandleLoadOlder when the user
-                    // scrolls near the top.
-                    var page = await Hub.GetHistoryAsync(Agent, SessionId, tail: 50);
-                    if (page is not null)
-                    {
-                        fromDisk = page.Entries
-                            .Select(r => new ChatMessage { Role = r.Role, Text = r.Text, ToolCallId = r.ToolCallId })
-                            .ToList();
-                        _oldestCursor = page.OldestCursor;
-                        _hasMore = page.HasMore;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    HubLog.LogError($"GetHistoryAsync failed: {ex.Message}", ex.ToString(),
-                        category: nameof(Home), sessionId: SessionId,
-                        extra: new { agent = Agent });
-                }
+                var fromDisk = await TryLoadTailHistoryAsync(50);
                 await StartStreamingAsync(load: false, force: false, restoreFrom: fromDisk);
             }
             else
             {
-                await StartStreamingAsync(load: true, force: false);
+                // Dormant. Pre-paint from disk projection, then request
+                // load=true. _suppressReplayEvents takes care of the
+                // replay flood.
+                var fromDisk = await TryLoadTailHistoryAsync(50);
+                await StartStreamingAsync(load: true, force: false, restoreFrom: fromDisk);
             }
+        }
+    }
+
+    /// <summary>
+    /// Fetch the most recent <paramref name="tail"/> entries from the
+    /// agent's /history endpoint (which projects events.jsonl). Sets
+    /// <see cref="_oldestCursor"/> and <see cref="_hasMore"/> as a
+    /// side-effect so the "Load older messages" affordance works for
+    /// every caller. Returns null on error -- the caller should still
+    /// start the stream, just without a pre-paint.
+    /// </summary>
+    private async Task<List<ChatMessage>?> TryLoadTailHistoryAsync(int tail)
+    {
+        if (Agent is null || SessionId is null) return null;
+        try
+        {
+            var page = await Hub.GetHistoryAsync(Agent, SessionId, tail: tail);
+            if (page is null) return null;
+            _oldestCursor = page.OldestCursor;
+            _hasMore = page.HasMore;
+            return page.Entries
+                .Select(r => new ChatMessage { Role = r.Role, Text = r.Text, ToolCallId = r.ToolCallId })
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            HubLog.LogError($"GetHistoryAsync failed: {ex.Message}", ex.ToString(),
+                category: nameof(Home), sessionId: SessionId,
+                extra: new { agent = Agent });
+            return null;
         }
     }
 
@@ -682,7 +713,10 @@
         var info = _pendingOrphan;
         _pendingOrphan = null;
         StateHasChanged();
-        await StartStreamingAsync(load: true, force: true);
+        // Same Dormant treatment: pre-paint from disk, request the load,
+        // suppress the replay flood. force:true kills the prior owner PID.
+        var fromDisk = await TryLoadTailHistoryAsync(50);
+        await StartStreamingAsync(load: true, force: true, restoreFrom: fromDisk);
     }
 
     private void CancelOrphanAdopt()
@@ -881,18 +915,25 @@
                 _messages.Add(new ChatMessage { Role = m.Role, Text = m.Text, ToolCallId = m.ToolCallId });
         }
         _loading = load;
+        // Drop ACP history-replay events from session/load when the chat
+        // was already populated from the disk projection. See field comment.
+        _suppressReplayEvents = load && restoreFrom is not null;
         if (!isReconnect)
         {
             _streamReconnectAttempts = 0;
             _streamStatus = StreamStatus.Connected;
             _reconnectNextAttemptAt = null;
-            // Reset paging cursor on a real session switch. The Owned-
-            // without-cache branch in OnParametersSetAsync re-populates
-            // it from the first /history?tail=50 page; other branches
-            // (cached restore or ACP session/load) leave _hasMore=false
-            // because they replay full history through the live stream.
-            _oldestCursor = 0;
-            _hasMore = false;
+            // Reset paging cursor on a real session switch UNLESS the
+            // caller already populated _oldestCursor / _hasMore from a
+            // pre-stream /history fetch (TryLoadTailHistoryAsync sets
+            // them before calling StartStreamingAsync). If we clobber
+            // unconditionally, the "Load older messages" affordance
+            // never shows for Owned-no-cache or Dormant sessions.
+            if (restoreFrom is null)
+            {
+                _oldestCursor = 0;
+                _hasMore = false;
+            }
         }
         _streamCts = new CancellationTokenSource();
         _streamingFor = $"{Agent}/{SessionId}";
@@ -1051,6 +1092,17 @@
 
     private void Apply(StreamEvent evt)
     {
+        // While ACP is replaying historical session events (between
+        // LoadStarted and HistoryDone) AND the chat was already populated
+        // from the disk projection (/history?tail=...), drop content
+        // events so we don't double-render history on top of the tail
+        // snapshot. Control events (LoadStarted/HistoryDone/LoadFailed,
+        // TurnComplete, Heartbeat) still flow.
+        if (_suppressReplayEvents && evt is AssistantDelta or ThoughtDelta or UserDelta
+            or ToolCallStart or ToolCallProgress or ToolCallEnd or ApprovalRequired)
+        {
+            return;
+        }
         switch (evt)
         {
             case AssistantDelta d:
@@ -1107,11 +1159,13 @@
                 break;
             case HistoryDone:
                 _loading = false;
+                _suppressReplayEvents = false;
                 _streamingAssistant = null;
                 _streamingThought = null;
                 break;
             case LoadFailed lf:
                 _loading = false;
+                _suppressReplayEvents = false;
                 _messages.Add(new ChatMessage { Role = "tool", Text = $"load failed: {lf.Error}" });
                 break;
             case HeartbeatEvent:
