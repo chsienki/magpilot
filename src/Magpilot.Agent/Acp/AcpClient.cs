@@ -70,6 +70,12 @@ public sealed class AcpClient : IAsyncDisposable
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
+            // The agent is now a Windows-subsystem app (no console of its
+            // own). Without CreateNoWindow, Windows would allocate a new
+            // console for this console-mode copilot child and flash it on
+            // screen each time we spawn one. With stdio fully redirected
+            // it serves no purpose anyway.
+            CreateNoWindow = true,
             StandardInputEncoding = Encoding.UTF8,
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,

@@ -8,7 +8,28 @@ using Microsoft.Extensions.Options;
 using System.Security.Claims;
 using System.Text.Encodings.Web;
 
+// Load environment variables from magpilot.env BEFORE the host builder
+// reads its configuration. The installed layout puts the env file at
+// <install>\config\magpilot.env (sibling of the agent's directory); the
+// installer wrote it from the wizard's settings page. By doing this in
+// the agent itself, the scheduled task can launch Magpilot.Agent.exe
+// directly with no powershell wrapper -- which is what lets us be a
+// WinExe with zero visible console window. MAGPILOT_ENV_FILE can
+// override the path (useful for dev).
+EnvFileLoader.Load();
+
 var builder = WebApplication.CreateBuilder(args);
+
+// If nothing else has set ASPNETCORE_URLS by now (env file, real env
+// var, command line), bind to all interfaces on the standard agent
+// port. The installed deployment relied on a powershell wrapper to set
+// this; baking the default in keeps the wrapper unnecessary.
+if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ASPNETCORE_URLS"))
+    && !args.Any(a => a.StartsWith("--urls", StringComparison.OrdinalIgnoreCase))
+    && string.IsNullOrEmpty(builder.Configuration["urls"]))
+{
+    builder.WebHost.UseUrls("http://0.0.0.0:5099");
+}
 
 // Forward Warning+ logs to the central hub. No-ops if MAGPILOT_HUB_URL +
 // MAGPILOT_HUB_BEARER aren't set, so dev runs without a hub still work.
@@ -43,6 +64,62 @@ app.UseAuthorization();
 app.MapGet("/healthz", () => Results.Ok(new { ok = true }));
 app.MapAgentApi();
 app.Run();
+
+/// <summary>
+/// Loads KEY=VALUE pairs from <c>magpilot.env</c> into the current
+/// process's environment, before the WebApplication builder is
+/// constructed. Lines beginning with '#' (after trim) and blank lines
+/// are ignored. Existing environment variables are preserved (the file
+/// is a default, not an override) so dev runs that already have
+/// MAGPILOT_* set in the shell win.
+///
+/// Search order:
+/// 1. <c>MAGPILOT_ENV_FILE</c> environment variable (explicit override).
+/// 2. <c>&lt;exe-dir&gt;/../config/magpilot.env</c> (installer layout:
+///    <c>C:\Program Files\Magpilot\agent\Magpilot.Agent.exe</c> +
+///    <c>C:\Program Files\Magpilot\config\magpilot.env</c>).
+///
+/// Silently no-ops if no file is found, so <c>dotnet run</c> from a
+/// dev shell without an env file just uses the shell's exported vars.
+/// </summary>
+internal static class EnvFileLoader
+{
+    public static void Load()
+    {
+        var path = FindEnvFile();
+        if (path is null) return;
+        try
+        {
+            foreach (var raw in File.ReadAllLines(path))
+            {
+                var line = raw.Trim();
+                if (line.Length == 0 || line.StartsWith('#')) continue;
+                var eq = line.IndexOf('=');
+                if (eq <= 0) continue;
+                var key = line[..eq].Trim();
+                var val = line[(eq + 1)..].Trim();
+                if (Environment.GetEnvironmentVariable(key) is not null) continue;
+                Environment.SetEnvironmentVariable(key, val);
+            }
+        }
+        catch
+        {
+            // Best-effort load. If the file is malformed or unreadable
+            // the agent should still start with whatever env vars exist.
+        }
+    }
+
+    private static string? FindEnvFile()
+    {
+        var explicitPath = Environment.GetEnvironmentVariable("MAGPILOT_ENV_FILE");
+        if (!string.IsNullOrEmpty(explicitPath) && File.Exists(explicitPath))
+            return explicitPath;
+        var exeDir = AppContext.BaseDirectory;
+        var installed = Path.GetFullPath(Path.Combine(exeDir, "..", "config", "magpilot.env"));
+        if (File.Exists(installed)) return installed;
+        return null;
+    }
+}
 
 internal sealed record BearerOptions(string Token);
 

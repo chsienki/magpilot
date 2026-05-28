@@ -8,6 +8,16 @@
     <TargetFramework>net9.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!--
+      WinExe instead of Exe so the published Magpilot.Agent.exe is a
+      Windows-subsystem app (no console window). When the installed
+      MagpilotAgent scheduled task launches it, no flash, no terminal
+      sits on the desktop for the lifetime of the agent. `dotnet run`
+      still shows Console.WriteLine output because dotnet's host
+      inherits the launching shell's stdio. WinExe affects the
+      apphost stub, not the assembly's runtime behaviour.
+    -->
+    <OutputType>WinExe</OutputType>
   </PropertyGroup>
 
 </Project>
