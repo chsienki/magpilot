@@ -257,13 +257,68 @@ public sealed class AcpSessionManager
             "tool_call_update" => MapToolCallUpdate(update),
             _ => null,
         };
-        if (evt is null) return;
+        if (evt is null)
+        {
+            // Unknown sessionUpdate kind -- surface at Warning so a new
+            // ACP addition that we'd otherwise silently drop shows up in
+            // /admin/logs (instead of waiting for a user-visible symptom
+            // like "the SPA stopped reflecting some new event type").
+            // Kinds we knowingly ignore (available_commands_update,
+            // config_option_update, plan, current_mode_update) are common
+            // enough to be noisy -- whitelist them. Anything else is news.
+            if (kind is not null
+                && kind is not "available_commands_update"
+                && kind is not "config_option_update"
+                && kind is not "plan"
+                && kind is not "current_mode_update")
+            {
+                var raw = update.ToJsonString();
+                if (raw.Length > 400) raw = raw[..400] + "...";
+                _logger.LogWarning(
+                    "HandleUpdate unknown sessionUpdate kind={Kind} sid={Sid} raw={Raw}",
+                    kind, sessionId, raw);
+            }
+            return;
+        }
+
+        // Diagnostic: when an agent_message_chunk delivers text that
+        // looks like an inline "Info: <path>" tool-notice (drive letter
+        // or unix root immediately after the prefix), log the chunk +
+        // the surrounding raw update at Warning. Copilot CLI shouldn't
+        // be folding those into the agent message stream, but if it
+        // does we want to see the wire shape so we can route them to
+        // a tool chip instead of letting them bleed into the assistant
+        // bubble. Heuristic only; remove once root cause is known.
+        if (evt is AssistantDelta ad
+            && ad.Text.Length > 7
+            && ad.Text.StartsWith("Info: ", StringComparison.Ordinal)
+            && IsInfoPathBleed(ad.Text))
+        {
+            var raw = update.ToJsonString();
+            if (raw.Length > 600) raw = raw[..600] + "...";
+            _logger.LogWarning(
+                "HandleUpdate Info: bleed in agent_message_chunk sid={Sid} text={Text} raw={Raw}",
+                sessionId,
+                ad.Text.Length > 200 ? ad.Text[..200] + "..." : ad.Text,
+                raw);
+        }
 
         List<Channel<StreamEvent>>? list;
         lock (_subLock) _subscribers.TryGetValue(sessionId, out list);
         if (list is null) return;
         foreach (var ch in list)
             ch.Writer.TryWrite(evt);
+    }
+
+    private static bool IsInfoPathBleed(string text)
+    {
+        // "Info: <drive-letter>:\..." (Windows) or "Info: /..." (Unix).
+        // Don't fire on plain prose that happens to start with "Info: ".
+        if (text.Length < 8) return false;
+        var rest = text.AsSpan(6); // skip "Info: "
+        if (rest.Length >= 3 && char.IsLetter(rest[0]) && rest[1] == ':' && (rest[2] == '\\' || rest[2] == '/')) return true;
+        if (rest.Length >= 1 && rest[0] == '/') return true;
+        return false;
     }
 
     private static StreamEvent MapToolCallUpdate(JsonNode update)
