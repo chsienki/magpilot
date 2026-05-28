@@ -846,15 +846,20 @@ config; do NOT enable Caching in the NPM UI.
 
 ## Operational gotchas
 
-- **Windows agents leak the ACP child** if the parent dies
+- **Windows agents used to leak the ACP child** if the parent died
   abnormally (taskmgr kill, Stop-Process on the dotnet PID without
-  first killing the child). The orphan keeps its sessions hot and
-  the next agent run sees them as Dormant-but-actually-live. Manual
-  fix: `Stop-Process -Id <copilot.exe-PID>` for the orphaned child
-  before restarting. Proper fix: assign each spawned ACP child to a
-  Win32 Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` --
-  tracked in the `agent-win-job-object` backlog item. Linux is fine
-  because children inherit the parent's process group.
+  first killing the child). The orphan kept its sessions hot and
+  the next agent run saw them as Dormant-but-actually-live. **Fixed
+  in v0.1.7** by enrolling every spawned `copilot --acp` child in a
+  Win32 Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`
+  (`Magpilot.Agent.Acp.Win32JobObject`). When the agent process
+  dies for any reason, Windows closes the last handle to the job and
+  atomically kills every member process -- including grandchildren
+  the copilot child spawned (bash subprocesses, MCP servers, etc).
+  Linux gets equivalent behaviour for free via process-group
+  inheritance, so the helper is `OperatingSystem.IsWindows()`-gated.
+  If you ever see an orphaned `copilot.exe` outliving its parent
+  agent on Windows, suspect a regression here.
 - **Bootstrap of pinned sessions** should remove stale
   `inuse.<PID>.lock` files before adopting; otherwise the scanner's
   paranoia (see "Known leak" above) fires and we needlessly
@@ -913,7 +918,6 @@ Invoke-RestMethod -Uri http://192.168.1.239:81/api/nginx/proxy-hosts/7 `
 - Approval-prompt modals for risky tool calls.
 - Sidecar-side log forwarders (the hub sink + agent forwarder are
   in; sidecars are still TODO).
-- Win32 Job Object for ACP-child cleanup on Windows agents.
 - magpilot launcher extras: `--magpilot-status` only prints
   reachability so far (full session listing TBD); no-args picker
   (list sessions for cwd) + `--continue` not implemented; wrapper

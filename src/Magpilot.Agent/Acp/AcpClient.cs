@@ -83,6 +83,16 @@ public sealed class AcpClient : IAsyncDisposable
         _proc = Process.Start(psi) ?? throw new InvalidOperationException($"Failed to start {resolvedExe}");
         _logger.LogInformation("Started {Exe} {Args} pid={Pid}", resolvedExe, fullArgs, _proc.Id);
 
+        // On Windows, immediately enroll the child in our process-wide
+        // kill-on-close Job Object so it (and any grandchildren it
+        // spawns) die with the agent. Linux gets the same behaviour
+        // automatically through process-group inheritance. See
+        // Win32JobObject for full design rationale.
+        if (OperatingSystem.IsWindows())
+        {
+            Win32JobObject.Attach(_proc, _logger);
+        }
+
         _ = Task.Run(() => DrainStderrAsync(ct));
         _ = Task.Run(() => ReadLoopAsync(ct));
         _ = Task.Run(() => WriteLoopAsync(ct));
