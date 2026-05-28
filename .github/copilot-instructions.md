@@ -856,10 +856,17 @@ config; do NOT enable Caching in the NPM UI.
   dies for any reason, Windows closes the last handle to the job and
   atomically kills every member process -- including grandchildren
   the copilot child spawned (bash subprocesses, MCP servers, etc).
-  Linux gets equivalent behaviour for free via process-group
-  inheritance, so the helper is `OperatingSystem.IsWindows()`-gated.
+  On Linux the helper is `OperatingSystem.IsWindows()`-gated to a
+  no-op; POSIX does NOT auto-kill orphans (they reparent to init).
+  Magnus is fine in practice because it runs in a Docker container
+  whose PID namespace gets killed by the kernel when the container
+  exits, and Compose's `restart: unless-stopped` spawns a fresh
+  container with a fresh PID namespace. **For a hypothetical
+  bare-metal Linux deployment, the orphan bug would re-appear** --
+  see the `agent-linux-orphan-protection` item in "What is NOT yet
+  built" below.
   If you ever see an orphaned `copilot.exe` outliving its parent
-  agent on Windows, suspect a regression here.
+  agent on Windows, suspect a Job-Object regression.
 - **Bootstrap of pinned sessions** should remove stale
   `inuse.<PID>.lock` files before adopting; otherwise the scanner's
   paranoia (see "Known leak" above) fires and we needlessly
@@ -927,6 +934,21 @@ Invoke-RestMethod -Uri http://192.168.1.239:81/api/nginx/proxy-hosts/7 `
   auto-attaches and the agent intercepts the 6-tool MCP-over-pipe
   callback surface). Designed in the shim doc; deferred until SPA
   diff-review becomes a recurring ask.
+- **agent-linux-orphan-protection** -- the Windows Job Object fix
+  shipped in v0.1.7 has no Linux equivalent. Magnus survives today
+  because Docker's PID-namespace cleanup atomically reaps everything
+  in the container when the agent dies, so the orphan can't outlive
+  the container. A bare-metal Linux deployment (no container) would
+  hit the same orphan problem the Job Object solves on Windows.
+  Likely fix: `prctl(PR_SET_PDEATHSIG, SIGTERM)` -- but that call
+  has to be made by the CHILD, not the parent, and posix_spawn
+  doesn't let us inject a callback between fork and exec. So this
+  needs either (a) a tiny native preload shim that prctls then
+  execs `copilot`, (b) a `LD_PRELOAD` library that hooks into the
+  child's startup, or (c) cgroups v2 + cgroup.kill in a unit file.
+  None of these matter as long as we only ship on Windows + Magnus's
+  Docker container; raise priority when adding a non-container
+  Linux deployment.
 
 If you implement any of these, update `docs/plan.md` and this file.
 

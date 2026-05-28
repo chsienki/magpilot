@@ -18,11 +18,15 @@ namespace Magpilot.Agent.Acp;
 /// "Locked by another PID" and the user has to either Stop-Process the
 /// orphan or click "kill PID and adopt" in the SPA to recover.
 ///
-/// Linux gets equivalent behaviour for free: a child in the same
-/// process group as a parent that exits receives SIGHUP. .NET's
-/// Process.Start on Linux creates children in the parent's group by
-/// default, so no explicit handling needed there -- this class is
-/// Windows-only.
+/// On non-Windows this class is a no-op. POSIX does NOT auto-kill
+/// orphans -- the OS reparents them to init (PID 1) and they keep
+/// running. Magnus avoids the orphan bug on Linux today only because
+/// it runs in a Docker container: the container's PID namespace gets
+/// reaped by the kernel when tini (PID 1) exits, killing the agent's
+/// orphan copilot. For a bare-metal Linux deployment this fix would
+/// need a Linux equivalent (likely prctl PR_SET_PDEATHSIG via a tiny
+/// preload shim, since the call has to come from the child) --
+/// tracked as `agent-linux-orphan-protection` in copilot-instructions.
 ///
 /// Singleton-by-static: the job handle is created lazily on first
 /// <see cref="Attach"/> call and held in a static field for the

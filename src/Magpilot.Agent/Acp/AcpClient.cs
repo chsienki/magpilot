@@ -85,9 +85,12 @@ public sealed class AcpClient : IAsyncDisposable
 
         // On Windows, immediately enroll the child in our process-wide
         // kill-on-close Job Object so it (and any grandchildren it
-        // spawns) die with the agent. Linux gets the same behaviour
-        // automatically through process-group inheritance. See
-        // Win32JobObject for full design rationale.
+        // spawns) die with the agent. On non-Windows this is a no-op:
+        // POSIX doesn't auto-kill orphans, so a bare-metal Linux
+        // deployment would still leak children -- Magnus survives
+        // today because Docker's PID-namespace cleanup reaps the
+        // container's process tree on agent exit. Tracked as
+        // agent-linux-orphan-protection in copilot-instructions.md.
         if (OperatingSystem.IsWindows())
         {
             Win32JobObject.Attach(_proc, _logger);
