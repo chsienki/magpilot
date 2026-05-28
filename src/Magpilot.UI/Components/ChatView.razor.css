@@ -84,6 +84,20 @@
     max-width: 100%;
 }
 
+/* "Info: <path>" tool chips are background reads Copilot CLI does on
+   the model's behalf -- mute them so they don't drown out real tool
+   calls. No avatar, no chip border, slightly transparent. */
+.msg-row-info {
+    align-self: flex-start;
+    display: flex;
+    margin-left: 40px; /* line up roughly with the assistant avatar gutter */
+}
+
+.msg-tool-chip-info {
+    opacity: 0.55;
+    font-size: 0.75em !important;
+}
+
 .msg-text {
     margin: 0;
     white-space: pre-wrap;
