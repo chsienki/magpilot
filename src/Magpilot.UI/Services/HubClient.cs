@@ -193,43 +193,80 @@ public sealed class HubClient
     {
         var url = $"api/agents/{agent}/sessions/{id}/stream";
         if (load) url += $"?load=true&force={(force ? "true" : "false")}";
-        using var req = new HttpRequestMessage(HttpMethod.Get, url);
-        using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
-        resp.EnsureSuccessStatusCode();
-        await using var stream = await resp.Content.ReadAsStreamAsync(ct);
-        using var reader = new StreamReader(stream);
-        while (!ct.IsCancellationRequested)
+
+        // Open the SSE stream. The initial request can fail in two ways
+        // we want the caller to treat as "stream ended, please reconnect"
+        // rather than as a hard exception:
+        //   - 502/504 from the hub (NPM timeout reaching a slow agent)
+        //   - TypeError/HttpRequestException from the browser fetch layer
+        //     (DNS hiccup, captive portal, the user toggled WiFi, etc.)
+        // Same yield-break treatment as the mid-stream drop case below;
+        // Home.razor's pump turns the natural foreach exit into a
+        // reconnect with backoff + a visible Reconnecting status pill.
+        HttpResponseMessage? resp;
+        Stream? body;
+        try
         {
-            string? line;
-            try
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!resp.IsSuccessStatusCode)
             {
-                line = await reader.ReadLineAsync(ct);
-            }
-            catch (HttpRequestException)
-            {
-                // Underlying SSE socket was torn down (very common when a
-                // mobile browser backgrounds the tab and the OS drops the
-                // connection -- WASM resumes and ReadLineAsync surfaces a
-                // 'TypeError: network error'). Treat as end-of-stream so the
-                // caller can decide whether to reconnect, instead of
-                // bubbling up as an unhandled exception.
+                resp.Dispose();
                 yield break;
             }
-            catch (IOException)
+            body = await resp.Content.ReadAsStreamAsync(ct);
+        }
+        catch (HttpRequestException)
+        {
+            yield break;
+        }
+        catch (IOException)
+        {
+            yield break;
+        }
+
+        // We can't `yield break` inside a `try` that owns IDisposables in
+        // C#, so the resp/body lifetimes are managed via try/finally below
+        // around the loop body. The using-pattern above (inside the try)
+        // would have disposed everything before the foreach yielded its
+        // first item.
+        using (resp)
+        await using (body)
+        {
+            using var reader = new StreamReader(body);
+            while (!ct.IsCancellationRequested)
             {
-                // Same intent as above for native runtimes (MAUI host) where
-                // the failure mode is an IOException rather than a Browser
-                // HttpRequestException.
-                yield break;
+                string? line;
+                try
+                {
+                    line = await reader.ReadLineAsync(ct);
+                }
+                catch (HttpRequestException)
+                {
+                    // Underlying SSE socket was torn down (very common when a
+                    // mobile browser backgrounds the tab and the OS drops the
+                    // connection -- WASM resumes and ReadLineAsync surfaces a
+                    // 'TypeError: network error'). Treat as end-of-stream so the
+                    // caller can decide whether to reconnect, instead of
+                    // bubbling up as an unhandled exception.
+                    yield break;
+                }
+                catch (IOException)
+                {
+                    // Same intent as above for native runtimes (MAUI host) where
+                    // the failure mode is an IOException rather than a Browser
+                    // HttpRequestException.
+                    yield break;
+                }
+                if (line is null) yield break;
+                if (!line.StartsWith("data:", StringComparison.Ordinal)) continue;
+                var json = line[5..].Trim();
+                if (string.IsNullOrEmpty(json)) continue;
+                StreamEvent? evt = null;
+                try { evt = JsonSerializer.Deserialize<StreamEvent>(json); }
+                catch { }
+                if (evt is not null) yield return evt;
             }
-            if (line is null) yield break;
-            if (!line.StartsWith("data:", StringComparison.Ordinal)) continue;
-            var json = line[5..].Trim();
-            if (string.IsNullOrEmpty(json)) continue;
-            StreamEvent? evt = null;
-            try { evt = JsonSerializer.Deserialize<StreamEvent>(json); }
-            catch { }
-            if (evt is not null) yield return evt;
         }
     }
 

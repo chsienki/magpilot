@@ -906,84 +906,120 @@
             var gotAnyEvent = false;
             try
             {
-                await foreach (var evt in Hub.StreamAsync(agent, sid, load, force, ct))
+                try
                 {
-                    if (streamId != _streamGeneration)
+                    await foreach (var evt in Hub.StreamAsync(agent, sid, load, force, ct))
                     {
-                        // A newer stream task has taken over; this one is stale.
-                        Console.WriteLine($"[stream {streamId}] stale, dropping {evt.GetType().Name}");
-                        return;
+                        if (streamId != _streamGeneration)
+                        {
+                            // A newer stream task has taken over; this one is stale.
+                            Console.WriteLine($"[stream {streamId}] stale, dropping {evt.GetType().Name}");
+                            return;
+                        }
+                        gotAnyEvent = true;
+                        _streamReconnectAttempts = 0;
+                        if (_streamStatus != StreamStatus.Connected)
+                        {
+                            _streamStatus = StreamStatus.Connected;
+                            _reconnectNextAttemptAt = null;
+                        }
+                        await InvokeAsync(() => Apply(evt));
                     }
-                    gotAnyEvent = true;
-                    _streamReconnectAttempts = 0;
-                    if (_streamStatus != StreamStatus.Connected)
-                    {
-                        _streamStatus = StreamStatus.Connected;
-                        _reconnectNextAttemptAt = null;
-                    }
-                    await InvokeAsync(() => Apply(evt));
                 }
+                catch (OperationCanceledException)
+                {
+                    // User navigated or component disposed. Don't reconnect.
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    // The stream surfaced a transport error that HubClient.StreamAsync
+                    // didn't intercept (e.g. a Json deserialize blow-up inside Apply
+                    // that escapes InvokeAsync, or an exception from a 3rd-party event
+                    // handler). Log it, fall into the reconnect block below -- the
+                    // chat should keep trying to recover, not die silently. (Prior
+                    // behaviour: log + return, leaving _streamStatus stuck on
+                    // Connected and the SPA frozen until refresh.)
+                    HubLog.LogError($"[stream {streamId}] {ex.Message}", ex.ToString(),
+                        category: nameof(Home), sessionId: sid,
+                        extra: new { agent, generation = streamId });
+                    Console.Error.WriteLine($"[stream {streamId}] {ex.Message}");
+                }
+
+                // Reached when the SSE stream ended -- either naturally (e.g.
+                // mobile browser backgrounded the tab and HubClient.StreamAsync
+                // yield-broke), or after a caught exception above. If the user
+                // is still on this session, transparently reconnect with the
+                // existing message snapshot so the chat doesn't appear frozen.
+                if (ct.IsCancellationRequested) return;
+                if (streamId != _streamGeneration) return;
+                if (_streamingFor != $"{agent}/{sid}") return;
+
+                var attempt = ++_streamReconnectAttempts;
+                const int maxAttempts = 8;
+                if (attempt > maxAttempts)
+                {
+                    HubLog.LogError(
+                        $"[stream {streamId}] giving up after {attempt - 1} reconnect attempts",
+                        stack: null, category: nameof(Home), sessionId: sid,
+                        extra: new { agent, generation = streamId });
+                    Console.Error.WriteLine($"[stream {streamId}] giving up after {attempt - 1} reconnect attempts");
+                    _streamStatus = StreamStatus.Offline;
+                    _reconnectNextAttemptAt = null;
+                    await InvokeAsync(StateHasChanged);
+                    return;
+                }
+
+                // Exponential backoff capped at 10s. Note: Task.Delay is heavily
+                // throttled while a tab is hidden, so a backgrounded phone won't
+                // burn battery on retry storms -- the delay naturally extends
+                // until the tab becomes visible again.
+                var delaySec = Math.Min(10, 1 << Math.Min(attempt - 1, 4));
+                Console.WriteLine($"[stream {streamId}] disconnected (gotAny={gotAnyEvent}); reconnect attempt {attempt} in {delaySec}s");
+                _streamStatus = StreamStatus.Reconnecting;
+                _reconnectNextAttemptAt = DateTime.UtcNow.AddSeconds(delaySec);
+                await InvokeAsync(StateHasChanged);
+                try { await Task.Delay(TimeSpan.FromSeconds(delaySec), ct); }
+                catch (OperationCanceledException) { return; }
+
+                if (ct.IsCancellationRequested) return;
+                if (streamId != _streamGeneration) return;
+                if (_streamingFor != $"{agent}/{sid}") return;
+
+                var snapshot = _messages
+                    .Select(m => new ChatMessage { Role = m.Role, Text = m.Text, ToolCallId = m.ToolCallId })
+                    .ToList();
+                await InvokeAsync(() => StartStreamingAsync(load: false, force: false, restoreFrom: snapshot, isReconnect: true));
             }
             catch (OperationCanceledException)
             {
-                // User navigated or component disposed. Don't reconnect.
-                return;
+                // Outer cancellation (component disposed mid-reconnect).
             }
             catch (Exception ex)
             {
-                HubLog.LogError($"[stream {streamId}] {ex.Message}", ex.ToString(),
+                // Outermost catch: anything from the reconnect logic itself
+                // (InvokeAsync after dispose, recursive StartStreamingAsync
+                // throwing, etc.) lands here. Logged at the central sink so
+                // it's debuggable, but NEVER bubbles to Blazor's unhandled-
+                // exception handler (which would pop the "An unhandled error
+                // has occurred. Reload" yellow banner and force a refresh).
+                HubLog.LogError($"[stream {streamId}] pump task crashed: {ex.Message}", ex.ToString(),
                     category: nameof(Home), sessionId: sid,
-                    extra: new { agent, generation = streamId });
-                Console.Error.WriteLine($"[stream {streamId}] {ex.Message}");
-                return;
+                    extra: new { agent, generation = streamId, fatal = true });
+                Console.Error.WriteLine($"[stream {streamId}] pump task crashed: {ex.Message}");
+                // Try to surface to the user via the offline UI rather than
+                // leaving the chat in a phantom-Connected state.
+                try
+                {
+                    await InvokeAsync(() =>
+                    {
+                        _streamStatus = StreamStatus.Offline;
+                        _reconnectNextAttemptAt = null;
+                        StateHasChanged();
+                    });
+                }
+                catch { /* component truly gone; nothing useful to do */ }
             }
-
-            // Reached when the SSE stream ended without an exception. Either
-            // the underlying socket was torn down (e.g. mobile browser
-            // backgrounded the tab and Android Chrome killed the connection,
-            // surfaced by HubClient.StreamAsync as a silent yield-break) or
-            // the hub closed the stream cleanly. If the user is still on
-            // this session, transparently reconnect with the existing
-            // message snapshot so the chat doesn't appear frozen.
-            if (ct.IsCancellationRequested) return;
-            if (streamId != _streamGeneration) return;
-            if (_streamingFor != $"{agent}/{sid}") return;
-
-            var attempt = ++_streamReconnectAttempts;
-            const int maxAttempts = 8;
-            if (attempt > maxAttempts)
-            {
-                HubLog.LogError(
-                    $"[stream {streamId}] giving up after {attempt - 1} reconnect attempts",
-                    stack: null, category: nameof(Home), sessionId: sid,
-                    extra: new { agent, generation = streamId });
-                Console.Error.WriteLine($"[stream {streamId}] giving up after {attempt - 1} reconnect attempts");
-                _streamStatus = StreamStatus.Offline;
-                _reconnectNextAttemptAt = null;
-                await InvokeAsync(StateHasChanged);
-                return;
-            }
-
-            // Exponential backoff capped at 10s. Note: Task.Delay is heavily
-            // throttled while a tab is hidden, so a backgrounded phone won't
-            // burn battery on retry storms -- the delay naturally extends
-            // until the tab becomes visible again.
-            var delaySec = Math.Min(10, 1 << Math.Min(attempt - 1, 4));
-            Console.WriteLine($"[stream {streamId}] disconnected (gotAny={gotAnyEvent}); reconnect attempt {attempt} in {delaySec}s");
-            _streamStatus = StreamStatus.Reconnecting;
-            _reconnectNextAttemptAt = DateTime.UtcNow.AddSeconds(delaySec);
-            await InvokeAsync(StateHasChanged);
-            try { await Task.Delay(TimeSpan.FromSeconds(delaySec), ct); }
-            catch (OperationCanceledException) { return; }
-
-            if (ct.IsCancellationRequested) return;
-            if (streamId != _streamGeneration) return;
-            if (_streamingFor != $"{agent}/{sid}") return;
-
-            var snapshot = _messages
-                .Select(m => new ChatMessage { Role = m.Role, Text = m.Text, ToolCallId = m.ToolCallId })
-                .ToList();
-            await InvokeAsync(() => StartStreamingAsync(load: false, force: false, restoreFrom: snapshot, isReconnect: true));
         }, ct);
 
         if (load)
