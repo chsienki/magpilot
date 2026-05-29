@@ -694,8 +694,14 @@
             if (page is null) return null;
             _oldestCursor = page.OldestCursor;
             _hasMore = page.HasMore;
-            return page.Entries
-                .Select(r => new ChatMessage { Role = r.Role, Text = r.Text, ToolCallId = r.ToolCallId })
+            return CollapseLegacyToolEntries(page.Entries)
+                .Select(r => new ChatMessage
+                {
+                    Role = r.Role,
+                    Text = r.Text,
+                    ToolCallId = r.ToolCallId,
+                    ToolStatus = r.ToolStatus,
+                })
                 .ToList();
         }
         catch (Exception ex)
@@ -705,6 +711,73 @@
                 extra: new { agent = Agent });
             return null;
         }
+    }
+
+    /// <summary>
+    /// Pre-v0.1.8 agents projected each ACP tool call as TWO history
+    /// entries: "[start] toolname" and "[end] ok|fail". Newer agents
+    /// emit a single entry with <see cref="HistoryEntry.ToolStatus"/>
+    /// set on the wire. Collapse the legacy two-row shape into the
+    /// single-row shape so the new SPA renders a unified chip
+    /// regardless of which agent version is serving it.
+    /// </summary>
+    private static IEnumerable<HubClient.HistoryEntry> CollapseLegacyToolEntries(
+        IEnumerable<HubClient.HistoryEntry> entries)
+    {
+        const string startPrefix = "[start] ";
+        const string endPrefix = "[end] ";
+        var collapsed = new List<HubClient.HistoryEntry>();
+        var indexById = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var e in entries)
+        {
+            if (e.Role == "tool" && e.Text.StartsWith(startPrefix, StringComparison.Ordinal))
+            {
+                var title = e.Text[startPrefix.Length..];
+                var collapsedEntry = e with { Text = title, ToolStatus = ToolStatus.Pending };
+                if (!string.IsNullOrEmpty(e.ToolCallId))
+                    indexById[e.ToolCallId] = collapsed.Count;
+                collapsed.Add(collapsedEntry);
+            }
+            else if (e.Role == "tool" && e.Text.StartsWith(endPrefix, StringComparison.Ordinal))
+            {
+                var success = !e.Text.StartsWith("[end] fail", StringComparison.Ordinal);
+                if (!string.IsNullOrEmpty(e.ToolCallId)
+                    && indexById.TryGetValue(e.ToolCallId, out var idx))
+                {
+                    collapsed[idx] = collapsed[idx] with
+                    {
+                        ToolStatus = success ? ToolStatus.Ok : ToolStatus.Fail,
+                    };
+                }
+                // No matching [start]: drop. The old SPA used to render
+                // a standalone "[end] ok" chip; the new unified-chip
+                // model has nowhere to attach it. This is a graceful
+                // degradation for malformed legacy logs.
+            }
+            else
+            {
+                collapsed.Add(e);
+            }
+        }
+        return collapsed;
+    }
+
+    /// <summary>
+    /// Find the most recent "tool" message in <see cref="_messages"/>
+    /// matching <paramref name="toolCallId"/>. Used by Apply() when a
+    /// ToolCallEnd arrives, to mutate the existing pending chip in
+    /// place. Iterates from the end since the matching start is
+    /// usually the most recent tool message.
+    /// </summary>
+    private ChatMessage? FindToolMessage(string? toolCallId)
+    {
+        if (string.IsNullOrEmpty(toolCallId)) return null;
+        for (var i = _messages.Count - 1; i >= 0; i--)
+        {
+            var m = _messages[i];
+            if (m.Role == "tool" && m.ToolCallId == toolCallId) return m;
+        }
+        return null;
     }
 
     private async Task ConfirmOrphanAdopt()
@@ -885,7 +958,13 @@
         // Deep-clone the message records so subsequent mutations to the
         // observable collection (Clear, Add) don't poke the cached snapshot.
         _msgCache[_streamingFor] = _messages
-            .Select(m => new ChatMessage { Role = m.Role, Text = m.Text, ToolCallId = m.ToolCallId })
+            .Select(m => new ChatMessage
+            {
+                Role = m.Role,
+                Text = m.Text,
+                ToolCallId = m.ToolCallId,
+                ToolStatus = m.ToolStatus,
+            })
             .ToList();
     }
 
@@ -912,7 +991,13 @@
         if (restoreFrom is not null)
         {
             foreach (var m in restoreFrom)
-                _messages.Add(new ChatMessage { Role = m.Role, Text = m.Text, ToolCallId = m.ToolCallId });
+                _messages.Add(new ChatMessage
+                {
+                    Role = m.Role,
+                    Text = m.Text,
+                    ToolCallId = m.ToolCallId,
+                    ToolStatus = m.ToolStatus,
+                });
         }
         _loading = load;
         // Drop ACP history-replay events from session/load when the chat
@@ -1028,7 +1113,13 @@
                 if (_streamingFor != $"{agent}/{sid}") return;
 
                 var snapshot = _messages
-                    .Select(m => new ChatMessage { Role = m.Role, Text = m.Text, ToolCallId = m.ToolCallId })
+                    .Select(m => new ChatMessage
+                    {
+                        Role = m.Role,
+                        Text = m.Text,
+                        ToolCallId = m.ToolCallId,
+                        ToolStatus = m.ToolStatus,
+                    })
                     .ToList();
                 await InvokeAsync(() => StartStreamingAsync(load: false, force: false, restoreFrom: snapshot, isReconnect: true));
             }
@@ -1139,11 +1230,42 @@
                 _thinking = false;
                 _streamingAssistant = null;
                 _streamingThought = null;
-                _messages.Add(new ChatMessage { Role = "tool", ToolCallId = t.ToolCallId, Text = $"[start] {t.Name}" });
+                // One chip per tool call. The matching ToolCallEnd
+                // mutates this same message's ToolStatus in place;
+                // the chip animates Pending -> Ok / Fail without
+                // leaving a separate "[end] ok" sibling row behind.
+                _messages.Add(new ChatMessage
+                {
+                    Role = "tool",
+                    ToolCallId = t.ToolCallId,
+                    Text = t.Name,
+                    ToolStatus = ToolStatus.Pending,
+                });
                 break;
             case ToolCallEnd t:
-                _messages.Add(new ChatMessage { Role = "tool", ToolCallId = t.ToolCallId, Text = $"[end] {(t.Success ? "ok" : "fail")}" });
-                break;
+                {
+                    var existing = FindToolMessage(t.ToolCallId);
+                    if (existing is not null)
+                    {
+                        existing.ToolStatus = t.Success ? ToolStatus.Ok : ToolStatus.Fail;
+                    }
+                    else
+                    {
+                        // No matching ToolCallStart. Shouldn't happen
+                        // under normal wire flow but can occur if events
+                        // were dropped or this stream is the result of a
+                        // mid-turn reconnect. Surface the result as its
+                        // own row so the user still sees something.
+                        _messages.Add(new ChatMessage
+                        {
+                            Role = "tool",
+                            ToolCallId = t.ToolCallId,
+                            Text = "(orphaned tool result)",
+                            ToolStatus = t.Success ? ToolStatus.Ok : ToolStatus.Fail,
+                        });
+                    }
+                    break;
+                }
             case ApprovalRequired a:
                 _thinking = false;
                 _pendingApproval = a;
@@ -1243,7 +1365,13 @@
         _streamStatus = StreamStatus.Reconnecting;
         _reconnectNextAttemptAt = null;
         var snapshot = _messages
-            .Select(m => new ChatMessage { Role = m.Role, Text = m.Text, ToolCallId = m.ToolCallId })
+            .Select(m => new ChatMessage
+            {
+                Role = m.Role,
+                Text = m.Text,
+                ToolCallId = m.ToolCallId,
+                ToolStatus = m.ToolStatus,
+            })
             .ToList();
         await StartStreamingAsync(load: false, force: false, restoreFrom: snapshot, isReconnect: true);
     }
@@ -1279,14 +1407,16 @@
                 _hasMore = false;
                 return;
             }
-            for (var i = page.Entries.Count - 1; i >= 0; i--)
+            var collapsed = CollapseLegacyToolEntries(page.Entries).ToList();
+            for (var i = collapsed.Count - 1; i >= 0; i--)
             {
-                var r = page.Entries[i];
+                var r = collapsed[i];
                 _messages.Insert(0, new ChatMessage
                 {
                     Role = r.Role,
                     Text = r.Text,
                     ToolCallId = r.ToolCallId,
+                    ToolStatus = r.ToolStatus,
                 });
             }
             _oldestCursor = page.OldestCursor;

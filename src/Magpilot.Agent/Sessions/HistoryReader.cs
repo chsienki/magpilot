@@ -44,7 +44,24 @@ public sealed class HistoryReader
 
     /// <summary>One row in the projected history. Mirrors the SPA's ChatMessage shape.</summary>
     /// <param name="Id">Stable ordinal cursor: position in the canonical projection of events.jsonl. Pass back as <c>before</c> on the next paging call.</param>
-    public sealed record HistoryEntry(int Id, string Role, string Text, string? ToolCallId = null);
+    /// <param name="ToolStatus">For <c>Role == "tool"</c> rows, the lifecycle state. Always <see cref="HistoryToolStatus.Pending"/> for non-tool rows; updated to Ok or Fail when the matching <c>tool.execution_complete</c> event is encountered during projection.</param>
+    public sealed record HistoryEntry(
+        int Id,
+        string Role,
+        string Text,
+        string? ToolCallId = null,
+        HistoryToolStatus ToolStatus = HistoryToolStatus.Pending);
+
+    /// <summary>
+    /// Lifecycle state of a tool call as projected from events.jsonl.
+    /// Wire-format mirror of the SPA's <c>Magpilot.UI.Components.ToolStatus</c>.
+    /// </summary>
+    public enum HistoryToolStatus
+    {
+        Pending,
+        Ok,
+        Fail,
+    }
 
     /// <summary>A page of history with cursor + has-more flag.</summary>
     /// <param name="Entries">The page, oldest-first.</param>
@@ -107,6 +124,12 @@ public sealed class HistoryReader
         }
 
         var rows = new List<HistoryEntry>();
+        // tool.execution_complete arrives AFTER the assistant.message
+        // that announced the tool request. We project one entry per
+        // tool call (no separate [start] / [end] pair), then mutate
+        // its status in place when the matching complete event lands.
+        // This map keys by ACP toolCallId -> index into rows[].
+        var toolIndexById = new Dictionary<string, int>(StringComparer.Ordinal);
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         using var reader = new StreamReader(stream);
         string? line;
@@ -151,8 +174,9 @@ public sealed class HistoryReader
                             rows.Add(new HistoryEntry(rows.Count, "assistant", content));
 
                         // toolRequests: the model called one or more tools
-                        // before this message. We surface them as compact
-                        // chips to mirror what the live stream would show.
+                        // before this message. Surface each as a single
+                        // pending chip; tool.execution_complete (below)
+                        // mutates the chip's ToolStatus in place.
                         if (data["toolRequests"] is JsonArray reqs)
                         {
                             foreach (var r in reqs)
@@ -160,7 +184,19 @@ public sealed class HistoryReader
                                 if (r is null) continue;
                                 var toolCallId = r["toolCallId"]?.GetValue<string>();
                                 var toolName = r["name"]?.GetValue<string>() ?? "tool";
-                                rows.Add(new HistoryEntry(rows.Count, "tool", $"[start] {toolName}", toolCallId));
+                                // intentionSummary is a human-readable
+                                // sentence the CLI synthesizes from the
+                                // tool args, e.g. "edit the file at
+                                // D:\..\PlaybackService.kt." It's closer
+                                // to what the live wire's `title` shows
+                                // than the bare tool name, so prefer it
+                                // for the chip label when available.
+                                var label = r["intentionSummary"]?.GetValue<string>();
+                                if (string.IsNullOrWhiteSpace(label)) label = toolName;
+                                var idx = rows.Count;
+                                rows.Add(new HistoryEntry(idx, "tool", label, toolCallId, HistoryToolStatus.Pending));
+                                if (!string.IsNullOrEmpty(toolCallId))
+                                    toolIndexById[toolCallId] = idx;
                             }
                         }
                         break;
@@ -169,7 +205,23 @@ public sealed class HistoryReader
                     {
                         var toolCallId = data["toolCallId"]?.GetValue<string>();
                         var success = data["success"]?.GetValue<bool>() ?? false;
-                        rows.Add(new HistoryEntry(rows.Count, "tool", $"[end] {(success ? "ok" : "fail")}", toolCallId));
+                        var status = success ? HistoryToolStatus.Ok : HistoryToolStatus.Fail;
+                        if (!string.IsNullOrEmpty(toolCallId)
+                            && toolIndexById.TryGetValue(toolCallId, out var idx))
+                        {
+                            // Mutate the existing pending entry. Don't
+                            // add a new row -- that'd give us the old
+                            // two-row [start]/[end] shape we just got
+                            // rid of.
+                            rows[idx] = rows[idx] with { ToolStatus = status };
+                        }
+                        else
+                        {
+                            // Orphan complete with no matching tool
+                            // request announcement (shouldn't happen in
+                            // a well-formed log but defend against it).
+                            rows.Add(new HistoryEntry(rows.Count, "tool", "(orphaned tool result)", toolCallId, status));
+                        }
                         break;
                     }
                 // session.start/resume/model_change, system.message,

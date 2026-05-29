@@ -23,7 +23,6 @@
                 }
             </div>
         }
-        @{ _infoToolCallIds.Clear(); }
         @foreach (var m in Messages)
         {
             var isThought = m.Role.Equals("thought", StringComparison.OrdinalIgnoreCase);
@@ -68,35 +67,33 @@
                     break;
                 case "tool":
                     {
-                        // Copilot CLI emits ACP `tool_call` updates for purely
-                        // informational built-ins (e.g. reading a file the model
-                        // wants to look at) with a title like "Info: <path>".
-                        // Those are noisier than the real edit/execute/search
-                        // calls, so render them as a muted inline chip without
-                        // the terminal avatar -- and track the toolCallId so
-                        // the matching "[end] ok" chip can be hidden too.
-                        var isInfoStart = m.Text.StartsWith("[start] Info:", StringComparison.Ordinal);
-                        if (isInfoStart && !string.IsNullOrEmpty(m.ToolCallId))
+                        // One unified chip per tool call. The matching
+                        // ToolCallEnd mutates m.ToolStatus in place
+                        // (see Home.razor Apply()), so this chip
+                        // animates Pending -> Ok / Fail without us
+                        // having to track [start]/[end] paired rows.
+                        //
+                        // Copilot CLI labels purely-informational
+                        // built-ins (e.g. an under-the-hood file read
+                        // the model asks for) with an "Info: <path>"
+                        // title. Those are noisier than real edit /
+                        // execute / search calls, so they get a small
+                        // muted inline chip without the terminal
+                        // avatar.
+                        var isInfo = m.Text.StartsWith("Info:", StringComparison.Ordinal);
+                        var (chipColor, chipIcon) = m.ToolStatus switch
                         {
-                            _infoToolCallIds.Add(m.ToolCallId);
-                        }
-                        var isInfoEnd = m.Text.StartsWith("[end]", StringComparison.Ordinal)
-                            && !string.IsNullOrEmpty(m.ToolCallId)
-                            && _infoToolCallIds.Contains(m.ToolCallId);
-                        if (isInfoEnd)
+                            ToolStatus.Ok   => (Color.Success, Icons.Material.Filled.CheckCircleOutline),
+                            ToolStatus.Fail => (Color.Error,   Icons.Material.Filled.ErrorOutline),
+                            _               => (Color.Default, Icons.Material.Filled.PlayArrow),
+                        };
+                        if (isInfo)
                         {
-                            // Suppress the trailing "[end] ok" chip for info
-                            // calls; the start chip already conveys what
-                            // happened.
-                            break;
-                        }
-                        if (isInfoStart)
-                        {
-                            var infoLabel = m.Text.Substring("[start] Info:".Length).TrimStart();
+                            var infoLabel = m.Text["Info:".Length..].TrimStart();
                             <div class="msg-row msg-row-info">
                                 <MudChip T="string" Size="Size.Small" Variant="Variant.Text"
-                                         Color="Color.Default"
-                                         Icon="@Icons.Material.Outlined.Info"
+                                         Color="@chipColor"
+                                         Icon="@(m.ToolStatus == ToolStatus.Pending ? Icons.Material.Outlined.Info : chipIcon)"
                                          Class="msg-tool-chip msg-tool-chip-info">@infoLabel</MudChip>
                             </div>
                         }
@@ -107,8 +104,8 @@
                                     <MudIcon Icon="@Icons.Material.Filled.Terminal" Size="Size.Small" />
                                 </MudAvatar>
                                 <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
-                                         Color="@(m.Text.StartsWith("[end] fail") ? Color.Error : (m.Text.StartsWith("[end]") ? Color.Success : Color.Default))"
-                                         Icon="@(m.Text.StartsWith("[end] fail") ? Icons.Material.Filled.ErrorOutline : (m.Text.StartsWith("[end]") ? Icons.Material.Filled.CheckCircleOutline : Icons.Material.Filled.PlayArrow))"
+                                         Color="@chipColor"
+                                         Icon="@chipIcon"
                                          Class="msg-tool-chip">@m.Text</MudChip>
                             </div>
                         }
@@ -212,7 +209,6 @@
     private DotNetObjectReference<ChatView>? _selfRef;
     private int _lastMessageCount;
     private bool _loadingMore;
-    private readonly HashSet<string> _infoToolCallIds = new(StringComparer.Ordinal);
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {

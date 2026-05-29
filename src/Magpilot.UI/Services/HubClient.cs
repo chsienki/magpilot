@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Magpilot.Shared.Models;
 using Magpilot.UI.Abstractions;
+using Magpilot.UI.Components;
 
 namespace Magpilot.UI.Services;
 
@@ -51,7 +52,7 @@ public sealed class HubClient
         return _http.GetFromJsonAsync<HistoryPage>(url, ct);
     }
 
-    public sealed record HistoryEntry(int Id, string Role, string Text, string? ToolCallId = null);
+    public sealed record HistoryEntry(int Id, string Role, string Text, string? ToolCallId = null, ToolStatus ToolStatus = ToolStatus.Pending);
     public sealed record HistoryPage(IReadOnlyList<HistoryEntry> Entries, int OldestCursor, bool HasMore);
 
     public async Task<SessionInfo?> NewSessionAsync(string agent, string? cwd, bool useAgency = false, CancellationToken ct = default)
