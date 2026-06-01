@@ -447,6 +447,13 @@
     private readonly ObservableCollection<ChatMessage> _messages = new();
     private ChatMessage? _streamingAssistant;
     private ChatMessage? _streamingThought;
+    /// <summary>
+    /// Last <see cref="ThoughtDelta"/> text appended to
+    /// <see cref="_streamingThought"/>. Used by Apply() to dedupe
+    /// consecutive identical thought chunks (see ThoughtDelta case).
+    /// Cleared every time a new thought bubble starts.
+    /// </summary>
+    private string? _lastThoughtChunkText;
     private ApprovalRequired? _pendingApproval;
     private CancellationTokenSource? _streamCts;
     private bool _busy;
@@ -1321,8 +1328,22 @@
                 {
                     _streamingThought = new ChatMessage { Role = "thought", Text = "" };
                     _messages.Add(_streamingThought);
+                    _lastThoughtChunkText = null;
+                }
+                // Dedupe consecutive identical thought chunks. Copilot CLI
+                // occasionally emits the SAME agent_thought_chunk text twice
+                // back-to-back (probably the model wire's reasoning-delta
+                // followed by reasoning-summary, both surfaced as the same
+                // ACP kind). Without this, the user sees the same phrase
+                // duplicated in the thinking bubble -- "Renaming
+                // methodRenaming method" being the canonical witness.
+                if (td.Text.Length > 0
+                    && string.Equals(_lastThoughtChunkText, td.Text, StringComparison.Ordinal))
+                {
+                    break;
                 }
                 _streamingThought.Text += td.Text;
+                _lastThoughtChunkText = td.Text;
                 break;
             case UserDelta d:
                 // Finalize any in-progress assistant message before starting a new turn
