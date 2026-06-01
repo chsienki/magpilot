@@ -161,6 +161,20 @@
     flex-shrink: 0;
 }
 
+/* Row of queued-message chips above the composer textarea while a
+   turn is in flight. Each chip shows a preview of the queued message
+   and a close 'x' to delete it before it gets sent. */
+.composer-queue {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    align-items: center;
+}
+.composer-queue-chip {
+    font-size: 0.8em !important;
+    max-width: 100%;
+}
+
 .composer-textarea {
     flex: 1;
     resize: none;

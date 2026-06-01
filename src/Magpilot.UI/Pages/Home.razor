@@ -399,12 +399,16 @@
             <ChatView @ref="_chatView"
                       Messages="@_messages"
                       PendingApproval="@_pendingApproval"
-                      Disabled="@(_busy || _loading)"
+                      Disabled="@_loading"
+                      Busy="@_busy"
                       Thinking="@_thinking"
                       ShowThoughts="@_showThoughts"
                       HasMore="@_hasMore"
                       OnLoadMore="HandleLoadOlder"
                       OnSend="HandleSend"
+                      OnCancel="HandleCancel"
+                      QueuedMessages="@_queuedMessages"
+                      OnDeleteQueued="HandleDeleteQueued"
                       OnApproval="HandleApproval" />
         }
         else
@@ -447,6 +451,13 @@
     private CancellationTokenSource? _streamCts;
     private bool _busy;
     private bool _loading;
+    /// <summary>
+    /// Messages the user typed and sent while a turn was still in
+    /// flight. They get drained FIFO each time the agent emits a
+    /// TurnComplete. The user can delete individual entries before
+    /// they fire via the queue chips above the composer.
+    /// </summary>
+    private readonly List<string> _queuedMessages = new();
     /// <summary>
     /// When true, content events (user/assistant/thought/tool/approval)
     /// arriving on the stream between LoadStarted and HistoryDone are
@@ -621,6 +632,17 @@
 
         if (Agent is not null && SessionId is not null && _streamingFor != $"{Agent}/{SessionId}")
         {
+            // Capture the OUTGOING session's key BEFORE we overwrite
+            // _streamingFor with the new target. We need to cache the
+            // current _messages under THIS key (not the new one) when
+            // we snapshot below -- otherwise the new session's cache
+            // entry gets polluted with the previous session's chat,
+            // and the "Owned + cache present" branch happily restores
+            // the wrong content into the new session's view. (This
+            // exact bug manifested as "click a different session, text
+            // never refreshes".)
+            var previousKey = _streamingFor;
+
             // Claim the slot synchronously, BEFORE any awaits, so a re-entrant
             // call (cascading parameter change, navigation event, etc.) sees
             // the new target and skips this branch instead of starting a
@@ -628,9 +650,16 @@
             var target = $"{Agent}/{SessionId}";
             _streamingFor = target;
 
-            // Snapshot the previous session before tearing down its stream so
-            // we can rehydrate when the user navigates back.
-            SnapshotCurrentMessages();
+            // A session switch resets the per-session ephemeral state.
+            // The composer queue is one of those: messages typed while
+            // the previous session was busy are NOT carried over (they
+            // were addressed to a specific conversation).
+            _queuedMessages.Clear();
+
+            // Snapshot the OUTGOING session under its OWN key so we can
+            // rehydrate when the user navigates back.
+            if (previousKey is not null)
+                SnapshotMessagesAs(previousKey);
 
             await StopStreamingAsync();
             _pendingOrphan = null;
@@ -989,12 +1018,28 @@
         }
     }
 
-    private void SnapshotCurrentMessages()
+    /// <summary>
+    /// Deep-clone the currently-rendered <see cref="_messages"/> into
+    /// <see cref="_msgCache"/> under <paramref name="key"/> so the
+    /// user can navigate away and back to a session without re-loading
+    /// from the agent. Clone semantics: subsequent mutations on the
+    /// observable collection (Clear, Add during streaming) don't poke
+    /// the cached list.
+    ///
+    /// IMPORTANT: <paramref name="key"/> is explicit because the
+    /// session-switch path in <see cref="OnParametersSetAsync"/> has
+    /// to claim the new <see cref="_streamingFor"/> synchronously
+    /// (to defend against re-entrant parameter updates) BEFORE
+    /// snapshotting -- which means by the time we get here, the
+    /// "current" key is the NEW session, not the one we're trying to
+    /// snapshot. Passing the previous key explicitly avoids the
+    /// "old session's content is cached under the new session's key"
+    /// foot-gun that hid behind a single `_streamingFor` reference.
+    /// </summary>
+    private void SnapshotMessagesAs(string key)
     {
-        if (_streamingFor is null || _messages.Count == 0) return;
-        // Deep-clone the message records so subsequent mutations to the
-        // observable collection (Clear, Add) don't poke the cached snapshot.
-        _msgCache[_streamingFor] = _messages
+        if (_messages.Count == 0) return;
+        _msgCache[key] = _messages
             .Select(m => new ChatMessage
             {
                 Role = m.Role,
@@ -1312,6 +1357,18 @@
                 _streamingAssistant = null;
                 _streamingThought = null;
                 _busy = false;
+                // Drain the queue FIFO so the next typed-while-busy
+                // message fires automatically without the user having
+                // to click anything. Each drained message starts a
+                // fresh turn (sets _busy back to true) so subsequent
+                // queue drains are serial -- no chance of two prompts
+                // racing into ACP at once.
+                if (_queuedMessages.Count > 0)
+                {
+                    var next = _queuedMessages[0];
+                    _queuedMessages.RemoveAt(0);
+                    _ = InvokeAsync(() => SendImmediateAsync(next));
+                }
                 break;
             case LoadStarted:
                 _loading = true;
@@ -1336,6 +1393,29 @@
     private async Task HandleSend(string text)
     {
         if (Agent is null || SessionId is null) return;
+        if (_busy)
+        {
+            // A turn is in flight. Queue the message rather than
+            // blocking the input; it'll fire FIFO on the next
+            // TurnComplete (see Apply()).
+            _queuedMessages.Add(text);
+            StateHasChanged();
+            return;
+        }
+        await SendImmediateAsync(text);
+    }
+
+    /// <summary>
+    /// The actual send path. Used both for direct sends (composer's
+    /// Enter while idle) and for draining the queue on TurnComplete.
+    /// Adds the user bubble to the chat, flips _busy/_thinking, and
+    /// dispatches through HubClient with its built-in polite-knock
+    /// retry. Errors propagate as snackbars + central log entries
+    /// just like the original single-path send.
+    /// </summary>
+    private async Task SendImmediateAsync(string text)
+    {
+        if (Agent is null || SessionId is null) return;
         _messages.Add(new ChatMessage { Role = "user", Text = text });
         _busy = true;
         _thinking = true;
@@ -1358,6 +1438,37 @@
             _busy = false; _thinking = false;
             Snackbar.Add($"Send failed: {ex.Message}", Severity.Error);
         }
+        StateHasChanged();
+    }
+
+    /// <summary>
+    /// User clicked the Stop button next to the composer. Tells the
+    /// agent to cancel the in-flight turn via POST /interrupt. The
+    /// agent still emits a TurnComplete (or error) on the SSE stream,
+    /// which flips _busy back to idle through Apply() -- and that's
+    /// also where the queue drains, so a cancel doesn't strand
+    /// queued messages.
+    /// </summary>
+    private async Task HandleCancel()
+    {
+        if (Agent is null || SessionId is null) return;
+        try
+        {
+            await Hub.InterruptAsync(Agent, SessionId);
+        }
+        catch (Exception ex)
+        {
+            HubLog.LogError($"InterruptAsync failed: {ex.Message}", ex.ToString(),
+                category: nameof(Home), sessionId: SessionId,
+                extra: new { agent = Agent });
+            Snackbar.Add($"Cancel failed: {ex.Message}", Severity.Error);
+        }
+    }
+
+    private void HandleDeleteQueued(int index)
+    {
+        if (index < 0 || index >= _queuedMessages.Count) return;
+        _queuedMessages.RemoveAt(index);
         StateHasChanged();
     }
 
@@ -1481,7 +1592,11 @@
 
     public async ValueTask DisposeAsync()
     {
-        SnapshotCurrentMessages();
+        // Component is being torn down -- snapshot the still-current
+        // session under its own key so re-mounting (e.g. on hot-reload
+        // during dev, or a router back-button) doesn't lose the chat.
+        if (_streamingFor is not null)
+            SnapshotMessagesAs(_streamingFor);
         await StopStreamingAsync();
     }
 }

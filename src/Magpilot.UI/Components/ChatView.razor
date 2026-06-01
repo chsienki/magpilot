@@ -156,19 +156,50 @@
     </div>
 
     <MudPaper Elevation="0" Square="true" Class="composer-mud pa-2">
+        @if (QueuedMessages is { Count: > 0 })
+        {
+            <div class="composer-queue mb-1">
+                @for (var i = 0; i < QueuedMessages.Count; i++)
+                {
+                    var idx = i; // capture for closure
+                    var preview = QueuedMessages[i];
+                    if (preview.Length > 60) preview = preview[..60] + "...";
+                    <MudChip T="string"
+                             Size="Size.Small"
+                             Variant="Variant.Outlined"
+                             Color="Color.Default"
+                             OnClose="@(() => OnDeleteQueued.InvokeAsync(idx))"
+                             CloseIcon="@Icons.Material.Filled.Close"
+                             Class="composer-queue-chip"
+                             title="@QueuedMessages[i]">
+                        @preview
+                    </MudChip>
+                }
+            </div>
+        }
         <MudStack Row="true" Spacing="1" AlignItems="AlignItems.End">
             <textarea @ref="_textarea" @bind="_draft" @bind:event="oninput"
                       @onkeydown="OnKeyDown"
                       class="composer-textarea"
-                      placeholder="Message... (Enter to send, Shift+Enter for newline)"
+                      placeholder="@ComposerPlaceholder"
                       rows="2" disabled="@Disabled"></textarea>
-            <MudIconButton Icon="@Icons.Material.Filled.Send"
+            @if (Busy)
+            {
+                <MudIconButton Icon="@Icons.Material.Filled.Stop"
+                               Color="Color.Error"
+                               Variant="Variant.Filled"
+                               Size="Size.Medium"
+                               Disabled="@Disabled"
+                               OnClick="@(() => OnCancel.InvokeAsync())"
+                               aria-label="Stop current turn" />
+            }
+            <MudIconButton Icon="@(Busy ? Icons.Material.Filled.PlaylistAdd : Icons.Material.Filled.Send)"
                            Color="Color.Primary"
                            Variant="Variant.Filled"
                            Size="Size.Medium"
                            Disabled="@(Disabled || string.IsNullOrWhiteSpace(_draft))"
                            OnClick="@Send"
-                           aria-label="Send message" />
+                           aria-label="@(Busy ? "Queue message" : "Send message")" />
         </MudStack>
     </MudPaper>
 </div>
@@ -181,6 +212,36 @@
     [Parameter] public bool ShowThoughts { get; set; } = true;
     [Parameter] public EventCallback<string> OnSend { get; set; }
     [Parameter] public EventCallback<(string ApprovalId, string OptionId)> OnApproval { get; set; }
+
+    /// <summary>
+    /// True while a turn is in flight. Swaps the Send icon for a
+    /// Stop icon (wired through <see cref="OnCancel"/>) and changes
+    /// Send's behavior to "queue" rather than "fire immediately"
+    /// (handled by the host -- see <see cref="OnSend"/>). The textarea
+    /// stays enabled so the user can compose follow-ups while waiting.
+    /// </summary>
+    [Parameter] public bool Busy { get; set; }
+
+    /// <summary>
+    /// Stop the current turn. Fires when the user clicks the red Stop
+    /// icon that appears next to the composer while <see cref="Busy"/>
+    /// is true. The host should call the agent's /interrupt endpoint.
+    /// </summary>
+    [Parameter] public EventCallback OnCancel { get; set; }
+
+    /// <summary>
+    /// Messages typed while a turn was in flight (and so couldn't be
+    /// sent right away). Rendered as a small row of chips above the
+    /// composer with a close 'x' on each. The host drains the queue in
+    /// FIFO order as turns complete -- see <see cref="OnDeleteQueued"/>.
+    /// </summary>
+    [Parameter] public IReadOnlyList<string>? QueuedMessages { get; set; }
+
+    /// <summary>
+    /// User clicked the 'x' on a queued message chip. The host should
+    /// remove the entry at the given index from its queue.
+    /// </summary>
+    [Parameter] public EventCallback<int> OnDeleteQueued { get; set; }
     /// <summary>
     /// True if there are older messages on the server that aren't yet
     /// loaded into <see cref="Messages"/>. Drives the "Load older
@@ -201,6 +262,9 @@
     [Parameter] public EventCallback OnLoadMore { get; set; }
 
     private string _draft = "";
+    private string ComposerPlaceholder => Busy
+        ? "Message will queue while the agent is working... (Enter to queue)"
+        : "Message... (Enter to send, Shift+Enter for newline)";
     private ElementReference _textarea;
     private ElementReference _messagesEl;
     private IJSObjectReference? _composerModule;

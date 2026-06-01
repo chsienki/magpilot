@@ -72,6 +72,26 @@ public sealed class HubClient
         return await resp.Content.ReadFromJsonAsync<SessionInfo>(cancellationToken: ct);
     }
 
+    /// <summary>
+    /// Stop the in-flight turn for the given session by issuing
+    /// <c>POST /sessions/{id}/interrupt</c>, which on the agent calls
+    /// ACP <c>session/cancel</c>. The model stops generating at the next
+    /// chunk boundary; the agent still emits a <c>TurnComplete</c> so
+    /// the SPA's <c>_busy</c> flag flips back to idle. Idempotent; safe
+    /// to call when no turn is active (the agent returns 204 either way).
+    /// 409 means a magpilot launcher holds the session -- not our
+    /// problem here, the launcher will respond to its own SIGINT path.
+    /// </summary>
+    public async Task InterruptAsync(string agent, string id, CancellationToken ct = default)
+    {
+        var resp = await _http.PostAsync($"api/agents/{agent}/sessions/{id}/interrupt", content: null, ct);
+        // Tolerate 409 (host-owned) and 404 (no in-flight turn) silently;
+        // both are "we already aren't running anything from this client".
+        if (resp.StatusCode is System.Net.HttpStatusCode.Conflict
+            or System.Net.HttpStatusCode.NotFound) return;
+        resp.EnsureSuccessStatusCode();
+    }
+
     public async Task SendPromptAsync(string agent, string id, string text, CancellationToken ct = default)
     {
         // Retry-on-409: the agent refuses prompts when the session is held
