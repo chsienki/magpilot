@@ -1124,6 +1124,20 @@
                             Console.WriteLine($"[stream {streamId}] stale, dropping {evt.GetType().Name}");
                             return;
                         }
+                        if (!gotAnyEvent && _streamReconnectAttempts > 0)
+                        {
+                            // First event after a reconnect cycle -- emit a
+                            // Warning so /admin/logs shows the recovery, not
+                            // just the previous failures. The reconnect-attempt
+                            // Warning fires for each retry; this confirms the
+                            // chain ended in a success rather than the
+                            // give-up-after-8 path that would otherwise be the
+                            // only positive-vs-negative signal.
+                            HubLog.LogWarning(
+                                $"[stream {streamId}] recovered after {_streamReconnectAttempts} reconnect attempt(s)",
+                                category: nameof(Home), sessionId: sid,
+                                extra: new { agent, generation = streamId, attempts = _streamReconnectAttempts });
+                        }
                         gotAnyEvent = true;
                         _streamReconnectAttempts = 0;
                         if (_streamStatus != StreamStatus.Connected)
@@ -1183,6 +1197,15 @@
                 // burn battery on retry storms -- the delay naturally extends
                 // until the tab becomes visible again.
                 var delaySec = Math.Min(10, 1 << Math.Min(attempt - 1, 4));
+                // Surface every disconnect to /admin/logs so a flaky agent or
+                // network shows up centrally instead of being hidden in the
+                // browser's devtools console. gotAnyEvent distinguishes
+                // "couldn't even connect" (suggests the agent / hub is gone)
+                // from "connected then dropped mid-stream" (transient).
+                HubLog.LogWarning(
+                    $"[stream {streamId}] disconnected (gotAny={gotAnyEvent}); reconnect attempt {attempt} of {maxAttempts} in {delaySec}s",
+                    category: nameof(Home), sessionId: sid,
+                    extra: new { agent, generation = streamId, attempt, maxAttempts, delaySec, gotAnyEvent });
                 Console.WriteLine($"[stream {streamId}] disconnected (gotAny={gotAnyEvent}); reconnect attempt {attempt} in {delaySec}s");
                 _streamStatus = StreamStatus.Reconnecting;
                 _reconnectNextAttemptAt = DateTime.UtcNow.AddSeconds(delaySec);
