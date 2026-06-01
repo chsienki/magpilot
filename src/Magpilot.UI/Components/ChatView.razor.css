@@ -44,6 +44,17 @@
     margin-top: 2px;
 }
 
+/* Tool-call rows: avatar (terminal icon) sits next to a smaller chip
+   (title + status icon). The default msg-row align-items: flex-start
+   leaves the chip sitting at the top of the avatar's box; align center
+   puts them on the same baseline so they read as a single inline unit. */
+.msg-row-tool {
+    align-items: center;
+}
+.msg-row-tool .msg-avatar {
+    margin-top: 0;
+}
+
 .msg-bubble {
     border-radius: 14px !important;
     min-width: 0; /* allow text wrap */

@@ -164,6 +164,14 @@
                 }
                 <MudText Typo="Typo.subtitle1" Class="ml-1 text-truncate" Style="min-width: 0;">@Agent</MudText>
                 <MudSpacer />
+                <MudTooltip Text="Refresh session list">
+                    <MudIconButton Icon="@Icons.Material.Filled.Refresh"
+                                   Size="Size.Small"
+                                   Color="Color.Default"
+                                   OnClick="@RefreshSessions"
+                                   Disabled="@_sessionsRefreshing"
+                                   aria-label="Refresh session list" />
+                </MudTooltip>
                 <MudTooltip Text="New chat">
                     <MudIconButton Icon="@Icons.Material.Filled.Add"
                                    Size="Size.Small"
@@ -430,6 +438,7 @@
     private List<SessionInfo>? _sessions;
     private bool _drawerOpen = true;
     private bool _showHostsPane;
+    private bool _sessionsRefreshing;
     private readonly HashSet<SessionState> _expandedGroups = new();
     private readonly ObservableCollection<ChatMessage> _messages = new();
     private ChatMessage? _streamingAssistant;
@@ -797,6 +806,34 @@
         _pendingOrphan = null;
         _streamingFor = null;
         Nav.NavigateTo($"/agents/{Agent}");
+    }
+
+    private async Task RefreshSessions()
+    {
+        if (Agent is null || _sessionsRefreshing) return;
+        _sessionsRefreshing = true;
+        StateHasChanged();
+        try
+        {
+            // Same call as OnParametersSetAsync uses, but triggered on
+            // demand from the AppBar refresh button so the user can pick
+            // up sessions started outside the SPA (e.g. magpilot CLI on
+            // a host, a fresh terminal magpilot session, or a sidecar's
+            // pinned session) without doing a full page reload.
+            var fresh = await Hub.ListSessionsAsync(Agent);
+            _sessions = fresh;
+        }
+        catch (Exception ex)
+        {
+            HubLog.LogError($"RefreshSessions failed for {Agent}: {ex.Message}", ex.ToString(),
+                category: nameof(Home), extra: new { agent = Agent });
+            Snackbar.Add($"Could not refresh sessions on {Agent}: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _sessionsRefreshing = false;
+            StateHasChanged();
+        }
     }
 
     private void SelectAgent(string name)
