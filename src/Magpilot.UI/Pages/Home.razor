@@ -851,19 +851,7 @@
         StateHasChanged();
         try
         {
-            // Same call as OnParametersSetAsync uses, but triggered on
-            // demand from the AppBar refresh button so the user can pick
-            // up sessions started outside the SPA (e.g. magpilot CLI on
-            // a host, a fresh terminal magpilot session, or a sidecar's
-            // pinned session) without doing a full page reload.
-            var fresh = await Hub.ListSessionsAsync(Agent);
-            _sessions = fresh;
-        }
-        catch (Exception ex)
-        {
-            HubLog.LogError($"RefreshSessions failed for {Agent}: {ex.Message}", ex.ToString(),
-                category: nameof(Home), extra: new { agent = Agent });
-            Snackbar.Add($"Could not refresh sessions on {Agent}: {ex.Message}", Severity.Error);
+            await RefreshSessionsSilentAsync();
         }
         finally
         {
@@ -871,6 +859,43 @@
             StateHasChanged();
         }
     }
+
+    /// <summary>
+    /// Re-fetch the session list for the current agent without
+    /// touching <see cref="_sessionsRefreshing"/> (so no refresh-button
+    /// spinner flicker). Used by the auto-refresh triggers --
+    /// TurnComplete + tab-visibility -- to pick up name changes
+    /// from `/rename` and other CLI-side mutations without the user
+    /// having to click anything. Silent on failure: a transient
+    /// /api/sessions blip during background refresh shouldn't pop
+    /// a snackbar.
+    /// </summary>
+    private async Task RefreshSessionsSilentAsync()
+    {
+        if (Agent is null) return;
+        try
+        {
+            var fresh = await Hub.ListSessionsAsync(Agent);
+            _sessions = fresh;
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            HubLog.LogWarning(
+                $"Auto-refresh of sessions failed for {Agent}: {ex.Message}",
+                category: nameof(Home), extra: new { agent = Agent });
+            // No snackbar -- the user didn't trigger this.
+        }
+    }
+
+    /// <summary>
+    /// Invoked from JS when the document transitions to visible
+    /// (user switched back to this SPA tab). Re-fetches the session
+    /// list so any /rename or other CLI-side mutations the user made
+    /// in the meantime show up immediately.
+    /// </summary>
+    [JSInvokable]
+    public Task OnTabVisible() => RefreshSessionsSilentAsync();
 
     private void SelectAgent(string name)
     {
@@ -1401,6 +1426,12 @@
                 _streamingAssistant = null;
                 _streamingThought = null;
                 _busy = false;
+                // The session may have been /rename'd or otherwise
+                // mutated during the turn (e.g. context loaded, agency
+                // switched). Refresh the session list in the background
+                // so the sidebar entry + AppBar title pick up the new
+                // metadata without the user having to do anything.
+                _ = InvokeAsync(RefreshSessionsSilentAsync);
                 // Drain the queue FIFO so the next typed-while-busy
                 // message fires automatically without the user having
                 // to click anything. Each drained message starts a
@@ -1634,8 +1665,44 @@
         StateHasChanged();
     }
 
+    // ---- Tab-visibility refresh (auto-update on /rename etc.) ----
+    private IJSObjectReference? _visibilityModule;
+    private IJSObjectReference? _visibilityWatcher;
+    private DotNetObjectReference<Home>? _selfRef;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        try
+        {
+            _visibilityModule = await JS.InvokeAsync<IJSObjectReference>(
+                "import", "./js/visibility.js");
+            _selfRef = DotNetObjectReference.Create(this);
+            _visibilityWatcher = await _visibilityModule.InvokeAsync<IJSObjectReference>(
+                "watch", _selfRef);
+        }
+        catch (Exception ex)
+        {
+            // JS interop can fail during prerender or in oddball hosts;
+            // a missing visibility watcher just degrades the auto-refresh
+            // behaviour to "user has to click the refresh button".
+            HubLog.LogWarning(
+                $"Failed to install tab-visibility watcher: {ex.Message}",
+                category: nameof(Home));
+        }
+    }
+
     public async ValueTask DisposeAsync()
     {
+        if (_visibilityWatcher is not null)
+        {
+            try { await _visibilityWatcher.InvokeVoidAsync("dispose"); } catch { }
+            await _visibilityWatcher.DisposeAsync();
+        }
+        if (_visibilityModule is not null)
+            await _visibilityModule.DisposeAsync();
+        _selfRef?.Dispose();
+
         // Component is being torn down -- snapshot the still-current
         // session under its own key so re-mounting (e.g. on hot-reload
         // during dev, or a router back-button) doesn't lose the chat.
