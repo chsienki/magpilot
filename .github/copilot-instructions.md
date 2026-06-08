@@ -1029,3 +1029,4 @@ they exist and don't accidentally re-litigate them.)
 - 2026-06-08: powershell one-liner that downloads, verifies and runs the installer as an easy bootstrap
 - 2026-06-08: drop 'past' sessions list, replace with 'resume previous' button that opens a filterable/searchable list
 - 2026-06-08: 'yolo' toggle when creating or resuming sessions, plus per-session yolo status next to 'show thinking'
+- 2026-06-08: combine heartbeat indicator with a 're-sync' option to recover when UI drifts from agent
