@@ -1031,3 +1031,4 @@ they exist and don't accidentally re-litigate them.)
 - 2026-06-08: 'yolo' toggle when creating or resuming sessions, plus per-session yolo status next to 'show thinking'
 - 2026-06-08: combine heartbeat indicator with a 're-sync' option to recover when UI drifts from agent
 - 2026-06-08: more obvious / interactive 'agent is thinking' indicator beyond the stop button and queue notification
+- 2026-06-08: bug -- queued messages lost on session switch / refresh; persist in local storage
