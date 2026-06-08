@@ -1029,3 +1029,4 @@ they exist and don't accidentally re-litigate them.)
 - 2026-06-08: fix overflow on repo box
 - 2026-06-08: make 'talking' icon be the magpie
 - 2026-06-08: cleanup status bar at top to be less confusing
+- 2026-06-08: powershell one-liner that downloads, verifies and runs the installer as an easy bootstrap
