@@ -455,6 +455,49 @@ with a 500ms timeout. Failures are silent. See `Magpilot.Host/UpdateBanner.cs`.
   unscheduled. See `installer/README.md` -> "Headless / SSH-driven
   install" for the workarounds.
 
+### Quick-install bootstrap (`scripts/install.ps1`)
+
+The one-liner install path documented in the README:
+
+```pwsh
+irm https://raw.githubusercontent.com/chsienki/magpilot/main/scripts/install.ps1 | iex
+```
+
+Lives at `scripts/install.ps1`. Logic:
+
+1. Fetch `version.json` from `/releases/latest/download/` (302-redirected
+   to the most recently published non-draft release) to discover the
+   current semver. No GitHub API token required.
+2. Build the installer + checksum asset URLs from the tag (`v<semver>`).
+3. Download both to a unique `%TEMP%\magpilot-install-<rand>\` dir.
+4. Verify SHA256 -- bail if it doesn't match the `.sha256` file.
+5. `Start-Process -Verb RunAs` to launch the installer with UAC
+   elevation. `-Silent` adds `/SILENT` for unattended runs.
+6. Preserve temp artifacts on success or failure so a partial install
+   can be re-run without re-downloading.
+
+Parameters (use the scriptblock form to pass them through `irm | iex`):
+
+```pwsh
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/chsienki/magpilot/main/scripts/install.ps1))) -Silent
+```
+
+* `-Repo <owner/repo>` -- override the source repo (forks, mirrors).
+* `-Version <semver>` -- pin to a specific version instead of latest.
+* `-Silent` -- pass `/SILENT` to Inno; wizard runs unattended.
+* `-DryRun` -- download + verify only; don't run.
+
+**Failure modes worth knowing:**
+* If the latest release is still a **draft**, `releases/latest/download/`
+  returns 404 (same trap as the hub's autoupdate flow). Publish the
+  draft (`gh release edit vX.Y.Z --draft=false`) before pointing users
+  at the one-liner.
+* If the repo is **private**, the redirect target requires auth that
+  `Invoke-WebRequest`'s anonymous call can't supply. The script
+  doesn't try to handle this; use the manual download flow off the
+  Releases page instead, or fork to a public mirror and point
+  `-Repo` at it.
+
 ### Autoupdate visibility: two ways the chain silently breaks
 
 The hub-mediated autoupdate path relies on `releases/latest` returning
@@ -1159,7 +1202,7 @@ Open items:
 
 - 2026-05-18: agent/hub connect handshake -- either a single condensed token bundling all connection info, or a UDP discovery mode (think WPS but for agents and the hub) so users don't have to copy a bunch of random strings
 - 2026-06-08: cleanup status bar at top to be less confusing
-- 2026-06-08: powershell one-liner that downloads, verifies and runs the installer as an easy bootstrap
+- ~~2026-06-08: powershell one-liner that downloads, verifies and runs the installer as an easy bootstrap~~ -> shipped: `scripts/install.ps1` -- fetches version.json from /releases/latest/download/, downloads the installer + .sha256, verifies, runs with UAC elevation. README has the canonical `irm ... | iex` one-liner; instructions have the parameter-passing scriptblock form for `-Silent` / `-Version` / `-Repo` / `-DryRun`. Documented draft + private-repo failure modes alongside the hub-autoupdate ones.
 - 2026-06-08: drop 'past' sessions list, replace with 'resume previous' button that opens a filterable/searchable list
 - 2026-06-08: combine heartbeat indicator with a 're-sync' option to recover when UI drifts from agent
 - 2026-06-08: more obvious / interactive 'agent is thinking' indicator beyond the stop button and queue notification

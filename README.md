@@ -151,6 +151,31 @@ dotnet run --project src/Magpilot.Hub
 
 See `deploy/README.md` for the LXC docker recipe.
 
+## Install (Windows agent + launcher)
+
+One-liner from a Windows PowerShell (admin not required upfront -- the
+installer asks for elevation when it needs it):
+
+```pwsh
+irm https://raw.githubusercontent.com/chsienki/magpilot/main/scripts/install.ps1 | iex
+```
+
+That downloads the latest signed installer from
+[Releases](https://github.com/chsienki/magpilot/releases), verifies its
+SHA256 against the matching `.sha256` asset, and runs it. The wizard's
+Settings page collects the hub URL + agent token + public URL on a
+fresh install, and pre-populates them from `magpilot.env` on an upgrade.
+
+For unattended installs, fetch the script as a block so you can pass
+flags:
+
+```pwsh
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/chsienki/magpilot/main/scripts/install.ps1))) -Silent
+```
+
+After install, future upgrades go through `magpilot --magpilot-update`
+(same SHA256-verified path; preserves the existing config).
+
 ## Architectural law
 
 > **Satellites know about magpilot. Magpilot does NOT know about satellites.**
