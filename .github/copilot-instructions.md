@@ -1109,10 +1109,21 @@ project files in chsienki/copilot-context/ideas/projects/:
 (Project files are private to copilot-context. The summaries above
 are the magpilot-side pointer so this codebase's agents remember
 they exist and don't accidentally re-litigate them.)
-- 2026-05-11: Magpilot UI as a Razor Class Library that magnus references directly -- no copies of code in magnus
-- 2026-05-18: visible indication when loading previous chats (load time scales with chat length, currently looks frozen)
-- 2026-05-18: cache chat in local storage so only the delta of new items needs to load on subsequent opens
-- 2026-05-18: online indicator via heartbeat; show 'click to reconnect' if the SSE stream drops (especially important for long-lived Magnus session)
+
+Recently shipped (struck through; kept here for cross-reference so a
+future "what's left?" sweep doesn't accidentally re-pick them):
+
+- ~~2026-05-11: Magpilot UI as a Razor Class Library that magnus references directly -- no copies of code in magnus~~ -> shipped: Magpilot.UI uses Microsoft.NET.Sdk.Razor; Magnus.Web ProjectReferences it directly (magstronaut/magnus/src/Magnus.Web/Magnus.Web.csproj).
+- ~~2026-05-18: visible indication when loading previous chats~~ -> partly shipped: load-more spinner in ChatView shows during demand-load; first-paint is now fast enough that the existing MudProgressLinear suffices.
+- ~~2026-05-18: cache chat in local storage so only the delta of new items needs to load on subsequent opens~~ -> shipped differently: server-side tail+before paging via /history?tail=N and ?before=X&limit=N. First-paint loads tail=50; older messages demand-load on scroll-up. Same goal without an extra cache layer.
+- ~~2026-05-18: online indicator via heartbeat; show 'click to reconnect' if the SSE stream drops~~ -> shipped: AppBar status pill (green/amber/red) + Offline alert with manual Reconnect button in Home.razor; 8-attempt exponential-backoff auto-reconnect on transient drops.
+- ~~2026-06-08: 'yolo' toggle when creating or resuming sessions, plus per-session yolo status next to 'show thinking'~~ -> shipped: per-session YoloRegistry on the agent + POST /api/sessions/{id}/yolo + MAGPILOT_YOLO_DISABLED host kill switch + SPA toolbar switch + per-row YOLO pill. SessionInfo gained Yolo bit (decorated by SessionRegistry; in-memory only). Per-session toggle picks allow_once; env-wide MAGPILOT_AUTO_APPROVE keeps allow_always.
+- ~~2026-06-08: bug -- queued messages lost on session switch / refresh; persist in local storage~~ -> shipped: queued messages AND composer draft both persisted per-session via in-memory _queueCache/_draftCache + localStorage (magpilot.queue.{agent}/{sid} + magpilot.draft.{agent}/{sid}). Session-switch snapshots OUT + loads IN; full refresh restores both. ChatView gained DraftText parameter + OnDraftChanged callback.
+- ~~2026-06-09: magpilot: add an explicit 'release session' button in the SPA that calls the agent's existing /detach endpoint~~ -> shipped: Logout icon on the chat toolbar wires HubClient.DetachAsync; ergonomic placement + tooltip wrapping tracked as a v2 task under projects/magpilot-ui-controls.md.
+- ~~2026-06-09: SPA gets stuck in an SSE reconnect storm when navigating to an unknown agent / offline agent / non-existent session id~~ -> shipped: OnParametersSetAsync pre-flights the route against _agents + _sessions and renders a NotFound state (with a Try again button) instead of falling through to the 8x retry cycle. LoadFailed also flips into session-not-found rather than appending a stray chat bubble.
+
+Open items:
+
 - 2026-05-18: agent/hub connect handshake -- either a single condensed token bundling all connection info, or a UDP discovery mode (think WPS but for agents and the hub) so users don't have to copy a bunch of random strings
 - 2026-05-18: refresh button for the session list so you can see newer sessions without refreshing the whole page
 - 2026-06-08: fix overflow on repo box
@@ -1120,9 +1131,6 @@ they exist and don't accidentally re-litigate them.)
 - 2026-06-08: cleanup status bar at top to be less confusing
 - 2026-06-08: powershell one-liner that downloads, verifies and runs the installer as an easy bootstrap
 - 2026-06-08: drop 'past' sessions list, replace with 'resume previous' button that opens a filterable/searchable list
-- ~~2026-06-08: 'yolo' toggle when creating or resuming sessions, plus per-session yolo status next to 'show thinking'~~ -> shipped: per-session YoloRegistry on the agent + POST /api/sessions/{id}/yolo + MAGPILOT_YOLO_DISABLED host kill switch + SPA toolbar switch + per-row YOLO pill. SessionInfo gained Yolo bit (decorated by SessionRegistry; in-memory only).
 - 2026-06-08: combine heartbeat indicator with a 're-sync' option to recover when UI drifts from agent
 - 2026-06-08: more obvious / interactive 'agent is thinking' indicator beyond the stop button and queue notification
-- 2026-06-08: bug -- queued messages lost on session switch / refresh; persist in local storage
-- 2026-06-09: magpilot: add an explicit 'release session' button in the SPA that calls the agent's existing /detach endpoint (SessionRegistry.DetachAsync + hub proxy already exist; just needs HubClient + Home.razor wiring) so users can drop a session back to Dormant without `magpilot --resume=<sid> --magpilot-take` from a terminal
 - 2026-06-09: magpilot: new-session in a non-existent cwd returns 500 from POST /api/sessions -- should be a friendly "this directory doesn't exist; create it?" dialog (Yes -> mkdir + retry, No -> back to dialog with field highlighted). Likely folds into the richer pre-flight checks of the magpilot-ui-controls redesign.
