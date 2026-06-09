@@ -1034,3 +1034,4 @@ they exist and don't accidentally re-litigate them.)
 - 2026-06-08: more obvious / interactive 'agent is thinking' indicator beyond the stop button and queue notification
 - 2026-06-08: bug -- queued messages lost on session switch / refresh; persist in local storage
 - 2026-06-09: magpilot: add an explicit 'release session' button in the SPA that calls the agent's existing /detach endpoint (SessionRegistry.DetachAsync + hub proxy already exist; just needs HubClient + Home.razor wiring) so users can drop a session back to Dormant without `magpilot --resume=<sid> --magpilot-take` from a terminal
+- 2026-06-09: magpilot: new-session in a non-existent cwd returns 500 from POST /api/sessions -- should be a friendly "this directory doesn't exist; create it?" dialog (Yes -> mkdir + retry, No -> back to dialog with field highlighted). Likely folds into the richer pre-flight checks of the magpilot-ui-controls redesign.
