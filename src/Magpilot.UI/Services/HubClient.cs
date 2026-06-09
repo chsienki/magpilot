@@ -34,16 +34,18 @@ public sealed class HubClient
     public sealed record MeInfo(string? Identity);
 
     /// <summary>
-    /// Fetch the enrollment bundle for pairing a new agent with this
-    /// hub. Returns the encoded bundle string ("magpilot1+...") on
-    /// success. Throws <see cref="EnrollmentNotReadyException"/> with
-    /// the hub's explanation when the hub isn't fully configured to
-    /// issue bundles yet (e.g. running with dev defaults; missing
-    /// MAGPILOT_HUB_PUBLIC_URL).
+    /// Mint a fresh one-time enrollment voucher on the hub. Each call
+    /// produces a different voucher (15min TTL, single-use). Returns
+    /// the encoded bundle string ("magpilot2+...") the user pastes
+    /// into <c>magpilot --magpilot-pair=&lt;bundle&gt;</c>. Throws
+    /// <see cref="EnrollmentNotReadyException"/> with the hub's
+    /// explanation when the hub isn't configured to issue vouchers
+    /// yet (typically: missing MAGPILOT_HUB_PUBLIC_URL or running
+    /// with the dev defaults).
     /// </summary>
-    public async Task<string> GetEnrollmentBundleAsync(CancellationToken ct = default)
+    public async Task<string> CreateEnrollmentVoucherAsync(CancellationToken ct = default)
     {
-        var resp = await _http.GetAsync("api/admin/enroll/bundle", ct);
+        var resp = await _http.PostAsync("api/admin/enroll/voucher", content: null, ct);
         if (resp.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable)
         {
             string? hint = null;
@@ -53,12 +55,12 @@ public sealed class HubClient
                 if (body.TryGetProperty("error", out var e)) hint = e.GetString();
             }
             catch { /* malformed body -- fall through with the default hint */ }
-            throw new EnrollmentNotReadyException(hint ?? "The hub isn't configured to issue enrollment bundles yet.");
+            throw new EnrollmentNotReadyException(hint ?? "The hub isn't configured to issue enrollment vouchers yet.");
         }
         resp.EnsureSuccessStatusCode();
         var ok = await resp.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: ct);
         return ok.GetProperty("encoded").GetString()
-            ?? throw new InvalidOperationException("Enrollment bundle response had no 'encoded' field.");
+            ?? throw new InvalidOperationException("Enrollment voucher response had no 'encoded' field.");
     }
 
     public Task<List<AgentInfo>?> ListAgentsAsync(CancellationToken ct = default) =>

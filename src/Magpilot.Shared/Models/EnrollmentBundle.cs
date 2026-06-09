@@ -4,31 +4,30 @@ using System.Text.Json;
 namespace Magpilot.Shared.Models;
 
 /// <summary>
-/// The three-secret bundle the magpilot launcher uses to "pair" a fresh
-/// agent install with a hub in one paste. Returned by the hub's
-/// <c>GET /api/admin/enroll/bundle</c> endpoint, consumed by the
-/// launcher's <c>--magpilot-pair=&lt;bundle&gt;</c> subcommand.
+/// V2 enrollment bundle: a one-time voucher the user pastes into
+/// <c>magpilot --magpilot-pair=&lt;bundle&gt;</c> on a fresh agent
+/// install. Unlike V1, the bundle does NOT carry an agent token --
+/// the launcher redeems the voucher against the hub's
+/// <c>POST /api/enroll/redeem</c> endpoint, and the hub mints a
+/// per-agent token in response. This decouples enrollment from
+/// long-lived shared secrets: a voucher is time-limited
+/// (15min default), single-use, and the resulting per-agent token
+/// can be revoked without affecting other agents.
 ///
-/// Wire format: <c>magpilot1+&lt;base64url(JSON)&gt;</c>. The version
-/// prefix lets the launcher reject bundles it doesn't know how to read
-/// (e.g. a future <c>magpilot2+...</c> bundle that adds per-agent
-/// tokens) with a clear "upgrade your launcher" message rather than
-/// silently corrupting <c>magpilot.env</c>.
-///
-/// The agent's own public URL (<c>MAGPILOT_AGENT_PUBLIC_URL</c>) is
-/// deliberately NOT in the bundle -- it's machine-specific and the
-/// agent already auto-detects via <c>DiscoveryResponder.ResolveSelfUrl</c>
-/// when the env var is unset.
+/// Wire format: <c>magpilot2+&lt;base64url(JSON)&gt;</c>. V1's
+/// <c>magpilot1+</c> format is no longer recognized (we control all
+/// hubs + agents in deployment; backwards compat would be carrying
+/// dead code).
 /// </summary>
 public sealed record EnrollmentBundle(
     string HubUrl,
-    string AgentToken,
+    string Voucher,
     string HubBearer)
 {
-    private const string Prefix = "magpilot1+";
+    private const string Prefix = "magpilot2+";
 
     /// <summary>
-    /// Serialize to the wire string (<c>magpilot1+&lt;base64url&gt;</c>).
+    /// Serialize to the wire string (<c>magpilot2+&lt;base64url&gt;</c>).
     /// </summary>
     public string Encode()
     {
@@ -38,9 +37,9 @@ public sealed record EnrollmentBundle(
 
     /// <summary>
     /// Try to parse a bundle string. Returns false for an unknown
-    /// prefix (foreign / future versions) or malformed payload; the
-    /// caller is expected to surface a user-friendly error in either
-    /// case.
+    /// prefix (e.g. a leftover V1 <c>magpilot1+</c> bundle) or
+    /// malformed payload; the caller is expected to surface a
+    /// user-friendly error in either case.
     /// </summary>
     public static bool TryDecode(string? encoded, out EnrollmentBundle? bundle, out string? error)
     {
@@ -55,7 +54,7 @@ public sealed record EnrollmentBundle(
         encoded = encoded.Trim();
         if (!encoded.StartsWith(Prefix, StringComparison.Ordinal))
         {
-            error = $"Unknown bundle format. Expected a string starting with '{Prefix}'; this might be from a newer magpilot. Upgrade with 'magpilot --magpilot-update'.";
+            error = $"Unknown bundle format. Expected a string starting with '{Prefix}'. Generate a fresh bundle from the hub's /admin/enroll page.";
             return false;
         }
 
@@ -71,10 +70,10 @@ public sealed record EnrollmentBundle(
                 return false;
             }
             if (string.IsNullOrWhiteSpace(parsed.HubUrl)
-                || string.IsNullOrWhiteSpace(parsed.AgentToken)
+                || string.IsNullOrWhiteSpace(parsed.Voucher)
                 || string.IsNullOrWhiteSpace(parsed.HubBearer))
             {
-                error = "Bundle is missing one of the required fields (hubUrl, agentToken, hubBearer).";
+                error = "Bundle is missing one of the required fields (hubUrl, voucher, hubBearer).";
                 return false;
             }
             bundle = parsed;
@@ -93,6 +92,23 @@ public sealed record EnrollmentBundle(
         WriteIndented = false,
     };
 }
+
+/// <summary>
+/// Request body for <c>POST /api/enroll/redeem</c>. Sent by the
+/// launcher when consuming an enrollment voucher.
+/// </summary>
+public sealed record EnrollmentRedeemRequest(
+    string Voucher,
+    string AgentName);
+
+/// <summary>
+/// Response body for <c>POST /api/enroll/redeem</c>. The hub mints
+/// a fresh per-agent token in response to a successful redeem; the
+/// launcher writes it into <c>MAGPILOT_AGENT_TOKEN</c> in
+/// <c>magpilot.env</c>.
+/// </summary>
+public sealed record EnrollmentRedeemResponse(
+    string AgentToken);
 
 /// <summary>
 /// Minimal base64url (RFC 4648 §5) codec. The .NET BCL has
@@ -120,3 +136,4 @@ internal static class Base64Url
         };
     }
 }
+

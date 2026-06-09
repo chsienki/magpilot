@@ -11,25 +11,63 @@ public static class HubEndpoints
 {
     public static void MapHubApi(this IEndpointRouteBuilder routes)
     {
+        // V2a pairing: voucher redeem is intentionally OUTSIDE the
+        // auth group. The voucher IS the auth -- a fresh agent install
+        // has no cookie + no bearer; the act of presenting a valid,
+        // unconsumed, unexpired voucher is what proves the caller has
+        // permission to enroll. Authenticated bearer endpoints + cookie
+        // endpoints still flow through the `api` group below.
+        routes.MapPost("/api/enroll/redeem",
+            (Magpilot.Shared.Models.EnrollmentRedeemRequest req,
+             Magpilot.Hub.Auth.EnrollmentService enrol,
+             HttpContext ctx) =>
+            {
+                if (string.IsNullOrWhiteSpace(req.Voucher) || string.IsNullOrWhiteSpace(req.AgentName))
+                    return Results.BadRequest(new { error = "voucher and agentName are required" });
+
+                // We deliberately do NOT take the agent's URL on the
+                // redeem call -- the agent will broadcast its own URL
+                // on the next discovery sweep and the hub will record it
+                // there. This keeps the agent name as the only identity
+                // the redeem flow has to trust.
+                var result = enrol.RedeemVoucher(req.Voucher, req.AgentName, agentUrl: null);
+                return result.Status switch
+                {
+                    Magpilot.Hub.Auth.EnrollmentService.RedeemStatus.Ok =>
+                        Results.Ok(new Magpilot.Shared.Models.EnrollmentRedeemResponse(result.AgentToken!)),
+                    Magpilot.Hub.Auth.EnrollmentService.RedeemStatus.InvalidVoucher =>
+                        Results.Json(new { error = result.Message ?? "invalid voucher" }, statusCode: StatusCodes.Status401Unauthorized),
+                    // 410 Gone: the resource (this voucher) is permanently
+                    // unavailable -- either expired or already consumed.
+                    // Distinguishing the two in the body lets the launcher
+                    // show a useful error ("ask for a fresh one" vs "looks
+                    // like someone else used it").
+                    Magpilot.Hub.Auth.EnrollmentService.RedeemStatus.Expired
+                        or Magpilot.Hub.Auth.EnrollmentService.RedeemStatus.AlreadyConsumed =>
+                        Results.Json(new { error = result.Message }, statusCode: StatusCodes.Status410Gone),
+                    _ => Results.Problem("unknown redeem result"),
+                };
+            });
+
         var api = routes.MapGroup("/api").RequireAuthorization();
 
         api.MapGet("/me", (HttpContext ctx) =>
             Results.Ok(new { identity = ctx.User.Identity?.Name }));
 
-        // Pairing V1: return the encoded EnrollmentBundle for the current
-        // hub config. Cookie-auth-gated (the api group already requires
+        // V2a pairing: mint a one-time enrollment voucher for a fresh
+        // agent install. Cookie-auth-gated (this admin group requires
         // auth); a signed-in user is implicitly authorized to issue
-        // enrollment bundles. Returns 503 + a hint when the hub itself
-        // isn't fully configured (e.g. running with the dev defaults) so
-        // the SPA can render a setup pointer instead of a bundle the
-        // user can't actually use.
-        api.MapGet("/admin/enroll/bundle", (Magpilot.Hub.Auth.EnrollmentService enrol) =>
-        {
-            var bundle = enrol.TryBuild(out var err);
-            if (bundle is null)
-                return Results.Json(new { error = err }, statusCode: StatusCodes.Status503ServiceUnavailable);
-            return Results.Ok(new { encoded = bundle.Encode() });
-        });
+        // vouchers. Returns 503 + a hint when the hub itself isn't
+        // configured to issue vouchers yet (typically: missing
+        // MAGPILOT_HUB_PUBLIC_URL or running with the dev hub bearer).
+        api.MapPost("/admin/enroll/voucher",
+            (Magpilot.Hub.Auth.EnrollmentService enrol, HttpContext ctx) =>
+            {
+                var bundle = enrol.CreateVoucher(ctx.User.Identity?.Name, out var err);
+                if (bundle is null)
+                    return Results.Json(new { error = err }, statusCode: StatusCodes.Status503ServiceUnavailable);
+                return Results.Ok(new { encoded = bundle.Encode() });
+            });
 
         // Hub's view of the latest released agent/launcher version. Populated
         // by ReleaseTracker (background polls of GitHub Releases). The agent
@@ -67,41 +105,19 @@ public static class HubEndpoints
 
         api.MapGet("/agents", (AgentRegistry reg) => reg.List());
 
-        api.MapPost("/agents", async (AgentRegistrationRequest req, AgentRegistry reg, AgentHttpClient http, ILoggerFactory lf) =>
-        {
-            // Initial register so GetToken works for the probe below.
-            reg.Upsert(req.Name, req.Url, req.Token, online: true);
-
-            // Best-effort: ask the agent for its capabilities so the SPA can
-            // surface flavor-gated UI. We don't fail registration if this
-            // doesn't work -- the agent is still usable, just without flavor
-            // metadata until the next discovery sweep populates it.
-            var log = lf.CreateLogger("AgentRegister");
-            try
-            {
-                var info = await http.ClientFor(req.Name).GetFromJsonAsync<AgentInfoReply>("api/info");
-                if (info?.Flavors is { Count: > 0 } flavors)
-                {
-                    reg.Upsert(req.Name, req.Url, req.Token, online: true, flavors: flavors);
-                    log.LogInformation("Registered {Name} with flavors: {Flavors}",
-                        req.Name, string.Join(", ", flavors));
-                }
-            }
-            catch (Exception ex)
-            {
-                log.LogWarning(ex, "Could not fetch /api/info from {Name} during registration", req.Name);
-            }
-
-            return Results.NoContent();
-        });
-
+        // V2a pairing: the manual POST /api/agents register endpoint
+        // is gone. The only way to add an agent to the registry now is
+        // via the voucher-redeem flow (POST /api/enroll/redeem) -- that
+        // mints the per-agent token alongside the registration entry,
+        // so there's no point where the hub has a registered agent
+        // with no credentials. DELETE is still useful for kicking an
+        // agent out of the registry.
         api.MapDelete("/agents/{name}", (string name, AgentRegistry reg) =>
             reg.Remove(name) ? Results.NoContent() : Results.NotFound());
 
-        api.MapPost("/agents/discover", async (DiscoveryProber prober, IConfiguration cfg, CancellationToken ct) =>
+        api.MapPost("/agents/discover", async (DiscoveryProber prober, CancellationToken ct) =>
         {
-            var token = cfg["Hub:DefaultAgentToken"] ?? Environment.GetEnvironmentVariable("MAGPILOT_AGENT_TOKEN");
-            await prober.ProbeOnceAsync(token, ct);
+            await prober.ProbeOnceAsync(ct);
             return Results.NoContent();
         });
 
@@ -326,8 +342,3 @@ public static class HubEndpoints
 }
 
 public sealed record PushSubscriptionDto(string Kind, string Endpoint, string? KeysJson, string? UserAgent);
-
-public sealed record AgentRegistrationRequest(string Name, string Url, string? Token);
-
-/// <summary>Minimal projection of the agent's <c>/api/info</c> response we need.</summary>
-internal sealed record AgentInfoReply(string? Name, string? Os, IReadOnlyList<string>? Flavors);

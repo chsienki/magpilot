@@ -175,7 +175,6 @@ dotnet run --project src/Magpilot.Agent
 # Build SPA + copy into hub wwwroot, then run hub (terminal 2)
 ./scripts/build-hub.ps1
 $env:MAGPILOT_HUB_BEARER       = "dev-bearer"
-$env:MAGPILOT_AGENT_TOKEN      = "dev-token"
 $env:MAGPILOT_DEV_BYPASS_AUTH  = "true"
 $env:ASPNETCORE_URLS            = "http://localhost:7088"
 dotnet run --project src/Magpilot.Hub
@@ -240,7 +239,6 @@ dotnet run --project src/Magpilot.Agent
 #    overrides ASPNETCORE_URLS and the hub binds to :5154 instead of :7088.
 #    --no-build skips rebuild when build-hub.ps1 already published.
 $env:MAGPILOT_HUB_BEARER       = "dev-bearer"
-$env:MAGPILOT_AGENT_TOKEN      = "dev-token"
 $env:MAGPILOT_DEV_BYPASS_AUTH  = "true"
 $env:ASPNETCORE_URLS           = "http://0.0.0.0:7088"
 dotnet run --project src/Magpilot.Hub --no-launch-profile --no-build
@@ -349,7 +347,7 @@ with the installed agent" above.
 
 | Var | Where | Purpose |
 |---|---|---|
-| `MAGPILOT_AGENT_TOKEN` | agent + hub | Shared bearer secret hub uses to call agents. **Must match.** |
+| `MAGPILOT_AGENT_TOKEN` | agent | The agent's own bearer secret for inbound calls from the hub. **Per-agent** (V2a of magpilot-pairing): minted on enrollment by the hub's voucher-redeem flow; the launcher writes it into `magpilot.env` and the hub stores the matching value in `agents.token`. The hub does NOT read this env var anymore -- it looks up the per-agent token from its own database, keyed by agent name. |
 | `MAGPILOT_AGENT_PUBLIC_URL` | agent | URL the agent broadcasts in UDP discovery so the hub can call back. |
 | `MAGPILOT_AGENT_NAME` | agent (optional) | Source label used for central log forwarding. Defaults to hostname. |
 | `MAGPILOT_HUB_URL` | agent (optional) | Hub base URL the agent posts forwarded logs to (e.g. `http://192.168.1.239:7088`). Forwarder is a no-op if unset. |
@@ -501,7 +499,7 @@ Parameters (use the scriptblock form to pass them through `irm | iex`):
   Releases page instead, or fork to a public mirror and point
   `-Repo` at it.
 
-### Pairing V1 (`magpilot --magpilot-pair=<bundle>`)
+### Pairing V2a (`magpilot --magpilot-pair=<bundle>`)
 
 The installer no longer collects hub URL / agent token / hub bearer
 during install (the Settings page is gone; see the `magpilot-pairing`
@@ -509,67 +507,99 @@ project file in copilot-context for the full design). Fresh installs
 land in a "disconnected" state:
 
 * `install-task.ps1` creates a minimal `magpilot.env` with just a
-  CSPRNG-strength random `MAGPILOT_AGENT_TOKEN` (so the agent has a
-  unique LAN bearer instead of the dev default that anyone could
-  guess) and nothing else.
+  CSPRNG-strength random `MAGPILOT_AGENT_TOKEN` placeholder (so the
+  agent has a unique LAN bearer instead of the dev default that
+  anyone could guess) and nothing else.
 * Agent boots, listens on `:5099`, but has no hub to talk to and no
   ACP work to do until paired.
 
-The hub-side admin page at `/admin/enroll` (rendered by
-`Magpilot.UI/Pages/Enroll.razor`, served by the hub's SPA) calls
-`GET /api/admin/enroll/bundle` and displays the encoded result. The
-endpoint returns 503 with an explanatory hint when the hub is missing
-a required config value (dev defaults, no `MAGPILOT_HUB_PUBLIC_URL`,
-etc.) so the SPA can render a "fix this first" pointer instead of an
-unusable bundle.
+V2a uses **voucher-based enrollment**: each pairing mints a fresh
+per-agent token. There's no shared `MAGPILOT_AGENT_TOKEN` on the hub
+anymore -- the hub looks up per-agent bearers from its own database
+keyed by agent name. An agent that hasn't been paired is unreachable
+from the hub (the placeholder token in its `magpilot.env` has no
+matching row); the act of pairing IS what registers the agent + its
+bearer with the hub.
 
-Bundle wire format -- defined in `EnrollmentBundle.cs` in
+**Voucher lifecycle:**
+
+1. Authenticated SPA visitor opens `/admin/enroll` and clicks "Create
+   voucher". The SPA POSTs to `/api/admin/enroll/voucher`; the hub
+   mints a 32-byte CSPRNG secret, stores only its SHA256 (the
+   `vouchers` table never holds plaintext), sets a 15-minute TTL,
+   and returns an `EnrollmentBundle{ HubUrl, Voucher, HubBearer }`
+   encoded as `magpilot2+<base64url(JSON)>`.
+2. User copies the bundle, runs `magpilot --magpilot-pair=<bundle>`
+   on the fresh agent machine.
+3. Launcher decodes, POSTs `/api/enroll/redeem` (UNAUTHENTICATED --
+   the voucher IS the auth) with `{ voucher, agentName }`. Hub does
+   an atomic check-and-consume inside a single transaction:
+   verifies the hash matches an issued voucher, verifies not
+   expired, verifies not already consumed. On success: mints a
+   fresh 32-byte agent token, marks the voucher consumed, upserts
+   the agent row with the new token, returns `{ agentToken }`.
+4. Launcher writes `MAGPILOT_HUB_URL`, `MAGPILOT_AGENT_TOKEN`
+   (minted), `MAGPILOT_HUB_BEARER` into `magpilot.env` (in-place
+   upsert preserving comments + unrelated keys; atomic temp + move),
+   then bounces the installed `MagpilotAgent` scheduled task.
+
+**Failure semantics on `/api/enroll/redeem`:**
+
+| Status | Cause |
+|---|---|
+| 200 | Success: `{ agentToken }` in body. |
+| 400 | Missing `voucher` or `agentName`. |
+| 401 | Voucher hash doesn't match any issued. |
+| 410 Gone | Voucher expired OR already consumed. Body's `error` field distinguishes. |
+
+The launcher maps each non-200 to a user-facing hint that includes
+"generate a fresh one on the hub's /admin/enroll page" so the recovery
+action is obvious.
+
+**Bundle wire format** -- defined in `EnrollmentBundle.cs` in
 `Magpilot.Shared`:
 
 ```
-magpilot1+<base64url(JSON)>
+magpilot2+<base64url(JSON)>
 ```
 
-JSON payload: `{ hubUrl, agentToken, hubBearer }`. The
-`magpilot1+` prefix is the version sentinel -- a future
-`magpilot2+...` format (e.g. per-agent tokens with a TTL) will be
-rejected by the V1 launcher with a clear "upgrade with
-`magpilot --magpilot-update`" message rather than silent
-corruption of `magpilot.env`. The agent's
-`MAGPILOT_AGENT_PUBLIC_URL` is **deliberately not** in the bundle:
-it's machine-specific and `DiscoveryResponder.ResolveSelfUrl`
-auto-detects from the hub's source IP when unset.
+JSON payload: `{ hubUrl, voucher, hubBearer }`. **No agentToken in
+the bundle** -- it's minted on redeem. V1's `magpilot1+` format is
+gone; the V2 launcher only decodes `magpilot2+`. The agent's
+`MAGPILOT_AGENT_PUBLIC_URL` is also not in the bundle:
+machine-specific, `DiscoveryResponder.ResolveSelfUrl` auto-detects
+from the hub's source IP when unset.
 
-`MagpilotPair.RunAsync` (`src/Magpilot.Host/MagpilotPair.cs`):
+**Database** -- the V2a schema lives in `hub.db`:
 
-1. Decode + validate prefix + parse JSON; bail with a clear error
-   on any failure.
-2. Locate `magpilot.env` -- preference order matches the agent's
-   `EnvFileLoader`:
-   1. `MAGPILOT_ENV_FILE` env override.
-   2. `<launcher-exe>/../config/magpilot.env` (installer layout).
-   3. `%ProgramFiles%\Magpilot\config\magpilot.env` (last-resort
-      fallback).
-3. **Upsert** -- read existing lines; for each of the three keys,
-   replace in place if a non-comment `KEY=...` line exists, else
-   append under an "# Added by magpilot --magpilot-pair" section.
-   Comments + blank lines + unrelated `KEY=VALUE` pairs are
-   preserved verbatim. Write atomically via temp + move so a
-   crash mid-write can't corrupt the file.
-4. On Windows, bounce the installed `MagpilotAgent` scheduled task
-   via `schtasks.exe /end` + `/run` so the agent re-reads the env
-   file. **Skipped when `MAGPILOT_ENV_FILE` was set** so a dev /
-   test run on a custom env file doesn't accidentally kill the
-   installed agent's session. The bounce is best-effort -- a missing
-   task or schtasks failure logs a one-line hint and exits 0.
+* `vouchers (id, secret_hash, created_at, expires_at, consumed_at, consumed_by_agent_name, created_by_user)` -- the hub stores only `SHA256(secret)`, never plaintext.
+* `agents` gains `enrolled_at`, `enrolled_via` (FK to `vouchers.id`), `revoked_at` (null = active). Per-agent token still lives in `agents.token` as it always did; V2a just stops sharing a single value.
+* `AgentRegistry.InitDb` runs the migration idempotently via `PRAGMA table_info` -- safe to upgrade in place.
 
-**Gotcha that has already bitten dev runs**: running
-`--magpilot-pair` without `MAGPILOT_ENV_FILE` set on a machine
-where the installed `MagpilotAgent` task is configured will bounce
-the installed agent. If a `dotnet run --project src/Magpilot.Agent`
-dev agent is bound to `:5099`, the installed task will fight for
-the port, one of the two will lose. Always set `MAGPILOT_ENV_FILE`
-to a throwaway path when testing pair from source.
+**MagpilotPair.RunAsync** (`src/Magpilot.Host/MagpilotPair.cs`):
+
+1. Decode `magpilot2+` bundle.
+2. Redeem the voucher via `POST /api/enroll/redeem` against
+   `bundle.HubUrl` BEFORE touching disk -- a failed redeem (the
+   most common failure mode) doesn't leave a half-updated
+   `magpilot.env`.
+3. Locate `magpilot.env` (same chain as `EnvFileLoader`):
+   `MAGPILOT_ENV_FILE` override -> `<launcher-exe>/../config/magpilot.env` ->
+   `%ProgramFiles%\Magpilot\config\magpilot.env`.
+4. Upsert the three keys in place (preserve comments, blanks,
+   unrelated key/values). Atomic write via temp + move.
+5. On Windows, bounce the installed `MagpilotAgent` scheduled task
+   via `schtasks.exe`. **Skipped when `MAGPILOT_ENV_FILE` is set**
+   so a dev / test run on a custom env file doesn't kill an
+   unrelated installed agent.
+
+**Gotcha that bit a dev run**: running `--magpilot-pair` without
+`MAGPILOT_ENV_FILE` set on a machine where the installed
+`MagpilotAgent` task is configured WILL bounce the installed agent.
+If a `dotnet run --project src/Magpilot.Agent` dev agent is bound
+to `:5099`, the installed task will fight for the port and one
+will lose. Always set `MAGPILOT_ENV_FILE` to a throwaway path
+when testing pair from source.
 
 ### Autoupdate visibility: two ways the chain silently breaks
 
@@ -1273,7 +1303,7 @@ future "what's left?" sweep doesn't accidentally re-pick them):
 
 Open items:
 
-- ~~2026-05-18: agent/hub connect handshake -- either a single condensed token bundling all connection info, or a UDP discovery mode (think WPS but for agents and the hub) so users don't have to copy a bunch of random strings~~ -> partly shipped (V1): bundled-token paste via the hub's /admin/enroll page + `magpilot --magpilot-pair=<bundle>` launcher subcommand. Installer drops the Settings page; fresh installs are "disconnected" with just a random local AGENT_TOKEN, pair is the second step. UDP discovery + per-agent tokens + TTL deferred to V2 (see projects/magpilot-pairing.md log).
+- ~~2026-05-18: agent/hub connect handshake -- either a single condensed token bundling all connection info, or a UDP discovery mode (think WPS but for agents and the hub) so users don't have to copy a bunch of random strings~~ -> shipped V1 + V2a: V1 paste-bundle flow + installer drop of the Settings page (2026-06-09 morning); V2a per-agent tokens + voucher TTL/single-use enrollment via `POST /api/enroll/redeem` (2026-06-09 afternoon). UDP discovery + revocation UI deferred to V2b -- see projects/magpilot-pairing.md log.
 - 2026-06-08: cleanup status bar at top to be less confusing
 - ~~2026-06-08: powershell one-liner that downloads, verifies and runs the installer as an easy bootstrap~~ -> shipped: `scripts/install.ps1` -- fetches version.json from /releases/latest/download/, downloads the installer + .sha256, verifies, runs with UAC elevation. README has the canonical `irm ... | iex` one-liner; instructions have the parameter-passing scriptblock form for `-Silent` / `-Version` / `-Repo` / `-DryRun`. Documented draft + private-repo failure modes alongside the hub-autoupdate ones.
 - 2026-06-08: drop 'past' sessions list, replace with 'resume previous' button that opens a filterable/searchable list

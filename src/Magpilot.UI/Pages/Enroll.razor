@@ -3,18 +3,17 @@
 @inject NavigationManager Nav
 @inject ISnackbar Snackbar
 @inject IJSRuntime JS
+@implements IDisposable
 @using Magpilot.UI.Services
 
 @*
-    Pairing V1: show the current hub's enrollment bundle so the user
-    can paste it into `magpilot --magpilot-pair=<bundle>` on a fresh
-    agent install. Cookie-auth-gated (the server endpoint requires
-    auth), but we also surface a clear "this exposes secrets" warning
-    in case the user is screensharing.
-
-    Future V2 work (per-agent tokens, TTL, single-use enforcement)
-    will reshape this page significantly; for now it's a single
-    read-only field + Copy button.
+    Pairing V2a: voucher-based enrollment. Each click of "Create voucher"
+    mints a fresh 15-minute single-use bundle on the hub. The user pastes
+    it into `magpilot --magpilot-pair=<bundle>` on a freshly-installed
+    agent; the launcher redeems the voucher against /api/enroll/redeem
+    and the hub returns a per-agent token. Each agent gets its own
+    bearer; revoking one doesn't affect the others (revocation UI lands
+    in V2b).
 *@
 
 <MudLayout>
@@ -28,9 +27,10 @@
     <MudMainContent Class="mt-2 px-3">
         <MudContainer MaxWidth="MaxWidth.Medium" Class="py-4">
             <MudText Typo="Typo.body1" Class="mb-4">
-                Copy the bundle below, then run this command in a PowerShell
-                window on the new machine (after installing magpilot via the
-                <code>irm ... | iex</code> one-liner):
+                Generate a one-time enrollment voucher, then run this
+                command in a PowerShell window on the new machine (after
+                installing magpilot via the <code>irm ... | iex</code>
+                one-liner):
             </MudText>
 
             <MudPaper Elevation="0" Outlined="true" Class="pa-3 mb-4" Style="font-family: monospace; background: var(--mud-palette-background-grey);">
@@ -40,12 +40,18 @@
             </MudPaper>
 
             <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Dense="true" Class="mb-3">
-                This bundle contains the agent token + hub bearer for your
-                deployment. Copy it through a private channel; don't share
-                screen.
+                Each voucher is single-use and expires after 15 minutes.
+                The bundle includes the hub bearer for your deployment --
+                copy through a private channel; don't share screen.
             </MudAlert>
 
-            @if (_loading)
+            @if (_bundle is null && !_loading && _error is null)
+            {
+                <MudButton Variant="Variant.Filled" Color="Color.Primary"
+                           StartIcon="@Icons.Material.Filled.Add"
+                           OnClick="CreateAsync">Create voucher</MudButton>
+            }
+            else if (_loading)
             {
                 <MudPaper Elevation="0" Class="pa-3 d-flex align-center justify-center" Style="min-height: 120px;">
                     <MudProgressCircular Indeterminate="true" />
@@ -54,29 +60,34 @@
             else if (_error is not null)
             {
                 <MudAlert Severity="Severity.Error" Variant="Variant.Outlined" Class="mb-3">
-                    <MudText Typo="Typo.subtitle2" Class="mb-2">The hub isn't ready to issue bundles yet</MudText>
+                    <MudText Typo="Typo.subtitle2" Class="mb-2">The hub isn't ready to issue vouchers yet</MudText>
                     <MudText Typo="Typo.body2">@_error</MudText>
                 </MudAlert>
                 <MudButton Variant="Variant.Filled" Color="Color.Primary"
                            StartIcon="@Icons.Material.Filled.Refresh"
-                           OnClick="LoadAsync">Try again</MudButton>
+                           OnClick="CreateAsync">Try again</MudButton>
             }
             else if (_bundle is not null)
             {
                 <MudPaper Elevation="0" Outlined="true" Class="pa-3 mb-3" Style="font-family: monospace; word-break: break-all;">
                     @_bundle
                 </MudPaper>
-                <MudStack Row="true" Spacing="2">
+                <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center" Class="mb-2">
                     <MudButton Variant="Variant.Filled" Color="Color.Primary"
                                StartIcon="@Icons.Material.Filled.ContentCopy"
                                OnClick="CopyAsync">Copy bundle</MudButton>
                     <MudButton Variant="Variant.Text" Color="Color.Default"
-                               StartIcon="@Icons.Material.Filled.Refresh"
-                               OnClick="LoadAsync">Regenerate</MudButton>
+                               StartIcon="@Icons.Material.Filled.Add"
+                               OnClick="CreateAsync">New voucher</MudButton>
+                    <MudSpacer />
+                    <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
+                             Color="@(IsExpired ? Color.Error : (IsExpiringSoon ? Color.Warning : Color.Success))"
+                             Icon="@Icons.Material.Filled.Timer">
+                        @TtlLabel
+                    </MudChip>
                 </MudStack>
-                <MudText Typo="Typo.caption" Color="Color.Default" Class="mt-3 d-block">
-                    V1: "Regenerate" just refetches the current secrets; it doesn't rotate them.
-                    Per-agent tokens + revocation are planned for V2.
+                <MudText Typo="Typo.caption" Color="Color.Default" Class="d-block">
+                    The voucher above is single-use. Once consumed (or expired) it can't be redeemed again -- create a new one for each agent you want to pair.
                 </MudText>
             }
         </MudContainer>
@@ -84,21 +95,30 @@
 </MudLayout>
 
 @code {
-    private bool _loading = true;
+    private bool _loading;
     private string? _bundle;
     private string? _error;
+    // Local clock for the TTL countdown. Reset each time we mint a
+    // fresh voucher; ticked once a second so the chip label updates
+    // without polling the hub.
+    private DateTime? _bundleExpires;
+    private System.Threading.Timer? _ticker;
 
-    protected override async Task OnInitializedAsync() => await LoadAsync();
-
-    private async Task LoadAsync()
+    private async Task CreateAsync()
     {
         _loading = true;
         _error = null;
         _bundle = null;
+        _bundleExpires = null;
         StateHasChanged();
         try
         {
-            _bundle = await Hub.GetEnrollmentBundleAsync();
+            _bundle = await Hub.CreateEnrollmentVoucherAsync();
+            // Hub-side TTL is 15min; mirror it locally for the countdown.
+            // Slight drift between hub and SPA clocks is fine for a chip
+            // label -- the truth lives in the DB on redeem.
+            _bundleExpires = DateTime.UtcNow.AddMinutes(15);
+            StartTicker();
         }
         catch (EnrollmentNotReadyException ex)
         {
@@ -106,7 +126,7 @@
         }
         catch (Exception ex)
         {
-            _error = $"Could not fetch enrollment bundle: {ex.Message}";
+            _error = $"Could not create voucher: {ex.Message}";
         }
         finally
         {
@@ -128,4 +148,32 @@
             Snackbar.Add($"Copy failed: {ex.Message}", Severity.Error);
         }
     }
+
+    private TimeSpan? Remaining => _bundleExpires is null ? null : _bundleExpires.Value - DateTime.UtcNow;
+    private bool IsExpired => Remaining is { } r && r <= TimeSpan.Zero;
+    private bool IsExpiringSoon => Remaining is { } r && r > TimeSpan.Zero && r < TimeSpan.FromMinutes(2);
+
+    private string TtlLabel
+    {
+        get
+        {
+            if (Remaining is not { } r) return "no expiry";
+            if (r <= TimeSpan.Zero) return "expired";
+            if (r.TotalMinutes >= 1) return $"{(int)r.TotalMinutes}m {r.Seconds}s left";
+            return $"{r.Seconds}s left";
+        }
+    }
+
+    private void StartTicker()
+    {
+        _ticker?.Dispose();
+        _ticker = new System.Threading.Timer(_ => InvokeAsync(StateHasChanged), null,
+            TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+    }
+
+    public void Dispose()
+    {
+        _ticker?.Dispose();
+    }
 }
+

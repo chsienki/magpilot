@@ -177,23 +177,26 @@ flags:
 ```
 
 **2. Pair** with your hub. On the hub's web UI, open
-`https://<your-hub>/admin/enroll`, copy the bundle, then on the
-new machine:
+`https://<your-hub>/admin/enroll`, click **Create voucher**
+(15-minute single-use), copy the bundle, then on the new machine:
 
 ```pwsh
 magpilot --magpilot-pair=<paste-bundle-here>
 ```
 
-That decodes the three secrets the agent needs
-(`MAGPILOT_HUB_URL`, `MAGPILOT_AGENT_TOKEN`, `MAGPILOT_HUB_BEARER`),
-writes them into `%ProgramFiles%\Magpilot\config\magpilot.env`, and
-restarts the `MagpilotAgent` scheduled task so the new values take
-effect immediately.
+The launcher decodes the voucher, redeems it against the hub's
+`/api/enroll/redeem` endpoint, and the hub mints a fresh per-agent
+token in response. The three secrets the agent needs
+(`MAGPILOT_HUB_URL`, `MAGPILOT_AGENT_TOKEN`, `MAGPILOT_HUB_BEARER`)
+land in `%ProgramFiles%\Magpilot\config\magpilot.env`, and the
+`MagpilotAgent` scheduled task is bounced so the new values take
+effect immediately. Each agent gets its own token; revoking one
+won't affect the others.
 
 After install + pair, future upgrades go through `magpilot --magpilot-update`
 (same SHA256-verified path; preserves the existing config so re-pairing
 isn't needed). Re-run `magpilot --magpilot-pair=<new-bundle>` to
-re-point an existing agent at a different hub.
+re-point an existing agent at a different hub or rotate its credentials.
 
 ## Architectural law
 

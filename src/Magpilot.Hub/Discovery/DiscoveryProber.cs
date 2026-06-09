@@ -28,19 +28,27 @@ public sealed class DiscoveryProber : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var intervalSec = _config.GetValue("Hub:DiscoveryIntervalSec", 60);
-        var token = _config["Hub:DefaultAgentToken"]
-            ?? Environment.GetEnvironmentVariable("MAGPILOT_AGENT_TOKEN");
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            try { await ProbeOnceAsync(token, stoppingToken); }
+            try { await ProbeOnceAsync(stoppingToken); }
             catch (Exception ex) { _logger.LogWarning(ex, "Discovery probe failed"); }
             try { await Task.Delay(TimeSpan.FromSeconds(intervalSec), stoppingToken); }
             catch (OperationCanceledException) { break; }
         }
     }
 
-    public async Task ProbeOnceAsync(string? defaultAgentToken, CancellationToken ct)
+    /// <summary>
+    /// Send a UDP broadcast and record any responding agents in the
+    /// registry. V2a pairing: discovery is purely about location --
+    /// we register the agent's name + URL so the hub knows where it
+    /// is, but the per-agent bearer token comes from the enrollment
+    /// flow (<c>POST /api/enroll/redeem</c>), not from a shared
+    /// default. An agent that's been discovered but never enrolled
+    /// has a null token in the registry, and outbound calls to it
+    /// fail with 502 until the user pairs it.
+    /// </summary>
+    public async Task ProbeOnceAsync(CancellationToken ct)
     {
         using var udp = new UdpClient { EnableBroadcast = true };
         udp.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
@@ -62,7 +70,12 @@ public sealed class DiscoveryProber : BackgroundService
                         _logger.LogInformation("Discovered {Name} at {Url} (flavors: {Flavors})",
                             reply.Name, reply.Url,
                             reply.Flavors is null ? "<unspecified>" : string.Join(", ", reply.Flavors));
-                        _registry.Upsert(reply.Name, reply.Url, defaultAgentToken, online: true, flavors: reply.Flavors);
+                        // Pass null token: the registry preserves any
+                        // previously-stored per-agent token via the
+                        // COALESCE in its UPSERT, so re-discovering an
+                        // already-enrolled agent doesn't blow away its
+                        // credentials.
+                        _registry.Upsert(reply.Name, reply.Url, token: null, online: true, flavors: reply.Flavors);
                     }
                 }
                 catch (Exception ex) { _logger.LogDebug(ex, "Bad discovery reply"); }

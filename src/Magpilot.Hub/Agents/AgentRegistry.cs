@@ -33,6 +33,15 @@ public sealed class AgentRegistry
 
     private string ConnString => $"Data Source={_dbPath}";
 
+    /// <summary>
+    /// Connection string for callers that need to share the database
+    /// (e.g. <c>EnrollmentService</c> for the V2a voucher tables). The
+    /// hub deliberately co-locates all its SQLite state in one file so
+    /// transactional integrity across e.g. voucher-redeem +
+    /// agent-upsert is trivial.
+    /// </summary>
+    internal string ConnStringInternal => ConnString;
+
     private void InitDb()
     {
         using var c = new SqliteConnection(ConnString);
@@ -54,8 +63,53 @@ public sealed class AgentRegistry
                 user_agent TEXT,
                 last_seen INTEGER
             );
+            -- V2a pairing (magpilot-pairing.md): one-time enrollment vouchers.
+            -- Vouchers are short-lived single-use secrets. The hub stores
+            -- only the SHA256 hash so a database leak doesn't immediately
+            -- give an attacker reusable credentials. The created_by_user
+            -- column is the github login from the issuing cookie; useful
+            -- audit trail when revocation lands in V2b.
+            CREATE TABLE IF NOT EXISTS vouchers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                secret_hash BLOB NOT NULL UNIQUE,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                consumed_at INTEGER,
+                consumed_by_agent_name TEXT,
+                created_by_user TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_vouchers_hash ON vouchers(secret_hash);
         """;
         cmd.ExecuteNonQuery();
+
+        // V2a: extend the agents table with enrollment lineage. ALTER ADD
+        // COLUMN is idempotent-by-existence-check in SQLite via PRAGMA.
+        AddColumnIfMissing(c, "agents", "enrolled_at", "INTEGER");
+        AddColumnIfMissing(c, "agents", "enrolled_via", "INTEGER");
+        AddColumnIfMissing(c, "agents", "revoked_at", "INTEGER");
+    }
+
+    /// <summary>
+    /// Add a column if it doesn't already exist. SQLite has no
+    /// <c>ADD COLUMN IF NOT EXISTS</c>; the workaround is to query
+    /// <c>PRAGMA table_info</c> and only run the ALTER when the column
+    /// isn't there. Used by V2a schema migration so re-running the hub
+    /// against an older hub.db doesn't fail at startup.
+    /// </summary>
+    private static void AddColumnIfMissing(SqliteConnection c, string table, string column, string sqlType)
+    {
+        using var probe = c.CreateCommand();
+        probe.CommandText = $"PRAGMA table_info({table})";
+        using var reader = probe.ExecuteReader();
+        while (reader.Read())
+        {
+            if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase))
+                return;
+        }
+        reader.Close();
+        using var alter = c.CreateCommand();
+        alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {sqlType}";
+        alter.ExecuteNonQuery();
     }
 
     private void Load()
