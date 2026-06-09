@@ -213,6 +213,97 @@ Same pattern in **magstronaut**: stop the installed agent on the dev
 machine, point your local `dotnet run` at the same port, then restart
 the installed task afterwards.
 
+### Dev loop with the local hub (the end-to-end SPA iteration)
+
+When iterating on SPA / hub behaviour locally (not against the LXC
+hub), the workflow is **stop installed agent -> run local agent +
+hub from source -> open `http://localhost:7088`**. Every step has a
+specific gotcha that has already burned us in this session:
+
+```pwsh
+# 0. Stop the installed agent so port 5099 is free for our dev one.
+Stop-ScheduledTask -TaskName MagpilotAgent
+
+# 1. Run the agent (async pwsh session named "agent").
+$env:MAGPILOT_AGENT_TOKEN      = "dev-token"
+$env:MAGPILOT_AGENT_PUBLIC_URL = "http://127.0.0.1:5099"
+$env:MAGPILOT_HUB_URL          = "http://127.0.0.1:7088"
+$env:MAGPILOT_HUB_BEARER       = "dev-bearer"
+$env:ASPNETCORE_URLS           = "http://localhost:5099"
+dotnet run --project src/Magpilot.Agent
+
+# 2. Build the SPA bundle into the hub's wwwroot (every SPA edit).
+./scripts/build-hub.ps1
+
+# 3. Run the hub (async pwsh session named "hub").
+#    --no-launch-profile is REQUIRED -- without it Properties\launchSettings.json
+#    overrides ASPNETCORE_URLS and the hub binds to :5154 instead of :7088.
+#    --no-build skips rebuild when build-hub.ps1 already published.
+$env:MAGPILOT_HUB_BEARER       = "dev-bearer"
+$env:MAGPILOT_AGENT_TOKEN      = "dev-token"
+$env:MAGPILOT_DEV_BYPASS_AUTH  = "true"
+$env:ASPNETCORE_URLS           = "http://0.0.0.0:7088"
+dotnet run --project src/Magpilot.Hub --no-launch-profile --no-build
+
+# 4. Smoke test before opening the browser.
+(Invoke-WebRequest -Uri "http://127.0.0.1:7088/healthz" -UseBasicParsing).StatusCode  # 200
+```
+
+**The orphan-process trap** -- this is the #1 thing to remember:
+
+`dotnet run` execs a built exe (`Magpilot.Hub.exe` or
+`Magpilot.Agent.exe`). When the parent pwsh session is killed
+(`stop_powershell`, the session terminating, Ctrl-C-then-no-cleanup),
+the spawned exe **stays alive as an orphan** and continues to hold
+port 5099 / 7088 plus the data files in `bin/Debug/net9.0/data/`.
+The next "run" attempt either:
+
+* silently fails to bind and you get a "connection refused" /
+  blank-page experience while logs lie that it's listening; or
+* binds to a different port (the launch profile's fallback) so
+  `localhost:7088` looks dead even though "something" is serving.
+
+When something looks broken after a restart, ALWAYS check for
+orphans first:
+
+```pwsh
+# Owner of the suspect port -- compare PID against your current shell's child.
+Get-NetTCPConnection -LocalPort 7088 -State Listen | Select-Object LocalAddress, LocalPort, OwningProcess
+Get-Process -Id <pid> | Select-Object Id, ProcessName, StartTime
+# If ProcessName is Magpilot.Hub / Magpilot.Agent and StartTime predates the
+# shell you intended to run it from, it's an orphan. Kill it:
+Stop-Process -Id <pid> -Force
+```
+
+Both processes show up under their real exe names (NOT "dotnet"),
+because `dotnet run` execs the published exe. That makes them easy
+to spot with `Get-Process -Name Magpilot.Hub` /
+`Get-Process -Name Magpilot.Agent`.
+
+Stable iteration loop after an SPA / hub edit:
+
+1. `stop_powershell` for the `hub` shell.
+2. `Get-Process -Name Magpilot.Hub` -- if a process exists, `Stop-Process -Id <pid> -Force`.
+3. `./scripts/build-hub.ps1` (rebuilds Magpilot.Web into Magpilot.Hub/wwwroot AND publishes Magpilot.Hub).
+4. Start a fresh `hub` async session with the env block above + `--no-launch-profile --no-build`.
+5. Smoke-test `/healthz` before telling the user "ready to refresh".
+
+For agent edits, same shape but with the `agent` shell + the agent
+env block + `dotnet run --project src/Magpilot.Agent --no-build`.
+The agent reads `launchSettings.json` too (we saw it override
+`localhost:5062` -> `localhost:5099`) but it currently overrides
+back to the right port via `ASPNETCORE_URLS`, so the
+`--no-launch-profile` flag is optional for the agent. Don't rely on
+that staying true; pass it if a future agent edit changes the
+launch profile.
+
+**When you push and forget to restart**: `build-hub.ps1` rebuilds the
+SPA bundle on disk but a running hub serves the old bundle from its
+in-memory static files cache + the bundle hash baked into the
+already-served `index.html`. After every SPA change you MUST restart
+the hub for the browser to see it -- a hard refresh alone won't help
+if you skipped step (3) above.
+
 ### Deploying the hub to the LXC
 
 `deploy/README.md` is the canonical recipe. Short version:
