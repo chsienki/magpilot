@@ -73,6 +73,21 @@ public sealed class HubClient
     }
 
     /// <summary>
+    /// Detach the agent's ACP copy of the session, dropping it back to
+    /// Dormant on disk. The agent's <c>SessionRegistry.DetachAsync</c>
+    /// removes the session from its owned map and calls
+    /// <c>session/close</c> (which is a no-op in the current copilot
+    /// CLI, but that's an upstream limitation -- see the gotcha in the
+    /// magpilot copilot-instructions). Returns 204 on success; we
+    /// surface errors with the standard EnsureSuccessStatusCode path.
+    /// </summary>
+    public async Task DetachAsync(string agent, string id, CancellationToken ct = default)
+    {
+        var resp = await _http.PostAsync($"api/agents/{agent}/sessions/{id}/detach", content: null, ct);
+        resp.EnsureSuccessStatusCode();
+    }
+
+    /// <summary>
     /// Stop the in-flight turn for the given session by issuing
     /// <c>POST /sessions/{id}/interrupt</c>, which on the agent calls
     /// ACP <c>session/cancel</c>. The model stops generating at the next

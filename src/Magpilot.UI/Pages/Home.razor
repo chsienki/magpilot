@@ -377,6 +377,15 @@
                                Disabled="@(yoloDisabledOnHost || _yoloBusy)"
                                Label="YOLO" Class="ml-3" />
                 </MudTooltip>
+                <MudSpacer />
+                <MudTooltip Text="Release this session. Drops the agent's ACP copy back to Dormant; reopening adopts it again. Use this to free the agent's slot or before driving the session from a terminal."
+                            Placement="Placement.Bottom">
+                    <MudIconButton Icon="@Icons.Material.Filled.Logout" Size="Size.Small"
+                                   Color="Color.Default"
+                                   Disabled="@_releaseBusy"
+                                   OnClick="ReleaseCurrentSession"
+                                   aria-label="Release session" />
+                </MudTooltip>
             </div>
             @if (_streamStatus == StreamStatus.Offline)
             {
@@ -625,6 +634,55 @@
         finally
         {
             _yoloBusy = false;
+        }
+    }
+
+    private bool _releaseBusy;
+
+    /// <summary>
+    /// Drop the agent's ACP copy of the current session back to Dormant
+    /// and navigate to the agent's session-list view. The session
+    /// remains on disk -- reopening it triggers an adopt+load, picking
+    /// up any events appended in the meantime.
+    /// </summary>
+    private async Task ReleaseCurrentSession()
+    {
+        if (string.IsNullOrEmpty(Agent) || string.IsNullOrEmpty(SessionId))
+            return;
+
+        // Snapshot the values; navigation below clears them.
+        var agent = Agent;
+        var sessionId = SessionId;
+
+        _releaseBusy = true;
+        try
+        {
+            await Hub.DetachAsync(agent, sessionId);
+
+            // Refresh the session list so the row immediately reflects the
+            // new Dormant state -- otherwise an immediate re-entry would
+            // route through the "Owned + cache present" branch and skip
+            // the necessary session/load.
+            try { _sessions = await Hub.ListSessionsAsync(agent); }
+            catch (Exception listEx)
+            {
+                HubLog.LogWarning($"ListSessionsAsync after detach failed: {listEx.Message}",
+                    category: nameof(Home), sessionId: sessionId,
+                    extra: new { agent });
+            }
+
+            Snackbar.Add("Session released. Reopening it will re-load it on the agent.", Severity.Info);
+            Nav.NavigateTo($"/agents/{agent}");
+        }
+        catch (Exception ex)
+        {
+            HubLog.LogError($"DetachAsync failed: {ex.Message}", ex.ToString(), category: nameof(Home),
+                sessionId: sessionId, extra: new { agent });
+            Snackbar.Add($"Could not release session: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _releaseBusy = false;
         }
     }
 
