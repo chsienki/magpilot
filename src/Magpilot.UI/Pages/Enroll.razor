@@ -1,0 +1,131 @@
+@page "/admin/enroll"
+@inject HubClient Hub
+@inject NavigationManager Nav
+@inject ISnackbar Snackbar
+@inject IJSRuntime JS
+@using Magpilot.UI.Services
+
+@*
+    Pairing V1: show the current hub's enrollment bundle so the user
+    can paste it into `magpilot --magpilot-pair=<bundle>` on a fresh
+    agent install. Cookie-auth-gated (the server endpoint requires
+    auth), but we also surface a clear "this exposes secrets" warning
+    in case the user is screensharing.
+
+    Future V2 work (per-agent tokens, TTL, single-use enforcement)
+    will reshape this page significantly; for now it's a single
+    read-only field + Copy button.
+*@
+
+<MudLayout>
+    <MudAppBar Elevation="1" Dense="true">
+        <MudIconButton Icon="@Icons.Material.Filled.ArrowBack" Color="Color.Inherit"
+                       OnClick="@(() => Nav.NavigateTo("/"))" Edge="Edge.Start"
+                       aria-label="Back" />
+        <MudText Typo="Typo.h6">Pair a new agent</MudText>
+    </MudAppBar>
+
+    <MudMainContent Class="mt-2 px-3">
+        <MudContainer MaxWidth="MaxWidth.Medium" Class="py-4">
+            <MudText Typo="Typo.body1" Class="mb-4">
+                Copy the bundle below, then run this command in a PowerShell
+                window on the new machine (after installing magpilot via the
+                <code>irm ... | iex</code> one-liner):
+            </MudText>
+
+            <MudPaper Elevation="0" Outlined="true" Class="pa-3 mb-4" Style="font-family: monospace; background: var(--mud-palette-background-grey);">
+                <MudText Typo="Typo.body2">
+                    magpilot --magpilot-pair=&lt;bundle-below&gt;
+                </MudText>
+            </MudPaper>
+
+            <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Dense="true" Class="mb-3">
+                This bundle contains the agent token + hub bearer for your
+                deployment. Copy it through a private channel; don't share
+                screen.
+            </MudAlert>
+
+            @if (_loading)
+            {
+                <MudPaper Elevation="0" Class="pa-3 d-flex align-center justify-center" Style="min-height: 120px;">
+                    <MudProgressCircular Indeterminate="true" />
+                </MudPaper>
+            }
+            else if (_error is not null)
+            {
+                <MudAlert Severity="Severity.Error" Variant="Variant.Outlined" Class="mb-3">
+                    <MudText Typo="Typo.subtitle2" Class="mb-2">The hub isn't ready to issue bundles yet</MudText>
+                    <MudText Typo="Typo.body2">@_error</MudText>
+                </MudAlert>
+                <MudButton Variant="Variant.Filled" Color="Color.Primary"
+                           StartIcon="@Icons.Material.Filled.Refresh"
+                           OnClick="LoadAsync">Try again</MudButton>
+            }
+            else if (_bundle is not null)
+            {
+                <MudPaper Elevation="0" Outlined="true" Class="pa-3 mb-3" Style="font-family: monospace; word-break: break-all;">
+                    @_bundle
+                </MudPaper>
+                <MudStack Row="true" Spacing="2">
+                    <MudButton Variant="Variant.Filled" Color="Color.Primary"
+                               StartIcon="@Icons.Material.Filled.ContentCopy"
+                               OnClick="CopyAsync">Copy bundle</MudButton>
+                    <MudButton Variant="Variant.Text" Color="Color.Default"
+                               StartIcon="@Icons.Material.Filled.Refresh"
+                               OnClick="LoadAsync">Regenerate</MudButton>
+                </MudStack>
+                <MudText Typo="Typo.caption" Color="Color.Default" Class="mt-3 d-block">
+                    V1: "Regenerate" just refetches the current secrets; it doesn't rotate them.
+                    Per-agent tokens + revocation are planned for V2.
+                </MudText>
+            }
+        </MudContainer>
+    </MudMainContent>
+</MudLayout>
+
+@code {
+    private bool _loading = true;
+    private string? _bundle;
+    private string? _error;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = null;
+        _bundle = null;
+        StateHasChanged();
+        try
+        {
+            _bundle = await Hub.GetEnrollmentBundleAsync();
+        }
+        catch (EnrollmentNotReadyException ex)
+        {
+            _error = ex.Message;
+        }
+        catch (Exception ex)
+        {
+            _error = $"Could not fetch enrollment bundle: {ex.Message}";
+        }
+        finally
+        {
+            _loading = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task CopyAsync()
+    {
+        if (string.IsNullOrEmpty(_bundle)) return;
+        try
+        {
+            await JS.InvokeVoidAsync("navigator.clipboard.writeText", _bundle);
+            Snackbar.Add("Bundle copied to clipboard", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Copy failed: {ex.Message}", Severity.Error);
+        }
+    }
+}

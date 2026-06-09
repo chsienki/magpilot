@@ -25,6 +25,8 @@ public sealed record WrapperOptions(
     bool Version,
     /// <summary>Download and run the latest installer from GitHub Releases, then exit.</summary>
     bool Update,
+    /// <summary>Pair this agent with a hub using a bundle copied from the hub's /admin/enroll page; writes magpilot.env and restarts the scheduled task.</summary>
+    string? Pair,
     /// <summary>One-shot: register an already-running copilot session as host-owned (no spawn).</summary>
     string? Claim,
     /// <summary>Argv with all <c>--magpilot-*</c> flags stripped, ready to forward to the real copilot binary.</summary>
@@ -36,6 +38,7 @@ public sealed record WrapperOptions(
         var skipCheck = false; var exitOnHandoff = false;
         var status = false; var help = false;
         var version = false; var update = false;
+        string? pair = null;
         string? claim = null;
         var forward = new List<string>(argv.Length);
 
@@ -61,6 +64,11 @@ public sealed record WrapperOptions(
                         claim = a["--magpilot-claim=".Length..];
                         break;
                     }
+                    if (a.StartsWith("--magpilot-pair=", StringComparison.Ordinal))
+                    {
+                        pair = a["--magpilot-pair=".Length..];
+                        break;
+                    }
                     if (a.StartsWith("--magpilot-", StringComparison.Ordinal))
                         throw new ArgumentException($"Unknown wrapper flag: {a}. Try --magpilot-help.");
                     forward.Add(a);
@@ -72,7 +80,7 @@ public sealed record WrapperOptions(
         if (take && noTake)
             throw new ArgumentException("Contradictory flags: --magpilot-take (or --magpilot-force) and --magpilot-no-take both set.");
 
-        return new WrapperOptions(take, force, noTake, skipCheck, exitOnHandoff, status, help, version, update, claim, forward);
+        return new WrapperOptions(take, force, noTake, skipCheck, exitOnHandoff, status, help, version, update, pair, claim, forward);
     }
 
     /// <summary>
@@ -109,6 +117,9 @@ public sealed record WrapperOptions(
           --magpilot-status            don't spawn copilot; print agent reachability + sessions + exit
           --magpilot-version           print local + agent-reported version info, then exit
           --magpilot-update            download and run the latest installer from GitHub Releases, then exit
+          --magpilot-pair=<bundle>     pair this agent with a hub. <bundle> is copied from the hub's
+                                       /admin/enroll page. Writes magpilot.env and restarts the
+                                       installed scheduled task so the new values take effect.
           --magpilot-claim=<sid>       one-shot: register a stranded already-running copilot session
                                        as host-owned in the agent (no spawn). The agent's PID-liveness
                                        sweep handles cleanup when the copilot child eventually exits.

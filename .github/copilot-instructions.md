@@ -362,10 +362,12 @@ with the installed agent" above.
 | `MAGPILOT_HUB_COOKIE_DOMAIN` | hub (optional) | Sets the auth cookie's `Domain` attribute. Use a leading-dot value like `.home.sienkiewi.cz` to share sign-in across satellite SPAs hosted on sibling subdomains (e.g. magnus.home.sienkiewi.cz). Leave unset for plain dev runs at localhost. |
 | `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET` | hub | GitHub OAuth App credentials. Without these the hub serves `/login -> 'OAUTH_CLIENT_ID not configured'`. |
 | `OAUTH_ALLOWED_GITHUB_USERS` | hub | Comma list of GitHub logins the hub allows. Anyone else gets denied after OAuth. |
+| `MAGPILOT_HUB_PUBLIC_URL` | hub (optional but recommended) | Externally-reachable URL of the hub (e.g. `https://magpilot.home.sienkiewi.cz`). Used by the pairing endpoint (`GET /api/admin/enroll/bundle`) to embed the right hub address in the enrollment bundle. When unset, the service falls back to the first non-wildcard listen URL, then to `http://<lan-ip>:<port>` -- both fine for LAN-only deployments, but a NPM-fronted prod hub should set this so bundles don't leak the unencrypted internal URL. |
 | `MAGPILOT_RELEASE_REPO` | hub (optional) | GitHub `owner/repo` the hub's `ReleaseTracker` polls for the latest magpilot release. Defaults to `chsienki/magpilot`. |
 | `MAGPILOT_GITHUB_TOKEN` | hub (optional) | Bearer token for the GitHub API call. **Required** if the configured release repo is private -- anonymous calls to `releases/latest` return 404 against private repos, which ReleaseTracker logs as a Warning in `/admin/logs`. Also bumps the unauthenticated 60 req/h limit to 5,000 req/h. |
 | `MAGPILOT_AGENT_URL` | magpilot launcher | Default `http://127.0.0.1:5099`. Where the wrapper reaches its local agent. |
 | `MAGPILOT_REAL_COPILOT` | magpilot launcher (optional) | Explicit path to the real `copilot` binary. Useful when the wrapper is on PATH and you want to override the autodetect of the real copilot binary. |
+| `MAGPILOT_ENV_FILE` | agent + launcher (optional) | Explicit path to `magpilot.env` instead of the installer-layout default (`<install>\config\magpilot.env`). The agent reads it on startup; the launcher's `--magpilot-pair=<bundle>` writes to it. When set, `--magpilot-pair` skips the scheduled-task bounce so dev / test runs don't accidentally kill an unrelated installed agent. |
 
 ## Windows packaging + autoupdate
 
@@ -425,6 +427,7 @@ the launcher can show its banner without `MAGPILOT_AGENT_TOKEN` set.
 |---|---|
 | `magpilot --magpilot-version` | Print local + agent-reported version info |
 | `magpilot --magpilot-update` | Download + run the latest installer silently (validates SHA256 against the GitHub release asset) |
+| `magpilot --magpilot-pair=<bundle>` | Pair the agent with a hub. `<bundle>` is copied from the hub's `/admin/enroll` page; the launcher decodes it, upserts the three keys into `magpilot.env`, and bounces the installed scheduled task. |
 | `magpilot --magpilot-help` | Wrapper-only flag help |
 
 The banner check fires on **every** non-help, non-skip-check invocation
@@ -497,6 +500,76 @@ Parameters (use the scriptblock form to pass them through `irm | iex`):
   doesn't try to handle this; use the manual download flow off the
   Releases page instead, or fork to a public mirror and point
   `-Repo` at it.
+
+### Pairing V1 (`magpilot --magpilot-pair=<bundle>`)
+
+The installer no longer collects hub URL / agent token / hub bearer
+during install (the Settings page is gone; see the `magpilot-pairing`
+project file in copilot-context for the full design). Fresh installs
+land in a "disconnected" state:
+
+* `install-task.ps1` creates a minimal `magpilot.env` with just a
+  CSPRNG-strength random `MAGPILOT_AGENT_TOKEN` (so the agent has a
+  unique LAN bearer instead of the dev default that anyone could
+  guess) and nothing else.
+* Agent boots, listens on `:5099`, but has no hub to talk to and no
+  ACP work to do until paired.
+
+The hub-side admin page at `/admin/enroll` (rendered by
+`Magpilot.UI/Pages/Enroll.razor`, served by the hub's SPA) calls
+`GET /api/admin/enroll/bundle` and displays the encoded result. The
+endpoint returns 503 with an explanatory hint when the hub is missing
+a required config value (dev defaults, no `MAGPILOT_HUB_PUBLIC_URL`,
+etc.) so the SPA can render a "fix this first" pointer instead of an
+unusable bundle.
+
+Bundle wire format -- defined in `EnrollmentBundle.cs` in
+`Magpilot.Shared`:
+
+```
+magpilot1+<base64url(JSON)>
+```
+
+JSON payload: `{ hubUrl, agentToken, hubBearer }`. The
+`magpilot1+` prefix is the version sentinel -- a future
+`magpilot2+...` format (e.g. per-agent tokens with a TTL) will be
+rejected by the V1 launcher with a clear "upgrade with
+`magpilot --magpilot-update`" message rather than silent
+corruption of `magpilot.env`. The agent's
+`MAGPILOT_AGENT_PUBLIC_URL` is **deliberately not** in the bundle:
+it's machine-specific and `DiscoveryResponder.ResolveSelfUrl`
+auto-detects from the hub's source IP when unset.
+
+`MagpilotPair.RunAsync` (`src/Magpilot.Host/MagpilotPair.cs`):
+
+1. Decode + validate prefix + parse JSON; bail with a clear error
+   on any failure.
+2. Locate `magpilot.env` -- preference order matches the agent's
+   `EnvFileLoader`:
+   1. `MAGPILOT_ENV_FILE` env override.
+   2. `<launcher-exe>/../config/magpilot.env` (installer layout).
+   3. `%ProgramFiles%\Magpilot\config\magpilot.env` (last-resort
+      fallback).
+3. **Upsert** -- read existing lines; for each of the three keys,
+   replace in place if a non-comment `KEY=...` line exists, else
+   append under an "# Added by magpilot --magpilot-pair" section.
+   Comments + blank lines + unrelated `KEY=VALUE` pairs are
+   preserved verbatim. Write atomically via temp + move so a
+   crash mid-write can't corrupt the file.
+4. On Windows, bounce the installed `MagpilotAgent` scheduled task
+   via `schtasks.exe /end` + `/run` so the agent re-reads the env
+   file. **Skipped when `MAGPILOT_ENV_FILE` was set** so a dev /
+   test run on a custom env file doesn't accidentally kill the
+   installed agent's session. The bounce is best-effort -- a missing
+   task or schtasks failure logs a one-line hint and exits 0.
+
+**Gotcha that has already bitten dev runs**: running
+`--magpilot-pair` without `MAGPILOT_ENV_FILE` set on a machine
+where the installed `MagpilotAgent` task is configured will bounce
+the installed agent. If a `dotnet run --project src/Magpilot.Agent`
+dev agent is bound to `:5099`, the installed task will fight for
+the port, one of the two will lose. Always set `MAGPILOT_ENV_FILE`
+to a throwaway path when testing pair from source.
 
 ### Autoupdate visibility: two ways the chain silently breaks
 
@@ -1200,7 +1273,7 @@ future "what's left?" sweep doesn't accidentally re-pick them):
 
 Open items:
 
-- 2026-05-18: agent/hub connect handshake -- either a single condensed token bundling all connection info, or a UDP discovery mode (think WPS but for agents and the hub) so users don't have to copy a bunch of random strings
+- ~~2026-05-18: agent/hub connect handshake -- either a single condensed token bundling all connection info, or a UDP discovery mode (think WPS but for agents and the hub) so users don't have to copy a bunch of random strings~~ -> partly shipped (V1): bundled-token paste via the hub's /admin/enroll page + `magpilot --magpilot-pair=<bundle>` launcher subcommand. Installer drops the Settings page; fresh installs are "disconnected" with just a random local AGENT_TOKEN, pair is the second step. UDP discovery + per-agent tokens + TTL deferred to V2 (see projects/magpilot-pairing.md log).
 - 2026-06-08: cleanup status bar at top to be less confusing
 - ~~2026-06-08: powershell one-liner that downloads, verifies and runs the installer as an easy bootstrap~~ -> shipped: `scripts/install.ps1` -- fetches version.json from /releases/latest/download/, downloads the installer + .sha256, verifies, runs with UAC elevation. README has the canonical `irm ... | iex` one-liner; instructions have the parameter-passing scriptblock form for `-Silent` / `-Version` / `-Repo` / `-DryRun`. Documented draft + private-repo failure modes alongside the hub-autoupdate ones.
 - 2026-06-08: drop 'past' sessions list, replace with 'resume previous' button that opens a filterable/searchable list

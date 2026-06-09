@@ -28,6 +28,7 @@ builder.Services.AddSingleton<Magpilot.Hub.Updates.ReleaseCache>();
 builder.Services.AddHostedService<Magpilot.Hub.Updates.ReleaseTracker>();
 builder.Services.AddHttpClient("oauth");
 builder.Services.AddHubAuth(builder.Configuration);
+builder.Services.AddSingleton<Magpilot.Hub.Auth.EnrollmentService>();
 
 // Honor X-Forwarded-* from the configured reverse proxy (e.g. NPM at .149 in
 // my home setup). Trust only the proxy CIDR / IPs supplied via config.

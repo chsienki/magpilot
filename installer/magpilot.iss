@@ -98,125 +98,21 @@ begin
   Result := Pos(';' + Uppercase(NewPath) + ';', ';' + Uppercase(CurrentPath) + ';') = 0;
 end;
 
-function ReadEnvKey(FilePath, Key: String): String;
-var
-  Lines: TArrayOfString;
-  i: Integer;
-  Line, Prefix: String;
-begin
-  Result := '';
-  if not LoadStringsFromFile(FilePath, Lines) then exit;
-  Prefix := Key + '=';
-  for i := 0 to GetArrayLength(Lines) - 1 do
-  begin
-    Line := Trim(Lines[i]);
-    if (Length(Line) = 0) or (Line[1] = '#') then continue;
-    if Pos(Prefix, Line) = 1 then
-    begin
-      Result := Copy(Line, Length(Prefix) + 1, Length(Line));
-      exit;
-    end;
-  end;
-end;
-
-// Generate a 32-char (128-bit) random hex token. Used as the default
-// agent bearer secret on fresh installs so the user has something
-// secure pre-filled and can either keep it (and copy it to the hub
-// config) or paste over it with an existing token to pair with a
-// hub that already knows the secret.
-function GenerateRandomToken(): String;
-var
-  i: Integer;
-  Hex: String;
-begin
-  Hex := '0123456789abcdef';
-  Result := '';
-  for i := 1 to 32 do
-    Result := Result + Hex[Random(16) + 1];
-end;
-
-var
-  SettingsPage: TInputQueryWizardPage;
-
-procedure InitializeWizard();
-begin
-  SettingsPage := CreateInputQueryPage(
-    wpSelectTasks,
-    'Magpilot Settings',
-    'Configure the agent. The agent token is auto-generated; the hub ' +
-    'bearer comes from your hub config (leave blank to skip hub-mediated ' +
-    'log forwarding + autoupdate checks).',
-    'These values are written to <install>\config\magpilot.env and ' +
-    're-read on every install (so re-running the installer or ' +
-    '`magpilot --magpilot-update` preserves them).');
-  SettingsPage.Add('Hub URL (e.g. http://192.168.1.239:7088):', False);
-  SettingsPage.Add('Agent token (auto-generated; bearer the hub uses to call IN):', False);
-  SettingsPage.Add('Hub bearer (the hub''s MAGPILOT_HUB_BEARER, agent uses to call OUT):', True);
-  SettingsPage.Add('Public URL the hub uses to reach this agent:', False);
-
-  // Defaults shown on first install. ShouldSkipPage overrides these from
-  // an existing magpilot.env if one is present (upgrade path).
-  SettingsPage.Values[0] := 'http://192.168.1.239:7088';
-  SettingsPage.Values[1] := GenerateRandomToken();
-  SettingsPage.Values[2] := '';
-  SettingsPage.Values[3] := 'http://' + GetComputerNameString + ':5099';
-end;
-
-function ShouldSkipPage(PageID: Integer): Boolean;
-var
-  EnvPath, ExistingHubUrl, ExistingToken, ExistingBearer, ExistingPublic: String;
-begin
-  Result := False;
-  // First place {app} is safe to expand: ShouldSkipPage(SettingsPage.ID)
-  // runs after wpSelectDir, in both interactive and silent installs.
-  // Pre-populate from any pre-existing magpilot.env so silent re-installs
-  // (e.g. magpilot --magpilot-update) preserve hub URL + tokens.
-  if PageID = SettingsPage.ID then
-  begin
-    EnvPath := ExpandConstant('{app}\config\' + EnvFileName);
-    if FileExists(EnvPath) then
-    begin
-      ExistingHubUrl := ReadEnvKey(EnvPath, 'MAGPILOT_HUB_URL');
-      ExistingToken  := ReadEnvKey(EnvPath, 'MAGPILOT_AGENT_TOKEN');
-      ExistingBearer := ReadEnvKey(EnvPath, 'MAGPILOT_HUB_BEARER');
-      ExistingPublic := ReadEnvKey(EnvPath, 'MAGPILOT_AGENT_PUBLIC_URL');
-      if ExistingHubUrl <> '' then SettingsPage.Values[0] := ExistingHubUrl;
-      if ExistingToken  <> '' then SettingsPage.Values[1] := ExistingToken;
-      if ExistingBearer <> '' then SettingsPage.Values[2] := ExistingBearer;
-      if ExistingPublic <> '' then SettingsPage.Values[3] := ExistingPublic;
-    end;
-  end;
-end;
-
-function NextButtonClick(CurPageID: Integer): Boolean;
-begin
-  Result := True;
-  if CurPageID = SettingsPage.ID then
-  begin
-    if (Trim(SettingsPage.Values[1]) = '') and WizardIsComponentSelected('agent') then
-    begin
-      MsgBox('Agent token must not be empty when the Agent component is installed.', mbError, MB_OK);
-      Result := False;
-    end;
-  end;
-end;
-
-procedure WriteEnvFile();
-var
-  EnvPath: String;
-  Lines: TArrayOfString;
-begin
-  EnvPath := ExpandConstant('{app}\config\' + EnvFileName);
-  ForceDirectories(ExtractFilePath(EnvPath));
-  SetArrayLength(Lines, 6);
-  Lines[0] := '# Magpilot environment file. Sourced by install-task.ps1 on every';
-  Lines[1] := '# scheduled-task launch. Re-run the installer to change these.';
-  Lines[2] := 'MAGPILOT_HUB_URL=' + SettingsPage.Values[0];
-  Lines[3] := 'MAGPILOT_AGENT_TOKEN=' + SettingsPage.Values[1];
-  Lines[4] := 'MAGPILOT_HUB_BEARER=' + SettingsPage.Values[2];
-  Lines[5] := 'MAGPILOT_AGENT_PUBLIC_URL=' + SettingsPage.Values[3];
-  SaveStringsToFile(EnvPath, Lines, False);
-end;
+// V1 of magpilot-pairing (2026-06-09): the installer no longer collects
+// hub URL / agent token / hub bearer / public URL via a wizard page.
+// The agent ships in a "disconnected" state -- it boots with a random
+// MAGPILOT_AGENT_TOKEN that install-task.ps1 generates the first time
+// the env file is created, then sits idle until the user runs
+//
+//     magpilot --magpilot-pair=<bundle>
+//
+// from the launcher with a bundle copied from the hub's /admin/enroll
+// page. That subcommand overwrites magpilot.env with the hub-supplied
+// values and restarts the scheduled task. The old four-field wizard
+// page (with its hub URL / agent token / hub bearer / public URL
+// fields + the upgrade-path pre-population from an existing env file)
+// is gone; install-task.ps1 preserves any existing magpilot.env on
+// upgrade so a paired agent stays paired across re-installs.
 
 procedure RunPwsh(ScriptPath, Args: String);
 var
@@ -281,8 +177,13 @@ begin
 
     if WizardIsComponentSelected('agent') then
     begin
-      WriteEnvFile();
-      Log('  WriteEnvFile done.');
+      // V1 of magpilot-pairing (2026-06-09): no installer-collected
+      // secrets. install-task.ps1 creates a minimal disconnected
+      // magpilot.env (just a random MAGPILOT_AGENT_TOKEN) on a fresh
+      // install, preserves any existing file on upgrade. The user
+      // pairs the agent with a hub afterwards via
+      //   magpilot --magpilot-pair=<bundle>
+      // copied from the hub's /admin/enroll page.
 
       // Pass -User if we have a real one. install-task.ps1 has its own
       // discovery chain when -User is empty (Win32_ComputerSystem, quser,

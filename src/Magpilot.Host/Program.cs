@@ -32,6 +32,11 @@ if (opts.Update)
     return await UpdateInstaller.RunAsync();
 }
 
+if (opts.Pair is not null)
+{
+    return await MagpilotPair.RunAsync(opts.Pair);
+}
+
 if (opts.Claim is not null)
 {
     return await MagpilotClaim.RunAsync(opts.Claim);

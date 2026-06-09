@@ -16,6 +16,21 @@ public static class HubEndpoints
         api.MapGet("/me", (HttpContext ctx) =>
             Results.Ok(new { identity = ctx.User.Identity?.Name }));
 
+        // Pairing V1: return the encoded EnrollmentBundle for the current
+        // hub config. Cookie-auth-gated (the api group already requires
+        // auth); a signed-in user is implicitly authorized to issue
+        // enrollment bundles. Returns 503 + a hint when the hub itself
+        // isn't fully configured (e.g. running with the dev defaults) so
+        // the SPA can render a setup pointer instead of a bundle the
+        // user can't actually use.
+        api.MapGet("/admin/enroll/bundle", (Magpilot.Hub.Auth.EnrollmentService enrol) =>
+        {
+            var bundle = enrol.TryBuild(out var err);
+            if (bundle is null)
+                return Results.Json(new { error = err }, statusCode: StatusCodes.Status503ServiceUnavailable);
+            return Results.Ok(new { encoded = bundle.Encode() });
+        });
+
         // Hub's view of the latest released agent/launcher version. Populated
         // by ReleaseTracker (background polls of GitHub Releases). The agent
         // calls this every ~15min via its UpdatePoller and caches the result;

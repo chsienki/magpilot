@@ -33,6 +33,34 @@ public sealed class HubClient
 
     public sealed record MeInfo(string? Identity);
 
+    /// <summary>
+    /// Fetch the enrollment bundle for pairing a new agent with this
+    /// hub. Returns the encoded bundle string ("magpilot1+...") on
+    /// success. Throws <see cref="EnrollmentNotReadyException"/> with
+    /// the hub's explanation when the hub isn't fully configured to
+    /// issue bundles yet (e.g. running with dev defaults; missing
+    /// MAGPILOT_HUB_PUBLIC_URL).
+    /// </summary>
+    public async Task<string> GetEnrollmentBundleAsync(CancellationToken ct = default)
+    {
+        var resp = await _http.GetAsync("api/admin/enroll/bundle", ct);
+        if (resp.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable)
+        {
+            string? hint = null;
+            try
+            {
+                var body = await resp.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: ct);
+                if (body.TryGetProperty("error", out var e)) hint = e.GetString();
+            }
+            catch { /* malformed body -- fall through with the default hint */ }
+            throw new EnrollmentNotReadyException(hint ?? "The hub isn't configured to issue enrollment bundles yet.");
+        }
+        resp.EnsureSuccessStatusCode();
+        var ok = await resp.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: ct);
+        return ok.GetProperty("encoded").GetString()
+            ?? throw new InvalidOperationException("Enrollment bundle response had no 'encoded' field.");
+    }
+
     public Task<List<AgentInfo>?> ListAgentsAsync(CancellationToken ct = default) =>
         _http.GetFromJsonAsync<List<AgentInfo>>("api/agents", ct);
 
@@ -406,3 +434,13 @@ public sealed class HostStillOwnedException(int hostPid, string message) : Excep
 /// rather than silently failing.
 /// </summary>
 public sealed class YoloDisabledException(string message) : Exception(message);
+
+/// <summary>
+/// Thrown by <see cref="HubClient.GetEnrollmentBundleAsync"/> when the
+/// hub returns 503 because it isn't configured to issue bundles yet
+/// (typically: running with dev defaults, or
+/// <c>MAGPILOT_HUB_PUBLIC_URL</c> is unset). The message is the hub's
+/// hint about what to set; surface it directly to the user so the
+/// setup gap is one fix away.
+/// </summary>
+public sealed class EnrollmentNotReadyException(string message) : Exception(message);

@@ -39,6 +39,45 @@ if (-not (Test-Path $agentExe)) {
     exit 1
 }
 
+# Fresh install: bootstrap a minimal "disconnected" magpilot.env so the
+# agent boots cleanly with a unique random bearer (not the dev default,
+# which would be guessable on the LAN). The user pairs the agent with a
+# hub afterwards via `magpilot --magpilot-pair=<bundle>` -- that
+# subcommand overwrites this file with the hub-supplied values.
+#
+# Upgrade: preserve the existing file verbatim. A paired agent stays
+# paired across re-installs; an unpaired agent stays unpaired with its
+# original token.
+$envDir = Split-Path -Parent $envFile
+if (-not (Test-Path $envDir)) { New-Item -ItemType Directory -Path $envDir | Out-Null }
+if (-not (Test-Path $envFile)) {
+    # 32 bytes of CSPRNG output -> 64-char hex. Cryptographic strength,
+    # not just "random-looking".
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $bytes = New-Object byte[] 32
+        $rng.GetBytes($bytes)
+        $token = -join ($bytes | ForEach-Object { $_.ToString('x2') })
+    } finally { $rng.Dispose() }
+
+    $lines = @(
+        '# Magpilot environment file. Initial install creates this with a',
+        '# random MAGPILOT_AGENT_TOKEN so the agent has a unique bearer on',
+        '# the LAN. The agent is "disconnected" until you pair it with a',
+        '# hub by running:',
+        '#',
+        '#   magpilot --magpilot-pair=<bundle>',
+        '#',
+        '# Get <bundle> from the hub''s /admin/enroll page.',
+        "MAGPILOT_AGENT_TOKEN=$token"
+    )
+    Set-Content -Path $envFile -Value $lines -Encoding ASCII
+    Write-Host "Created disconnected magpilot.env at $envFile (run magpilot --magpilot-pair to wire up to a hub)."
+}
+else {
+    Write-Host "Preserving existing magpilot.env at $envFile."
+}
+
 # v0.1.6+: the agent is a WinExe and loads magpilot.env itself, so we
 # can launch the EXE directly with no powershell wrapper. The old
 # wrapper (start.ps1) is now redundant and visible-windowing in two

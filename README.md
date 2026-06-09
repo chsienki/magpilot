@@ -153,8 +153,10 @@ See `deploy/README.md` for the LXC docker recipe.
 
 ## Install (Windows agent + launcher)
 
-One-liner from a Windows PowerShell (admin not required upfront -- the
-installer asks for elevation when it needs it):
+Two steps: drop the files, then pair with a hub.
+
+**1. Install** (admin not required upfront -- the installer asks for
+elevation when it needs it):
 
 ```pwsh
 irm https://raw.githubusercontent.com/chsienki/magpilot/main/scripts/install.ps1 | iex
@@ -162,9 +164,10 @@ irm https://raw.githubusercontent.com/chsienki/magpilot/main/scripts/install.ps1
 
 That downloads the latest signed installer from
 [Releases](https://github.com/chsienki/magpilot/releases), verifies its
-SHA256 against the matching `.sha256` asset, and runs it. The wizard's
-Settings page collects the hub URL + agent token + public URL on a
-fresh install, and pre-populates them from `magpilot.env` on an upgrade.
+SHA256 against the matching `.sha256` asset, and runs it. No
+configuration is collected during install -- the agent boots in a
+"disconnected" state with a random local bearer token but no hub URL,
+so it's a no-op until you pair it.
 
 For unattended installs, fetch the script as a block so you can pass
 flags:
@@ -173,8 +176,24 @@ flags:
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/chsienki/magpilot/main/scripts/install.ps1))) -Silent
 ```
 
-After install, future upgrades go through `magpilot --magpilot-update`
-(same SHA256-verified path; preserves the existing config).
+**2. Pair** with your hub. On the hub's web UI, open
+`https://<your-hub>/admin/enroll`, copy the bundle, then on the
+new machine:
+
+```pwsh
+magpilot --magpilot-pair=<paste-bundle-here>
+```
+
+That decodes the three secrets the agent needs
+(`MAGPILOT_HUB_URL`, `MAGPILOT_AGENT_TOKEN`, `MAGPILOT_HUB_BEARER`),
+writes them into `%ProgramFiles%\Magpilot\config\magpilot.env`, and
+restarts the `MagpilotAgent` scheduled task so the new values take
+effect immediately.
+
+After install + pair, future upgrades go through `magpilot --magpilot-update`
+(same SHA256-verified path; preserves the existing config so re-pairing
+isn't needed). Re-run `magpilot --magpilot-pair=<new-bundle>` to
+re-point an existing agent at a different hub.
 
 ## Architectural law
 
