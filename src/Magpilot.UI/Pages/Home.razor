@@ -489,6 +489,8 @@
                       OnCancel="HandleCancel"
                       QueuedMessages="@_queuedMessages"
                       OnDeleteQueued="HandleDeleteQueued"
+                      DraftText="@_currentDraft"
+                      OnDraftChanged="HandleDraftChanged"
                       OnApproval="HandleApproval" />
         }
         else
@@ -545,6 +547,33 @@
     /// they fire via the queue chips above the composer.
     /// </summary>
     private readonly List<string> _queuedMessages = new();
+    /// <summary>
+    /// Half-typed message in the composer for the currently-open
+    /// session. Mirrored to ChatView via its <c>DraftText</c> parameter
+    /// and written back here through <c>OnDraftChanged</c> on every
+    /// keystroke + after a successful send. Cached per-session in
+    /// <see cref="_draftCache"/> AND persisted to localStorage under
+    /// <see cref="DraftStorageKey"/>, so switching away then back, or
+    /// a full page refresh, both restore the user's in-progress text.
+    /// </summary>
+    private string _currentDraft = "";
+    /// <summary>
+    /// Per-session draft cache, keyed the same way as <see cref="_msgCache"/>
+    /// (<c>{agent}/{sid}</c>). Mirrors what's also written to
+    /// localStorage; the in-memory cache is the fast path for
+    /// session-to-session switching without round-tripping JS.
+    /// </summary>
+    private readonly Dictionary<string, string> _draftCache = new();
+    /// <summary>
+    /// Per-session queue cache, keyed the same way as the draft + msg
+    /// caches. localStorage is the durable copy; this is the
+    /// session-switch-fast-path.
+    /// </summary>
+    private readonly Dictionary<string, List<string>> _queueCache = new();
+    private const string DraftStorageKeyPrefix = "magpilot.draft.";
+    private const string QueueStorageKeyPrefix = "magpilot.queue.";
+    private static string DraftStorageKey(string sessionKey) => $"{DraftStorageKeyPrefix}{sessionKey}";
+    private static string QueueStorageKey(string sessionKey) => $"{QueueStorageKeyPrefix}{sessionKey}";
     /// <summary>
     /// When true, content events (user/assistant/thought/tool/approval)
     /// arriving on the stream between LoadStarted and HistoryDone are
@@ -919,16 +948,51 @@
             var target = $"{Agent}/{SessionId}";
             _streamingFor = target;
 
-            // A session switch resets the per-session ephemeral state.
-            // The composer queue is one of those: messages typed while
-            // the previous session was busy are NOT carried over (they
-            // were addressed to a specific conversation).
-            _queuedMessages.Clear();
-
-            // Snapshot the OUTGOING session under its OWN key so we can
-            // rehydrate when the user navigates back.
+            // Snapshot the OUTGOING session's ephemeral composer state
+            // (queue + draft text) under its OWN key before we adopt the
+            // incoming session's state. Persist alongside the in-memory
+            // caches so a full refresh restores both. Per-session
+            // queue + draft is the contract: a follow-up typed against
+            // "investigate the bash error" isn't relevant to a different
+            // session you switched to.
             if (previousKey is not null)
+            {
                 SnapshotMessagesAs(previousKey);
+                _queueCache[previousKey] = new List<string>(_queuedMessages);
+                _draftCache[previousKey] = _currentDraft;
+                await PersistQueueAsync(previousKey, _queuedMessages);
+                await PersistDraftAsync(previousKey, _currentDraft);
+            }
+
+            // Load the INCOMING session's queue + draft. Try the
+            // in-memory cache first (fast path for same-session-tab
+            // switches); fall back to localStorage so a refresh or a
+            // freshly-opened tab still restores them.
+            _queuedMessages.Clear();
+            if (_queueCache.TryGetValue(target, out var cachedQueue))
+            {
+                _queuedMessages.AddRange(cachedQueue);
+            }
+            else
+            {
+                var fromStorage = await LoadQueueAsync(target);
+                if (fromStorage is { Count: > 0 })
+                {
+                    _queuedMessages.AddRange(fromStorage);
+                    _queueCache[target] = new List<string>(fromStorage);
+                }
+            }
+            if (_draftCache.TryGetValue(target, out var cachedDraft))
+            {
+                _currentDraft = cachedDraft;
+            }
+            else
+            {
+                var draftFromStorage = await LoadDraftAsync(target);
+                _currentDraft = draftFromStorage ?? "";
+                if (!string.IsNullOrEmpty(_currentDraft))
+                    _draftCache[target] = _currentDraft;
+            }
 
             await StopStreamingAsync();
             _pendingOrphan = null;
@@ -1704,6 +1768,7 @@
                 {
                     var next = _queuedMessages[0];
                     _queuedMessages.RemoveAt(0);
+                    PersistQueueForCurrent();
                     _ = InvokeAsync(() => SendImmediateAsync(next));
                 }
                 break;
@@ -1749,6 +1814,7 @@
             // blocking the input; it'll fire FIFO on the next
             // TurnComplete (see Apply()).
             _queuedMessages.Add(text);
+            PersistQueueForCurrent();
             StateHasChanged();
             return;
         }
@@ -1819,7 +1885,76 @@
     {
         if (index < 0 || index >= _queuedMessages.Count) return;
         _queuedMessages.RemoveAt(index);
+        PersistQueueForCurrent();
         StateHasChanged();
+    }
+
+    private async Task HandleDraftChanged(string text)
+    {
+        _currentDraft = text;
+        if (_streamingFor is { } key)
+        {
+            _draftCache[key] = text;
+            await PersistDraftAsync(key, text);
+        }
+    }
+
+    /// <summary>
+    /// Snapshot the current <see cref="_queuedMessages"/> to the
+    /// in-memory cache + localStorage for the active session. Call after
+    /// any mutation site (add, dequeue, delete) so a tab refresh
+    /// reflects reality.
+    /// </summary>
+    private void PersistQueueForCurrent()
+    {
+        if (_streamingFor is not { } key) return;
+        _queueCache[key] = new List<string>(_queuedMessages);
+        _ = PersistQueueAsync(key, _queuedMessages);
+    }
+
+    private async Task PersistDraftAsync(string sessionKey, string draft)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(draft))
+                await JS.InvokeVoidAsync("localStorage.removeItem", DraftStorageKey(sessionKey));
+            else
+                await JS.InvokeVoidAsync("localStorage.setItem", DraftStorageKey(sessionKey), draft);
+        }
+        catch { /* JS interop unavailable (prerender / disposed) -- in-memory cache still holds it */ }
+    }
+
+    private async Task PersistQueueAsync(string sessionKey, IReadOnlyList<string> queue)
+    {
+        try
+        {
+            if (queue.Count == 0)
+                await JS.InvokeVoidAsync("localStorage.removeItem", QueueStorageKey(sessionKey));
+            else
+                await JS.InvokeVoidAsync("localStorage.setItem", QueueStorageKey(sessionKey),
+                    System.Text.Json.JsonSerializer.Serialize(queue));
+        }
+        catch { /* JS interop unavailable -- in-memory cache still holds it */ }
+    }
+
+    private async Task<string?> LoadDraftAsync(string sessionKey)
+    {
+        try { return await JS.InvokeAsync<string?>("localStorage.getItem", DraftStorageKey(sessionKey)); }
+        catch { return null; }
+    }
+
+    private async Task<List<string>?> LoadQueueAsync(string sessionKey)
+    {
+        try
+        {
+            var raw = await JS.InvokeAsync<string?>("localStorage.getItem", QueueStorageKey(sessionKey));
+            if (string.IsNullOrEmpty(raw)) return null;
+            return System.Text.Json.JsonSerializer.Deserialize<List<string>>(raw);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>

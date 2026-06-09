@@ -178,7 +178,7 @@
             </div>
         }
         <MudStack Row="true" Spacing="1" AlignItems="AlignItems.End">
-            <textarea @ref="_textarea" @bind="_draft" @bind:event="oninput"
+            <textarea @ref="_textarea" value="@_draft" @oninput="OnDraftInput"
                       @onkeydown="OnKeyDown"
                       class="composer-textarea"
                       placeholder="@ComposerPlaceholder"
@@ -242,6 +242,24 @@
     /// remove the entry at the given index from its queue.
     /// </summary>
     [Parameter] public EventCallback<int> OnDeleteQueued { get; set; }
+
+    /// <summary>
+    /// Per-session draft text the host has saved for this composer.
+    /// On session switch the host updates this with the incoming
+    /// session's saved draft; ChatView mirrors it into its local
+    /// <see cref="_draft"/> when it observes the parameter change.
+    /// In-progress edits aren't clobbered by re-renders because we
+    /// track the last-seen parameter value separately.
+    /// </summary>
+    [Parameter] public string DraftText { get; set; } = "";
+
+    /// <summary>
+    /// Fires on every keystroke in the composer textarea AND after a
+    /// successful send (with empty string). The host persists this to
+    /// localStorage so a refresh or session-switch round-trip restores
+    /// the half-typed message.
+    /// </summary>
+    [Parameter] public EventCallback<string> OnDraftChanged { get; set; }
     /// <summary>
     /// True if there are older messages on the server that aren't yet
     /// loaded into <see cref="Messages"/>. Drives the "Load older
@@ -262,6 +280,11 @@
     [Parameter] public EventCallback OnLoadMore { get; set; }
 
     private string _draft = "";
+    // Last DraftText parameter value we observed from the host. When the
+    // parameter changes (e.g. session switch loaded a different saved
+    // draft) we sync into _draft; when it matches we leave _draft alone
+    // so in-progress keystrokes aren't clobbered by re-renders.
+    private string _previousDraftParam = "";
     private string ComposerPlaceholder => Busy
         ? "Message will queue while the agent is working... (Enter to queue)"
         : "Message... (Enter to send, Shift+Enter for newline)";
@@ -382,6 +405,29 @@
         await _scrollModule.InvokeVoidAsync("restoreScrollAfterPrepend", _messagesEl, snapshot);
     }
 
+    protected override void OnParametersSet()
+    {
+        // Sync the host's saved-draft parameter into our local working
+        // copy only when it actually changes (e.g. session switch).
+        // Comparing against _previousDraftParam (NOT _draft) means a
+        // keystroke that already updated _draft + reported back via
+        // OnDraftChanged doesn't get clobbered on the next render
+        // when the host echoes the same value into DraftText.
+        if (DraftText != _previousDraftParam)
+        {
+            _draft = DraftText;
+            _previousDraftParam = DraftText;
+        }
+    }
+
+    private async Task OnDraftInput(ChangeEventArgs e)
+    {
+        _draft = e.Value?.ToString() ?? "";
+        _previousDraftParam = _draft;
+        if (OnDraftChanged.HasDelegate)
+            await OnDraftChanged.InvokeAsync(_draft);
+    }
+
     private async Task OnKeyDown(KeyboardEventArgs e)
     {
         if (e.Key == "Enter" && !e.ShiftKey && !e.CtrlKey && !e.AltKey && !e.MetaKey)
@@ -395,6 +441,12 @@
         if (string.IsNullOrWhiteSpace(_draft)) return;
         var text = _draft;
         _draft = "";
+        _previousDraftParam = "";
+        // Notify the host so its persisted draft is cleared too --
+        // otherwise a refresh after sending would re-populate the
+        // composer with the just-sent text.
+        if (OnDraftChanged.HasDelegate)
+            await OnDraftChanged.InvokeAsync("");
         await OnSend.InvokeAsync(text);
     }
 }
