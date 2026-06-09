@@ -370,7 +370,7 @@
                     var yoloDisabledOnHost = _yoloDisabledHosts.Contains(Agent ?? "");
                     var currentYolo = _sessions?.FirstOrDefault(s => s.Id == SessionId)?.Yolo == true;
                 }
-                <MudTooltip Text="@(yoloDisabledOnHost ? "Yolo mode is disabled on this host" : "Auto-approve every tool call for this session")"
+                <MudTooltip Text="@(yoloDisabledOnHost ? "Yolo mode is disabled on this host" : "Auto-approve each tool call for this session. Flips off any time to restore manual approval for new permissions.")"
                             Placement="Placement.Bottom">
                     <MudSwitch T="bool" Color="Color.Warning" Size="Size.Small"
                                Value="@currentYolo" ValueChanged="@SetYoloForCurrentSession"

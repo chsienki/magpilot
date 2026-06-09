@@ -362,21 +362,31 @@ public sealed class AcpSessionManager
             ));
         }
 
-        // Auto-approve fast path. Two independent ways to trigger:
+        // Auto-approve fast path. Two independent ways to trigger,
+        // each with its own ergonomics:
+        //
         //   * Per-session yolo flag (YoloRegistry) -- set by the SPA's
         //     per-session toggle for a session the user explicitly
-        //     opted in.
-        //   * MAGPILOT_AUTO_APPROVE=true env var -- legacy host-wide
-        //     fallback, still honoured for backward compat with
-        //     always-on container agents like Magnus that pre-date the
-        //     per-session toggle.
+        //     opted in. Picks `allow_once` so flipping yolo OFF restores
+        //     manual approval immediately for any new permission
+        //     request. `allow_always` would persist the decision in the
+        //     CLI's per-session policy memory, so previously-touched
+        //     paths/tools would silently stay allowed even after yolo
+        //     is turned off -- surprising and incorrect for an
+        //     opt-in/opt-out toggle.
         //
-        // Either source short-circuits the SSE approval round-trip the
-        // same way: pick an "allow"-flavored option immediately. The
-        // host-level MAGPILOT_YOLO_DISABLED guard is enforced inside
-        // YoloRegistry (it makes IsEnabled always return false), so we
-        // never need to check it here -- the per-session branch simply
-        // never fires on a yolo-disabled host.
+        //   * MAGPILOT_AUTO_APPROVE=true env var -- legacy host-wide
+        //     fallback for always-on container agents like Magnus
+        //     where there's no human at a SPA to click "approve" and
+        //     re-prompting on every call would slow the agent down.
+        //     Picks `allow_always` so a long-running session caches
+        //     decisions (the same behaviour this shortcut has always
+        //     had).
+        //
+        // Either source short-circuits the SSE approval round-trip
+        // the same way. The host-level MAGPILOT_YOLO_DISABLED guard is
+        // enforced inside YoloRegistry (IsEnabled is always false), so
+        // we never need to check it here.
         var perSessionYolo = _yolo.IsEnabled(sessionId);
         var envWideAutoApprove = string.Equals(
             Environment.GetEnvironmentVariable("MAGPILOT_AUTO_APPROVE"),
@@ -384,7 +394,7 @@ public sealed class AcpSessionManager
             StringComparison.OrdinalIgnoreCase);
         if (perSessionYolo || envWideAutoApprove)
         {
-            var pick = PickAllow(options);
+            var pick = perSessionYolo ? PickAllow(options, sticky: false) : PickAllow(options, sticky: true);
             var source = perSessionYolo ? "yolo" : "MAGPILOT_AUTO_APPROVE";
             _logger.LogInformation(
                 "Auto-approving permission request for session {Sid} -> {OptionId} ({Source})",
@@ -436,12 +446,39 @@ public sealed class AcpSessionManager
     /// option that contains "allow" in its id, then the first option,
     /// then a literal "allow_once" string as a last resort.
     /// </summary>
-    private static string PickAllow(IReadOnlyList<ApprovalOption> options)
+    /// <summary>
+    /// Pick an "allow"-flavored option from the ACP permission
+    /// request's option list.
+    /// </summary>
+    /// <param name="sticky">
+    /// True: prefer <c>allow_always</c> so the Copilot CLI caches the
+    /// decision for the rest of the session and stops re-asking.
+    /// Right for unattended sidecars (env-wide MAGPILOT_AUTO_APPROVE).
+    /// False: prefer <c>allow_once</c> so each request stays individually
+    /// approved. Right for the user-facing per-session yolo toggle,
+    /// where flipping yolo off should immediately restore manual
+    /// approval for any new permission request -- including for tools
+    /// or paths the agent already touched while yolo was on.
+    /// </param>
+    private static string PickAllow(IReadOnlyList<ApprovalOption> options, bool sticky)
     {
-        var always = options.FirstOrDefault(o => o.OptionId == "allow_always");
-        if (always is not null) return always.OptionId;
-        var once = options.FirstOrDefault(o => o.OptionId == "allow_once");
-        if (once is not null) return once.OptionId;
+        if (sticky)
+        {
+            var always = options.FirstOrDefault(o => o.OptionId == "allow_always");
+            if (always is not null) return always.OptionId;
+            var fallbackOnce = options.FirstOrDefault(o => o.OptionId == "allow_once");
+            if (fallbackOnce is not null) return fallbackOnce.OptionId;
+        }
+        else
+        {
+            var once = options.FirstOrDefault(o => o.OptionId == "allow_once");
+            if (once is not null) return once.OptionId;
+            // No allow_once exposed? Fall back to allow_always so we
+            // don't block the turn; the comment on the call site
+            // documents the tradeoff.
+            var fallbackAlways = options.FirstOrDefault(o => o.OptionId == "allow_always");
+            if (fallbackAlways is not null) return fallbackAlways.OptionId;
+        }
         var anyAllow = options.FirstOrDefault(o => o.OptionId.Contains("allow", StringComparison.OrdinalIgnoreCase));
         if (anyAllow is not null) return anyAllow.OptionId;
         return options.FirstOrDefault()?.OptionId ?? "allow_once";
