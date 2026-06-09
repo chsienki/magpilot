@@ -44,9 +44,9 @@
                     break;
                 case "assistant":
                     <div class="msg-row msg-row-assistant">
-                        <MudAvatar Size="Size.Small" Color="Color.Secondary" Class="msg-avatar">
-                            <MudIcon Icon="@Icons.Material.Filled.SmartToy" Size="Size.Small" />
-                        </MudAvatar>
+                        <div class="msg-avatar magpie-avatar">
+                            <MagpieMark Size="28" />
+                        </div>
                         <MudPaper Elevation="0" Outlined="true" Class="msg-bubble msg-bubble-assistant pa-3">
                             <MarkdownView Text="@m.Text" />
                         </MudPaper>
@@ -123,9 +123,9 @@
         @if (Thinking)
         {
             <div class="msg-row msg-row-assistant">
-                <MudAvatar Size="Size.Small" Color="Color.Secondary" Class="msg-avatar">
-                    <MudIcon Icon="@Icons.Material.Filled.SmartToy" Size="Size.Small" />
-                </MudAvatar>
+                <div class="msg-avatar magpie-avatar">
+                    <MagpieMark Size="28" />
+                </div>
                 <MudPaper Elevation="0" Outlined="true" Class="msg-bubble msg-bubble-assistant pa-3 d-flex align-center">
                     <span class="thinking-dots" aria-label="thinking"><span></span><span></span><span></span></span>
                 </MudPaper>

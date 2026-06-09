@@ -44,6 +44,21 @@
     margin-top: 2px;
 }
 
+/* The magpie-mark variant of the avatar slot. MudAvatar's circle
+   chrome would clash with the bird (background colour fights the
+   transparent SVG, and the rounded mask clips the bird's tail), so
+   we render the bird in a same-size bare div instead. The size +
+   alignment here mirror what MudAvatar Size.Small produces, so
+   magpie rows line up vertically with the Person/Lightbulb/Terminal
+   avatars on neighbouring rows. */
+.magpie-avatar {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
 /* Tool-call rows: avatar (terminal icon) sits next to a smaller chip
    (title + status icon). The default msg-row align-items: flex-start
    leaves the chip sitting at the top of the avatar's box; align center

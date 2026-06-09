@@ -935,6 +935,35 @@ config; do NOT enable Caching in the NPM UI.
   + the agent's status bullet + the New chat button. Back arrow
   flips `_showHostsPane` without touching the URL or the open chat.
   Don't merge them back into one tall list.
+- **Clipping a MudChip's text** (or any MudBlazor component that
+  renders content into an inner slot) needs three things together
+  -- any one missing and the chip stays wider than the parent
+  flexbox can accommodate:
+  1. `::deep .your-chip-class` from the parent component's scoped
+     CSS to penetrate into MudChip's rendered DOM.
+  2. `min-width: 0` on BOTH the chip root AND `.mud-chip-content`
+     -- flex items default to `min-width: auto` which means
+     "don't shrink below content", and the chip's own intrinsic
+     width otherwise wins over any `max-width` you set on the
+     parent.
+  3. `overflow: hidden` + `text-overflow: ellipsis` +
+     `white-space: nowrap` + `display: block` on `.mud-chip-content`
+     so the truncated text gets the ellipsis treatment.
+  See the `repo-chip` rule in `Pages/Home.razor.css` for the
+  canonical pattern. The wrapping `MudTooltip` is the matching
+  recovery affordance -- hover restores the full text.
+- **Owner-prefix stripping** for `SessionInfo.Repository`: the
+  Copilot CLI writes the repo name as `owner/repo` in
+  `workspace.yaml`. If every session you ever open is your own
+  repo, every chip starts with `<your-handle>/`. The SPA fetches
+  `GET /api/me` on init and `Home.razor`'s `DisplayRepo()` helper
+  strips the `{identity}/` prefix from chip TEXT when it matches
+  the signed-in user. Repos from other owners render unchanged.
+  The chip's tooltip always renders the full label so the owner
+  is one hover away. **Don't hard-code a specific username
+  anywhere** -- this is identity-driven precisely because magpilot
+  is generic and someone else's deployment will have a different
+  signed-in user.
 
 ## Operational gotchas
 
@@ -1121,13 +1150,14 @@ future "what's left?" sweep doesn't accidentally re-pick them):
 - ~~2026-06-08: bug -- queued messages lost on session switch / refresh; persist in local storage~~ -> shipped: queued messages AND composer draft both persisted per-session via in-memory _queueCache/_draftCache + localStorage (magpilot.queue.{agent}/{sid} + magpilot.draft.{agent}/{sid}). Session-switch snapshots OUT + loads IN; full refresh restores both. ChatView gained DraftText parameter + OnDraftChanged callback.
 - ~~2026-06-09: magpilot: add an explicit 'release session' button in the SPA that calls the agent's existing /detach endpoint~~ -> shipped: Logout icon on the chat toolbar wires HubClient.DetachAsync; ergonomic placement + tooltip wrapping tracked as a v2 task under projects/magpilot-ui-controls.md.
 - ~~2026-06-09: SPA gets stuck in an SSE reconnect storm when navigating to an unknown agent / offline agent / non-existent session id~~ -> shipped: OnParametersSetAsync pre-flights the route against _agents + _sessions and renders a NotFound state (with a Try again button) instead of falling through to the 8x retry cycle. LoadFailed also flips into session-not-found rather than appending a stray chat bubble.
+- ~~2026-05-18: refresh button for the session list so you can see newer sessions without refreshing the whole page~~ -> shipped: MudIconButton in the sessions-pane header (Home.razor:171) wires to RefreshSessions; auto-refresh also fires on TurnComplete + tab-visibility events.
+- ~~2026-06-08: fix overflow on repo box~~ -> shipped: MudTooltip-wrapped MudChip with `repo-chip` class. Uses `::deep .repo-chip .mud-chip-content` to apply `min-width: 0` + `overflow: hidden` + `text-overflow: ellipsis` inside MudChip (the chip's intrinsic content otherwise refuses to shrink below text width). Capped at 180px; full label is one hover away.
+- ~~2026-06-08: make 'talking' icon be the magpie~~ -> shipped: assistant + thinking-bubble avatars now render MagpieMark inside a bare `.magpie-avatar` div (instead of MudAvatar wrapping MudIcon SmartToy). MudAvatar's circle background was fighting the transparent magpie SVG; the bare-div approach preserves layout while letting the bird breathe.
+- ~~2026-06-09: repo names dominated by repeated `owner/` prefixes when every session is the signed-in user's own repo~~ -> shipped: SPA fetches `/api/me` on init and `DisplayRepo()` strips `{identity}/` from the chip text when it matches the signed-in user. Generic -- repos owned by anyone else still render with their full `owner/repo`. Tooltip always shows the full path so the owner is one hover away.
 
 Open items:
 
 - 2026-05-18: agent/hub connect handshake -- either a single condensed token bundling all connection info, or a UDP discovery mode (think WPS but for agents and the hub) so users don't have to copy a bunch of random strings
-- 2026-05-18: refresh button for the session list so you can see newer sessions without refreshing the whole page
-- 2026-06-08: fix overflow on repo box
-- 2026-06-08: make 'talking' icon be the magpie
 - 2026-06-08: cleanup status bar at top to be less confusing
 - 2026-06-08: powershell one-liner that downloads, verifies and runs the installer as an easy bootstrap
 - 2026-06-08: drop 'past' sessions list, replace with 'resume previous' button that opens a filterable/searchable list

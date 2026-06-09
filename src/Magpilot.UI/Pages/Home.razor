@@ -237,9 +237,19 @@
                                         }
                                         @if (!string.IsNullOrWhiteSpace(s.Repository))
                                         {
-                                            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Default" Icon="@Icons.Material.Filled.FolderOpen">
-                                                @s.Repository@(string.IsNullOrWhiteSpace(s.Branch) ? string.Empty : $"@{s.Branch}")
-                                            </MudChip>
+                                            var fullRepoLabel = string.IsNullOrWhiteSpace(s.Branch)
+                                                ? s.Repository!
+                                                : s.Repository + "@" + s.Branch;
+                                            var shortRepoLabel = string.IsNullOrWhiteSpace(s.Branch)
+                                                ? DisplayRepo(s.Repository)
+                                                : DisplayRepo(s.Repository) + "@" + s.Branch;
+                                            <MudTooltip Text="@fullRepoLabel" Placement="Placement.Bottom">
+                                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
+                                                         Color="Color.Default" Icon="@Icons.Material.Filled.FolderOpen"
+                                                         Class="repo-chip">
+                                                    @shortRepoLabel
+                                                </MudChip>
+                                            </MudTooltip>
                                         }
                                         else if (!string.IsNullOrWhiteSpace(s.Cwd))
                                         {
@@ -632,6 +642,33 @@
     private bool _newSessionBusy;
     private List<string> _cwdSuggestions = new();
 
+    /// <summary>
+    /// GitHub login of the currently signed-in user (from
+    /// <c>GET /api/me</c>), or null if anonymous / lookup failed.
+    /// Drives <see cref="DisplayRepo"/>: a repo whose name starts
+    /// with <c>{identity}/</c> is shown as just the trailing repo
+    /// name. The full <c>owner/repo</c> still goes into the
+    /// session-list chip's tooltip so the original is one hover away.
+    /// </summary>
+    private string? _currentUserIdentity;
+
+    /// <summary>
+    /// Render-time helper: shorten <c>owner/repo</c> to <c>repo</c>
+    /// when <c>owner</c> matches the signed-in user. Generic --
+    /// returns the input unchanged for repos owned by anyone else,
+    /// or when the identity is unknown (anonymous / dev runs without
+    /// OAUTH_ALLOWED_GITHUB_USERS set).
+    /// </summary>
+    private string DisplayRepo(string? repo)
+    {
+        if (string.IsNullOrEmpty(repo) || string.IsNullOrEmpty(_currentUserIdentity))
+            return repo ?? string.Empty;
+        var prefix = _currentUserIdentity + "/";
+        return repo.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            ? repo[prefix.Length..]
+            : repo;
+    }
+
     // Route-validation state set by OnParametersSetAsync. When non-null
     // the chat view is replaced by a NotFound alert and the streaming
     // pipeline is skipped entirely. Values:
@@ -664,6 +701,20 @@
             _agents = [];
             HubLog.LogError($"ListAgentsAsync failed: {ex.Message}", ex.ToString(), category: nameof(Home));
             Snackbar.Add($"Could not load hosts: {ex.Message}", Severity.Error);
+        }
+
+        // Used by DisplayRepo() to strip "{identity}/" from repo
+        // names when they belong to the signed-in user. Anonymous if
+        // /api/me fails -- repo names just render with their owner
+        // prefix, which is the pre-strip behaviour.
+        try
+        {
+            var me = await Hub.GetMeAsync();
+            _currentUserIdentity = me?.Identity;
+        }
+        catch (Exception ex)
+        {
+            HubLog.LogError($"GetMeAsync failed: {ex.Message}", ex.ToString(), category: nameof(Home));
         }
 
         try

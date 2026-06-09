@@ -21,6 +21,18 @@ public sealed class HubClient
             _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", t);
     }
 
+    /// <summary>
+    /// Fetch the currently signed-in user's identity from
+    /// <c>GET /api/me</c>. Used by Home.razor to strip the owner
+    /// prefix from <c>SessionInfo.Repository</c> when it matches the
+    /// signed-in user, so the session list isn't dominated by
+    /// repeated <c>username/</c> prefixes.
+    /// </summary>
+    public Task<MeInfo?> GetMeAsync(CancellationToken ct = default) =>
+        _http.GetFromJsonAsync<MeInfo>("api/me", ct);
+
+    public sealed record MeInfo(string? Identity);
+
     public Task<List<AgentInfo>?> ListAgentsAsync(CancellationToken ct = default) =>
         _http.GetFromJsonAsync<List<AgentInfo>>("api/agents", ct);
 
