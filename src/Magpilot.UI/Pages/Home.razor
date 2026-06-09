@@ -356,6 +356,59 @@
                 </MudPaper>
             </MudContainer>
         }
+        else if (_routeError is not null)
+        {
+            var (icon, color, title, body) = _routeError switch
+            {
+                "agent-unknown" => (
+                    Icons.Material.Filled.HelpOutline,
+                    Color.Warning,
+                    $"Host '{Agent}' is unknown",
+                    "This host isn't registered with the hub. Pick one from the drawer, or check that the host's magpilot agent is running and discoverable on the LAN."),
+                "agent-offline" => (
+                    Icons.Material.Filled.CloudOff,
+                    Color.Error,
+                    $"Host '{Agent}' is unreachable",
+                    "The hub couldn't reach this host. The agent may be stopped, the machine off, or the LAN connection down. Try again once it's back."),
+                "session-not-found" => (
+                    Icons.Material.Filled.SearchOff,
+                    Color.Warning,
+                    "Session not found",
+                    $"No session with id '{SessionId}' exists on '{Agent}'. It may have been deleted, or the link is stale."),
+                _ => (Icons.Material.Filled.ErrorOutline, Color.Error, "Something went wrong",
+                      "Pick another session from the drawer or go back to the host list.")
+            };
+            <MudContainer MaxWidth="MaxWidth.Small" Class="my-8">
+                <MudPaper Class="pa-6 d-flex flex-column align-center" Elevation="2">
+                    <MudIcon Icon="@icon" Color="@color" Size="Size.Large" Class="mb-2" />
+                    <MudText Typo="Typo.h6" Class="mb-2">@title</MudText>
+                    <MudText Typo="Typo.body2" Color="Color.Default" Align="Align.Center" Class="mb-4">
+                        @body
+                    </MudText>
+                    <MudStack Row="true" Spacing="2">
+                        <MudButton Variant="Variant.Filled" Color="Color.Primary"
+                                   StartIcon="@Icons.Material.Filled.Refresh"
+                                   Disabled="@_routeRetryBusy"
+                                   OnClick="@HandleRouteRetry">
+                            Try again
+                        </MudButton>
+                        @if (Agent is not null && _routeError == "session-not-found")
+                        {
+                            <MudButton Variant="Variant.Text" Color="Color.Default"
+                                       StartIcon="@Icons.Material.Filled.ArrowBack"
+                                       OnClick="@(() => Nav.NavigateTo($"/agents/{Agent}"))">
+                                Back to @Agent
+                            </MudButton>
+                        }
+                        <MudButton Variant="Variant.Text" Color="Color.Default"
+                                   StartIcon="@Icons.Material.Filled.Home"
+                                   OnClick="@(() => Nav.NavigateTo("/"))">
+                            All hosts
+                        </MudButton>
+                    </MudStack>
+                </MudPaper>
+            </MudContainer>
+        }
         else if (Agent is not null && SessionId is not null)
         {
             @if (_loading)
@@ -550,6 +603,19 @@
     private bool _newSessionBusy;
     private List<string> _cwdSuggestions = new();
 
+    // Route-validation state set by OnParametersSetAsync. When non-null
+    // the chat view is replaced by a NotFound alert and the streaming
+    // pipeline is skipped entirely. Values:
+    //   "agent-unknown"     -- Agent is set but not in _agents.
+    //   "agent-offline"     -- ListSessionsAsync threw for this Agent.
+    //   "session-not-found" -- SessionId not in _sessions (after a
+    //                          successful list fetch).
+    // Cleared at the top of OnParametersSetAsync so a fix-and-retry
+    // navigation works.
+    private string? _routeError;
+    private bool _sessionsListFailed;
+    private bool _routeRetryBusy;
+
     private sealed record PendingForceTake(string Text, int HostPid);
 
     // Per-session in-memory snapshot of messages, keyed by "{Agent}/{SessionId}".
@@ -638,6 +704,33 @@
     }
 
     private bool _releaseBusy;
+
+    /// <summary>
+    /// "Try again" from the route-error alert. Re-fetches the host
+    /// list (in case a previously-unknown agent just came online via
+    /// discovery, or a previously-offline host is back) and then
+    /// re-runs OnParametersSetAsync's route validation so a successful
+    /// fetch transitions the page out of the error state.
+    /// </summary>
+    private async Task HandleRouteRetry()
+    {
+        _routeRetryBusy = true;
+        try
+        {
+            try { _agents = await Hub.ListAgentsAsync(); }
+            catch (Exception ex)
+            {
+                HubLog.LogError($"ListAgentsAsync (retry) failed: {ex.Message}", ex.ToString(),
+                    category: nameof(Home));
+                Snackbar.Add($"Could not refresh hosts: {ex.Message}", Severity.Error);
+            }
+            await OnParametersSetAsync();
+        }
+        finally
+        {
+            _routeRetryBusy = false;
+        }
+    }
 
     /// <summary>
     /// Drop the agent's ACP copy of the current session back to Dormant
@@ -744,17 +837,66 @@
 
     protected override async Task OnParametersSetAsync()
     {
+        // Reset on every navigation so a previous bad route doesn't
+        // stick when the user navigates to a valid one.
+        _routeError = null;
+        _sessionsListFailed = false;
+
         if (Agent is not null)
         {
-            try { _sessions = await Hub.ListSessionsAsync(Agent); }
-            catch (Exception ex)
+            // First, validate the agent against our cached host list.
+            // If we know what hosts exist and Agent isn't one of them,
+            // bail out before hammering the hub with a doomed
+            // ListSessionsAsync + SSE-stream retry storm.
+            if (_agents is { Count: > 0 } &&
+                !_agents.Any(a => string.Equals(a.Name, Agent, StringComparison.OrdinalIgnoreCase)))
             {
-                HubLog.LogError($"ListSessionsAsync failed for {Agent}: {ex.Message}", ex.ToString(),
-                    category: nameof(Home), sessionId: SessionId,
-                    extra: new { agent = Agent });
-                _sessions = [];
-                Snackbar.Add($"Could not load sessions on {Agent}: {ex.Message}", Severity.Error);
+                _routeError = "agent-unknown";
             }
+            else
+            {
+                try { _sessions = await Hub.ListSessionsAsync(Agent); }
+                catch (Exception ex)
+                {
+                    HubLog.LogError($"ListSessionsAsync failed for {Agent}: {ex.Message}", ex.ToString(),
+                        category: nameof(Home), sessionId: SessionId,
+                        extra: new { agent = Agent });
+                    _sessions = [];
+                    _sessionsListFailed = true;
+                    Snackbar.Add($"Could not load sessions on {Agent}: {ex.Message}", Severity.Error);
+                    // The agent is in our registry but unreachable right
+                    // now. Surface a single clear error instead of letting
+                    // the SSE pump retry 8x.
+                    _routeError = "agent-offline";
+                }
+            }
+        }
+
+        // Session-level precondition: when ListSessionsAsync succeeded
+        // but the SessionId in the URL isn't in the resulting list, the
+        // user followed a stale link / typed a bad id. Skip the stream
+        // dance and show a NotFound state. We deliberately only do this
+        // when _sessions came from a successful fetch -- a failed fetch
+        // already raised "agent-offline" above and we don't want to
+        // double-report.
+        if (_routeError is null
+            && Agent is not null
+            && SessionId is not null
+            && _sessions is not null
+            && !_sessionsListFailed
+            && !_sessions.Any(s => s.Id == SessionId))
+        {
+            _routeError = "session-not-found";
+        }
+
+        // Bail out of the streaming branch entirely when the route is
+        // known-bad. Cancel any leftover stream from a previous
+        // (valid) route so it doesn't keep pumping into the chat.
+        if (_routeError is not null)
+        {
+            await StopStreamingAsync();
+            _streamingFor = null;
+            return;
         }
 
         if (Agent is not null && SessionId is not null && _streamingFor != $"{Agent}/{SessionId}")
@@ -1577,7 +1719,20 @@
             case LoadFailed lf:
                 _loading = false;
                 _suppressReplayEvents = false;
-                _messages.Add(new ChatMessage { Role = "tool", Text = $"load failed: {lf.Error}" });
+                // session/load failure means the session genuinely
+                // isn't loadable -- either the on-disk record is missing
+                // (bogus / stale sessionId) or ACP refused. Don't keep
+                // the SSE stream alive on what's effectively a dead
+                // route; flip into the same NotFound state used for the
+                // 404 pre-flight so the user sees a coherent error
+                // instead of a stray "load failed: ..." tool bubble +
+                // a perpetually-heartbeating stream.
+                _routeError = "session-not-found";
+                _ = StopStreamingAsync();
+                _streamingFor = null;
+                HubLog.LogWarning($"LoadFailed for {Agent}/{SessionId}: {lf.Error}",
+                    category: nameof(Home), sessionId: SessionId,
+                    extra: new { agent = Agent, error = lf.Error });
                 break;
             case HeartbeatEvent:
                 break;
