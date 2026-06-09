@@ -41,6 +41,7 @@ builder.Services.AddSingleton<AcpSessionManager>();
 builder.Services.AddSingleton<SessionScanner>();
 builder.Services.AddSingleton<HostOwnership>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<HostOwnership>());
+builder.Services.AddSingleton<YoloRegistry>();
 builder.Services.AddSingleton<SessionRegistry>();
 builder.Services.AddSingleton<HistoryReader>();
 builder.Services.AddSingleton<Magpilot.Agent.Update.LatestVersionCache>();

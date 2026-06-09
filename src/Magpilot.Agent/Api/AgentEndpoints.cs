@@ -247,6 +247,33 @@ public static class AgentEndpoints
         });
         // --------------------------------------------------------------------
 
+        // Per-session yolo mode toggle. The agent's YoloRegistry keeps a
+        // sessionId -> bool map in memory; when a session is yolo-enabled
+        // the ACP approval handler short-circuits each
+        // session/request_permission to an allow option (same shortcut as
+        // the env-wide MAGPILOT_AUTO_APPROVE, but scoped per-session).
+        //
+        // 403 + { error, hostDisabled: true } if the host has
+        // MAGPILOT_YOLO_DISABLED=true set, so per-host opt-out wins
+        // over per-session opt-in. Returns the refreshed SessionStateInfo
+        // (with Info.Yolo reflecting the new state) on success.
+        api.MapPost("/sessions/{id}/yolo", (string id, YoloRequest body, SessionRegistry reg, YoloRegistry yolo) =>
+        {
+            if (yolo.HostDisabled)
+                return Results.Json(
+                    new { error = "Yolo mode is disabled on this host (MAGPILOT_YOLO_DISABLED=true).", hostDisabled = true },
+                    statusCode: StatusCodes.Status403Forbidden);
+
+            if (reg.Get(id) is null)
+                return Results.NotFound(new { error = $"Session {id} not on disk" });
+
+            yolo.Set(id, body.Enabled);
+            var state = reg.GetState(id);
+            return state is null
+                ? Results.NotFound(new { error = $"Session {id} not on disk" })
+                : Results.Ok(state);
+        });
+
         api.MapPost("/sessions/{id}/messages", (string id, PromptRequest req, AcpSessionManager acp, HostOwnership hostOwn) =>
         {
             // Refuse to drive the session if a magpilot launcher

@@ -228,6 +228,13 @@
                                         @(s.Summary ?? s.Id[..8])
                                     </MudText>
                                     <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center" Class="mt-1">
+                                        @if (s.Yolo)
+                                        {
+                                            <MudChip T="string" Size="Size.Small" Variant="Variant.Filled"
+                                                     Color="Color.Warning" Icon="@Icons.Material.Filled.Bolt">
+                                                YOLO
+                                            </MudChip>
+                                        }
                                         @if (!string.IsNullOrWhiteSpace(s.Repository))
                                         {
                                             <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Default" Icon="@Icons.Material.Filled.FolderOpen">
@@ -359,6 +366,17 @@
                 <MudSwitch T="bool" Color="Color.Primary" Size="Size.Small"
                            Value="_showThoughts" ValueChanged="@SetShowThoughts"
                            Label="Show thinking" />
+                @{
+                    var yoloDisabledOnHost = _yoloDisabledHosts.Contains(Agent ?? "");
+                    var currentYolo = _sessions?.FirstOrDefault(s => s.Id == SessionId)?.Yolo == true;
+                }
+                <MudTooltip Text="@(yoloDisabledOnHost ? "Yolo mode is disabled on this host" : "Auto-approve every tool call for this session")"
+                            Placement="Placement.Bottom">
+                    <MudSwitch T="bool" Color="Color.Warning" Size="Size.Small"
+                               Value="@currentYolo" ValueChanged="@SetYoloForCurrentSession"
+                               Disabled="@(yoloDisabledOnHost || _yoloBusy)"
+                               Label="YOLO" Class="ml-3" />
+                </MudTooltip>
             </div>
             @if (_streamStatus == StreamStatus.Offline)
             {
@@ -564,6 +582,50 @@
         _showThoughts = value;
         try { await JS.InvokeVoidAsync("localStorage.setItem", ShowThoughtsKey, value ? "true" : "false"); }
         catch { }
+    }
+
+    // Hosts that have answered 403 to a yolo flip (MAGPILOT_YOLO_DISABLED=true).
+    // Sticky for the lifetime of the SPA so we don't grey -> retry -> grey on
+    // every keystroke. Cleared on full page reload, which is fine -- changing
+    // the env var requires an agent restart anyway.
+    private readonly HashSet<string> _yoloDisabledHosts = new(StringComparer.OrdinalIgnoreCase);
+    private bool _yoloBusy;
+
+    private async Task SetYoloForCurrentSession(bool value)
+    {
+        if (string.IsNullOrEmpty(Agent) || string.IsNullOrEmpty(SessionId) || _sessions is null)
+            return;
+        if (_yoloDisabledHosts.Contains(Agent)) return;
+
+        _yoloBusy = true;
+        try
+        {
+            var state = await Hub.SetYoloAsync(Agent, SessionId, value);
+            // Mirror the new yolo bit into the local _sessions list so the
+            // toolbar switch + the per-row YOLO pill update without a
+            // separate refresh round-trip.
+            var idx = _sessions.FindIndex(s => s.Id == SessionId);
+            if (idx >= 0)
+                _sessions[idx] = _sessions[idx] with { Yolo = state.Info.Yolo };
+            Snackbar.Add(value ? "Yolo on -- auto-approving for this session" : "Yolo off",
+                value ? Severity.Warning : Severity.Info);
+        }
+        catch (YoloDisabledException)
+        {
+            _yoloDisabledHosts.Add(Agent);
+            Snackbar.Add("Yolo mode is disabled on this host (MAGPILOT_YOLO_DISABLED=true).", Severity.Error);
+        }
+        catch (Exception ex)
+        {
+            HubLog.LogError($"SetYoloAsync failed: {ex.Message}", ex.ToString(), category: nameof(Home),
+                sessionId: SessionId,
+                extra: new { agent = Agent, enabled = value });
+            Snackbar.Add($"Could not change yolo: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _yoloBusy = false;
+        }
     }
 
     private void ToggleDrawer() => _drawerOpen = !_drawerOpen;

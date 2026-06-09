@@ -199,6 +199,28 @@ public sealed class HubClient
         return (await resp.Content.ReadFromJsonAsync<SessionStateInfo>(cancellationToken: ct))!;
     }
 
+    /// <summary>
+    /// Flip the per-session yolo mode bit on the agent. When yolo is on,
+    /// the agent auto-approves every <c>session/request_permission</c>
+    /// for this session, bypassing the SSE approval round-trip. The
+    /// returned <see cref="SessionStateInfo"/> reflects the new state
+    /// in <c>Info.Yolo</c>. Throws <see cref="YoloDisabledException"/>
+    /// if the agent's host has <c>MAGPILOT_YOLO_DISABLED=true</c> set
+    /// (403), so the SPA can surface a meaningful error and stop
+    /// offering the toggle on that host.
+    /// </summary>
+    public async Task<SessionStateInfo> SetYoloAsync(string agent, string id, bool enabled, CancellationToken ct = default)
+    {
+        var resp = await _http.PostAsJsonAsync(
+            $"api/agents/{agent}/sessions/{id}/yolo",
+            new YoloRequest(enabled),
+            ct);
+        if (resp.StatusCode == System.Net.HttpStatusCode.Forbidden)
+            throw new YoloDisabledException("Yolo mode is disabled on this host (MAGPILOT_YOLO_DISABLED=true).");
+        resp.EnsureSuccessStatusCode();
+        return (await resp.Content.ReadFromJsonAsync<SessionStateInfo>(cancellationToken: ct))!;
+    }
+
     public async Task ResolveApprovalAsync(string agent, string id, string approvalId, string optionId, CancellationToken ct = default)
     {
         var resp = await _http.PostAsJsonAsync(
@@ -349,3 +371,11 @@ public sealed class HostStillOwnedException(int hostPid, string message) : Excep
 {
     public int HostPid { get; } = hostPid;
 }
+
+/// <summary>
+/// Thrown by <see cref="HubClient.SetYoloAsync"/> when the agent's
+/// host has <c>MAGPILOT_YOLO_DISABLED=true</c> set. Surfaces as 403
+/// from the agent and lets the SPA disable the toggle + show a tooltip
+/// rather than silently failing.
+/// </summary>
+public sealed class YoloDisabledException(string message) : Exception(message);

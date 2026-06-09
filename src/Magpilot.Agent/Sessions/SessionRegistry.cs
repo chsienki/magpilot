@@ -15,22 +15,32 @@ public sealed class SessionRegistry
     private readonly AcpSessionManager _acp;
     private readonly SessionScanner _scanner;
     private readonly HostOwnership _hostOwnership;
+    private readonly YoloRegistry _yolo;
     private readonly ILogger<SessionRegistry> _logger;
     private readonly ConcurrentDictionary<string, byte> _owned = new();
 
-    public SessionRegistry(AcpSessionManager acp, SessionScanner scanner, HostOwnership hostOwnership, ILogger<SessionRegistry> logger)
+    public SessionRegistry(AcpSessionManager acp, SessionScanner scanner, HostOwnership hostOwnership, YoloRegistry yolo, ILogger<SessionRegistry> logger)
     {
         _acp = acp;
         _scanner = scanner;
         _hostOwnership = hostOwnership;
+        _yolo = yolo;
         _logger = logger;
     }
 
     public IReadOnlySet<string> Owned => _owned.Keys.ToHashSet();
 
-    public IReadOnlyList<SessionInfo> List() => _scanner.Enumerate(Owned).ToList();
+    public IReadOnlyList<SessionInfo> List() =>
+        _scanner.Enumerate(Owned).Select(s => s with { Yolo = _yolo.IsEnabled(s.Id) }).ToList();
 
-    public SessionInfo? Get(string id) => _scanner.Get(id, Owned);
+    public SessionInfo? Get(string id) => WithYolo(_scanner.Get(id, Owned));
+
+    // SessionInfo is on-disk-derived; Yolo lives in-memory in YoloRegistry.
+    // Decorate at the read boundary so callers (HTTP, SPA) see a single
+    // consistent record without scattering YoloRegistry lookups across the
+    // codebase.
+    private SessionInfo? WithYolo(SessionInfo? info) =>
+        info is null ? null : info with { Yolo = _yolo.IsEnabled(info.Id) };
 
     public async Task<SessionInfo> CreateAsync(string? cwd, bool useAgency, CancellationToken ct, string? name = null)
     {
@@ -47,7 +57,7 @@ public sealed class SessionRegistry
         if (!string.IsNullOrWhiteSpace(name))
             TryWriteWorkspaceField(sid, "name", name, "summary", name);
 
-        return _scanner.Get(sid, Owned)
+        return WithYolo(_scanner.Get(sid, Owned))
             ?? new SessionInfo(sid, SessionState.Owned, cwd, null, null, name, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
     }
 
@@ -105,7 +115,7 @@ public sealed class SessionRegistry
             ?? throw new FileNotFoundException($"Session {sessionId} not on disk");
 
         if (info.State == SessionState.Owned)
-            return info;
+            return WithYolo(info)!;
 
         if (info.State == SessionState.Locked)
         {
@@ -133,7 +143,7 @@ public sealed class SessionRegistry
         var cwd = info.Cwd ?? Environment.CurrentDirectory;
         await _acp.LoadSessionAsync(sessionId, cwd, AcpFlavor.Default, ct);
         _owned.TryAdd(sessionId, 0);
-        return _scanner.Get(sessionId, Owned) ?? info with { State = SessionState.Owned };
+        return WithYolo(_scanner.Get(sessionId, Owned)) ?? info with { State = SessionState.Owned };
     }
 
     public async Task DetachAsync(string sessionId, CancellationToken ct)
@@ -149,7 +159,7 @@ public sealed class SessionRegistry
     /// </summary>
     public SessionStateInfo? GetState(string sessionId)
     {
-        var info = _scanner.Get(sessionId, Owned);
+        var info = WithYolo(_scanner.Get(sessionId, Owned));
         if (info is null) return null;
 
         SessionOwner owner;
@@ -229,6 +239,13 @@ public sealed class SessionRegistry
         }
 
         _hostOwnership.Set(sessionId, hostPid);
+
+        // Drop the in-memory yolo bit so the terminal user (now at a
+        // real keyboard with a TTY) gets the standard interactive
+        // approval prompts rather than silent auto-approve they didn't
+        // opt into. The wrapper can flip yolo back on later via the
+        // agent's HTTP API if desired.
+        _yolo.Clear(sessionId);
 
         // Refresh state for the response (now reflecting host ownership).
         return GetState(sessionId)!;

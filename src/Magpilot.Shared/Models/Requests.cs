@@ -40,6 +40,17 @@ public sealed record AcquireForHostBody(int HostPid, bool Force = false);
 public sealed record ReleaseFromHostBody(int HostPid);
 
 /// <summary>
+/// Body for <c>POST /api/sessions/{id}/yolo</c>. Flips the per-session
+/// auto-approve flag held in the agent's in-memory <c>YoloRegistry</c>.
+/// When <see cref="Enabled"/> is true, every subsequent
+/// <c>session/request_permission</c> for this session is auto-approved
+/// (the same shortcut the env-wide <c>MAGPILOT_AUTO_APPROVE=true</c>
+/// applies, but scoped to one session). The agent returns 403 if its
+/// host has <c>MAGPILOT_YOLO_DISABLED=true</c> set.
+/// </summary>
+public sealed record YoloRequest(bool Enabled);
+
+/// <summary>
 /// Response body returned by ACP-driving endpoints (<c>POST /messages</c>,
 /// <c>POST /interrupt</c>, <c>POST /approvals/{id}</c>) with status code
 /// <c>409 Conflict</c> when the session is currently held by a

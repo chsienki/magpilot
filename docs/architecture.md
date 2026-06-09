@@ -236,6 +236,7 @@ works without a configured token.
 | POST   | `/sessions/{id}/release-request`           | Broadcast `release_requested` SSE event to subscribers (e.g. a magpilot launcher) so they can begin graceful shutdown. **NEW (shim Phase 1).** |
 | POST   | `/sessions/{id}/acquire-for-host`          | Atomic combined op: agent waits for clean turn boundary (or aborts in-flight if `force=true`), drops its lock, marks the session host-owned. **NEW (shim Phase 1).** |
 | POST   | `/sessions/{id}/release`                   | Wrapper signals it has shut down its child; agent re-adopts. 409 if wrong `hostPid`. **NEW (shim Phase 1).** |
+| POST   | `/sessions/{id}/yolo`                      | Flip the per-session yolo (auto-approve) bit. Body `YoloRequest { Enabled }`. Returns refreshed `SessionStateInfo` (the new bit is on `Info.Yolo`). **Returns 403** with `{ hostDisabled: true }` if the agent has `MAGPILOT_YOLO_DISABLED=true`. |
 | POST   | `/quick-prompt`                            | Synchronous "ask + answer" -- handles SSE internally       |
 
 ### `quick-prompt` -- the convenience door for non-SPA clients

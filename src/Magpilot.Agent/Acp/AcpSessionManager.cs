@@ -16,6 +16,7 @@ namespace Magpilot.Agent.Acp;
 public sealed class AcpSessionManager
 {
     private readonly AcpFlavorPool _pool;
+    private readonly Magpilot.Agent.Sessions.YoloRegistry _yolo;
     private readonly ILogger<AcpSessionManager> _logger;
     private readonly Dictionary<string, List<Channel<StreamEvent>>> _subscribers = new();
     private readonly object _subLock = new();
@@ -47,9 +48,10 @@ public sealed class AcpSessionManager
     /// </summary>
     private readonly ConcurrentDictionary<string, TaskCompletionSource> _turnDone = new();
 
-    public AcpSessionManager(AcpFlavorPool pool, ILogger<AcpSessionManager> logger)
+    public AcpSessionManager(AcpFlavorPool pool, Magpilot.Agent.Sessions.YoloRegistry yolo, ILogger<AcpSessionManager> logger)
     {
         _pool = pool;
+        _yolo = yolo;
         _logger = logger;
         _pool.OnSessionUpdate += HandleUpdate;
         _pool.OnRequest += HandleRequestAsync;
@@ -360,26 +362,33 @@ public sealed class AcpSessionManager
             ));
         }
 
-        // MAGPILOT_AUTO_APPROVE=true short-circuits the approval flow:
-        // every session/request_permission picks an "allow"-flavored
-        // option immediately. Intended for trusted always-on agents
-        // like Magnus, where the trust boundary is the container itself
-        // (everything inside is already authorized -- there's no human
-        // sitting in front of a SPA to click "approve"). Without this
-        // env var, /quick-prompt callers (WhatsApp sidecar, cron jobs)
-        // can't drive any tool that requires permission (e.g. `edit`
-        // on a file outside the session's cwd), because the approval
-        // request fans out to SSE subscribers that have no UI to
-        // answer, and times out after 5 minutes to a deny.
-        if (string.Equals(
+        // Auto-approve fast path. Two independent ways to trigger:
+        //   * Per-session yolo flag (YoloRegistry) -- set by the SPA's
+        //     per-session toggle for a session the user explicitly
+        //     opted in.
+        //   * MAGPILOT_AUTO_APPROVE=true env var -- legacy host-wide
+        //     fallback, still honoured for backward compat with
+        //     always-on container agents like Magnus that pre-date the
+        //     per-session toggle.
+        //
+        // Either source short-circuits the SSE approval round-trip the
+        // same way: pick an "allow"-flavored option immediately. The
+        // host-level MAGPILOT_YOLO_DISABLED guard is enforced inside
+        // YoloRegistry (it makes IsEnabled always return false), so we
+        // never need to check it here -- the per-session branch simply
+        // never fires on a yolo-disabled host.
+        var perSessionYolo = _yolo.IsEnabled(sessionId);
+        var envWideAutoApprove = string.Equals(
             Environment.GetEnvironmentVariable("MAGPILOT_AUTO_APPROVE"),
             "true",
-            StringComparison.OrdinalIgnoreCase))
+            StringComparison.OrdinalIgnoreCase);
+        if (perSessionYolo || envWideAutoApprove)
         {
             var pick = PickAllow(options);
+            var source = perSessionYolo ? "yolo" : "MAGPILOT_AUTO_APPROVE";
             _logger.LogInformation(
-                "Auto-approving permission request for session {Sid} -> {OptionId} (MAGPILOT_AUTO_APPROVE=true)",
-                sessionId, pick);
+                "Auto-approving permission request for session {Sid} -> {OptionId} ({Source})",
+                sessionId, pick, source);
             return BuildOutcome(pick, options);
         }
 

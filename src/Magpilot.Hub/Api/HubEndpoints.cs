@@ -185,6 +185,14 @@ public static class HubEndpoints
                 }));
         // ------------------------------------------------------------------
 
+        api.MapPost("/agents/{name}/sessions/{id}/yolo",
+            (string name, string id, YoloRequest body, AgentHttpClient http, AgentRegistry reg, CancellationToken ct) =>
+                Proxy(name, reg, async () =>
+                {
+                    var resp = await http.ClientFor(name).PostAsJsonAsync($"api/sessions/{id}/yolo", body, ct);
+                    return await Forward(resp);
+                }));
+
         api.MapPost("/agents/{name}/sessions/{id}/interrupt",
             (string name, string id, AgentHttpClient http, AgentRegistry reg, CancellationToken ct) =>
                 Proxy(name, reg, async () =>

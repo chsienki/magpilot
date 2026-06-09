@@ -28,5 +28,13 @@ public sealed record SessionInfo(
     string? Summary,
     int? OwnerPid,
     DateTimeOffset? CreatedAt,
-    DateTimeOffset? UpdatedAt
+    DateTimeOffset? UpdatedAt,
+    // Per-session "yolo" flag: when true, the agent auto-approves every
+    // session/request_permission for this session, bypassing the SSE
+    // approval round-trip. Decorated by SessionRegistry from the
+    // in-memory YoloRegistry; not persisted in workspace.yaml and
+    // resets to false on agent restart. Field is the last positional
+    // parameter and defaults to false so older clients that omit it
+    // continue to deserialize.
+    bool Yolo = false
 );
