@@ -66,6 +66,20 @@ public sealed class HubClient
     public Task<List<AgentInfo>?> ListAgentsAsync(CancellationToken ct = default) =>
         _http.GetFromJsonAsync<List<AgentInfo>>("api/agents", ct);
 
+    /// <summary>
+    /// Revoke a paired agent. Hub clears the per-agent token + sets
+    /// <c>revoked_at</c>. Subsequent calls to that agent return 410
+    /// from the hub's Proxy wrapper. Reversible by re-enrolling via
+    /// a fresh voucher. Returns the refreshed <see cref="AgentInfo"/>;
+    /// 404 surfaces as <see cref="HttpRequestException"/>.
+    /// </summary>
+    public async Task<AgentInfo?> RevokeAgentAsync(string name, CancellationToken ct = default)
+    {
+        var resp = await _http.PostAsync($"api/admin/agents/{Uri.EscapeDataString(name)}/revoke", content: null, ct);
+        resp.EnsureSuccessStatusCode();
+        return await resp.Content.ReadFromJsonAsync<AgentInfo>(cancellationToken: ct);
+    }
+
     public Task<List<SessionInfo>?> ListSessionsAsync(string agent, CancellationToken ct = default) =>
         _http.GetFromJsonAsync<List<SessionInfo>>($"api/agents/{agent}/sessions", ct);
 

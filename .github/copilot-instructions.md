@@ -499,27 +499,40 @@ Parameters (use the scriptblock form to pass them through `irm | iex`):
   Releases page instead, or fork to a public mirror and point
   `-Repo` at it.
 
-### Pairing V2a (`magpilot --magpilot-pair=<bundle>`)
+### Pairing V2a + V2b (`magpilot --magpilot-pair=<bundle>`)
 
-The installer no longer collects hub URL / agent token / hub bearer
-during install (the Settings page is gone; see the `magpilot-pairing`
-project file in copilot-context for the full design). Fresh installs
-land in a "disconnected" state:
+The installer's wizard has a single optional Pairing page that
+collects an enrollment bundle if the user has one ready. Two install
+shapes share the same code path:
 
-* `install-task.ps1` creates a minimal `magpilot.env` with just a
-  CSPRNG-strength random `MAGPILOT_AGENT_TOKEN` placeholder (so the
-  agent has a unique LAN bearer instead of the dev default that
-  anyone could guess) and nothing else.
-* Agent boots, listens on `:5099`, but has no hub to talk to and no
-  ACP work to do until paired.
+* **Paste bundle during install (V2b path):** wizard's Pairing field
+  is non-empty -> installer passes `-Bundle "<value>"` to
+  install-task.ps1 -> after registering the scheduled task,
+  install-task.ps1 calls
+  `magpilot.exe --magpilot-pair=<bundle>`. Install + pair complete
+  in one go; agent boots fully wired up on next logon.
+* **Pair later (V2a path):** Pairing field left empty.
+  `install-task.ps1` creates a minimal `magpilot.env` with just a
+  CSPRNG-strength random `MAGPILOT_AGENT_TOKEN` placeholder; agent
+  boots, listens on `:5099`, but is unreachable from the hub
+  (placeholder token has no matching row in the hub's `agents`
+  table). User pairs from a shell via
+  `magpilot --magpilot-pair=<bundle>` whenever they're ready.
 
 V2a uses **voucher-based enrollment**: each pairing mints a fresh
 per-agent token. There's no shared `MAGPILOT_AGENT_TOKEN` on the hub
 anymore -- the hub looks up per-agent bearers from its own database
 keyed by agent name. An agent that hasn't been paired is unreachable
-from the hub (the placeholder token in its `magpilot.env` has no
-matching row); the act of pairing IS what registers the agent + its
+from the hub; the act of pairing IS what registers the agent + its
 bearer with the hub.
+
+V2b adds **revocation**: an admin page at `/admin/agents` shows the
+paired agents with a Revoke button per row. Revoking clears the
+agent's per-agent token in the database + in-memory; subsequent
+hub-to-agent calls return 410 Gone with a "re-pair with a fresh
+voucher" hint from the Proxy wrapper. Fully reversible: re-running
+`magpilot --magpilot-pair=<fresh-bundle>` on the agent upserts
+`revoked_at = NULL` and writes a new token.
 
 **Voucher lifecycle:**
 
@@ -600,6 +613,47 @@ If a `dotnet run --project src/Magpilot.Agent` dev agent is bound
 to `:5099`, the installed task will fight for the port and one
 will lose. Always set `MAGPILOT_ENV_FILE` to a throwaway path
 when testing pair from source.
+
+**V2b revocation specifics:**
+
+* `AgentRegistry.Revoke(name)` is the single mutation entry point:
+  in-memory `_tokens.Remove(name)` (so `GetToken` returns null
+  immediately, no race window where the next call would still
+  succeed) + DB `UPDATE agents SET revoked_at = $now, token = NULL`.
+  Logged at Warning so revocations show up in `/admin/logs`.
+* `Proxy(name, reg, ...)` in `HubEndpoints` short-circuits with 410
+  Gone BEFORE attempting the call when `reg.IsRevoked(name)`. The
+  body's `revoked: true` field lets the SPA distinguish "this is a
+  policy decision" from "agent is offline / unreachable" (which
+  surface as 502).
+* `AgentRegistry.Upsert` (called by the discovery prober every
+  60s) preserves `RevokedAt` from the existing in-memory record,
+  so re-discovering a revoked agent doesn't accidentally
+  un-revoke it. Same for `EnrolledAt`.
+* The redeem path's `revoked_at = NULL` in the agents UPSERT is
+  what makes re-pair the canonical "restore" action. After a
+  successful redeem, `EnrollmentService.RedeemVoucher` calls
+  `AgentRegistry.Reload(name)` to pick up the freshly-cleared
+  `revoked_at` (and the new token + enrolled_at). Using `Upsert`
+  there instead would clobber the columns we just wrote in the
+  transaction.
+
+**V2b installer integration:**
+
+* `installer/magpilot.iss` has a single optional InputQueryPage
+  (`PairingPage`) with one text field for the enrollment bundle.
+  Empty = disconnected install (V2a path); non-empty = pass
+  `-Bundle "<value>"` to install-task.ps1.
+* `install-task.ps1` reads `-Bundle`. After scheduled-task
+  registration + initial `Start-ScheduledTask`, if a bundle was
+  supplied it shells out to
+  `<install>/bin/magpilot.exe --magpilot-pair=$Bundle`. A
+  non-zero exit logs a `Write-Warning` but doesn't fail the
+  install -- the user can re-run from a shell.
+* No Pascal-side bundle decoding / HTTP -- the launcher does the
+  work, the Pascal side just collects the string and hands it
+  off. Keeps the Inno Setup surface minimal (one text field) and
+  avoids needing to ship an HTTPS client in the installer.
 
 ### Autoupdate visibility: two ways the chain silently breaks
 
@@ -1303,7 +1357,7 @@ future "what's left?" sweep doesn't accidentally re-pick them):
 
 Open items:
 
-- ~~2026-05-18: agent/hub connect handshake -- either a single condensed token bundling all connection info, or a UDP discovery mode (think WPS but for agents and the hub) so users don't have to copy a bunch of random strings~~ -> shipped V1 + V2a: V1 paste-bundle flow + installer drop of the Settings page (2026-06-09 morning); V2a per-agent tokens + voucher TTL/single-use enrollment via `POST /api/enroll/redeem` (2026-06-09 afternoon). UDP discovery + revocation UI deferred to V2b -- see projects/magpilot-pairing.md log.
+- ~~2026-05-18: agent/hub connect handshake -- either a single condensed token bundling all connection info, or a UDP discovery mode (think WPS but for agents and the hub) so users don't have to copy a bunch of random strings~~ -> shipped V1 + V2a + V2b: V1 paste-bundle flow + installer drop of the Settings page (2026-06-09 morning); V2a per-agent tokens + voucher TTL/single-use enrollment via `POST /api/enroll/redeem` (2026-06-09 afternoon); V2b revocation UI at /admin/agents + 410 Proxy guard + installer Pairing page that paste-pairs in one go (2026-06-09 evening). UDP discovery is the only deferred V2-era item -- see projects/magpilot-pairing.md log.
 - 2026-06-08: cleanup status bar at top to be less confusing
 - ~~2026-06-08: powershell one-liner that downloads, verifies and runs the installer as an easy bootstrap~~ -> shipped: `scripts/install.ps1` -- fetches version.json from /releases/latest/download/, downloads the installer + .sha256, verifies, runs with UAC elevation. README has the canonical `irm ... | iex` one-liner; instructions have the parameter-passing scriptblock form for `-Silent` / `-Version` / `-Repo` / `-DryRun`. Documented draft + private-repo failure modes alongside the hub-autoupdate ones.
 - 2026-06-08: drop 'past' sessions list, replace with 'resume previous' button that opens a filterable/searchable list

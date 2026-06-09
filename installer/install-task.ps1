@@ -26,7 +26,15 @@ param(
 
     [string]$TaskName = 'MagpilotAgent',
 
-    [string]$User
+    [string]$User,
+
+    # V2b: optional enrollment bundle collected by the installer's
+    # Pairing wizard page. When non-empty, run
+    # `magpilot --magpilot-pair=<bundle>` after registering the
+    # scheduled task so the agent boots fully wired up to its hub
+    # on first logon. Failure to redeem the bundle doesn't abort
+    # install -- the user can re-run --magpilot-pair manually.
+    [string]$Bundle
 )
 
 $ErrorActionPreference = 'Stop'
@@ -203,4 +211,40 @@ Start-Sleep -Seconds 4
 $info = Get-ScheduledTaskInfo -TaskName $TaskName
 Write-Host "  LastRunTime:    $($info.LastRunTime)"
 Write-Host "  LastTaskResult: $($info.LastTaskResult)"
+
+# V2b: optional pair-during-install. If the wizard collected an
+# enrollment bundle, hand it off to the launcher`'s --magpilot-pair
+# subcommand. The launcher does the heavy lifting (decode, POST
+# /api/enroll/redeem, upsert magpilot.env, bounce the scheduled
+# task we just started). A failed pair logs a warning but DOESN`'T
+# fail the install -- the user can re-run
+# `magpilot --magpilot-pair=<bundle>` from a shell to retry.
+if (-not [string]::IsNullOrWhiteSpace($Bundle)) {
+    $launcherExe = Join-Path $InstallDir 'bin\magpilot.exe'
+    if (-not (Test-Path $launcherExe)) {
+        Write-Warning "Launcher exe not found at $launcherExe; can't auto-pair. Run magpilot --magpilot-pair=<bundle> manually."
+    }
+    else {
+        Write-Host "Pairing with hub..."
+        # Wait for the agent to bind its port before pairing -- the
+        # pair flow bounces the scheduled task we just started, and
+        # an immediate restart inside the 4-second StartTask window
+        # confuses Start-ScheduledTask`'s "is it running" check. The
+        # sleep above is usually enough; add a tiny extra cushion.
+        Start-Sleep -Seconds 2
+
+        $pairResult = & $launcherExe "--magpilot-pair=$Bundle" 2>&1
+        $pairExit = $LASTEXITCODE
+        $pairResult | ForEach-Object { Write-Host "  pair: $_" }
+        if ($pairExit -ne 0) {
+            Write-Warning "magpilot --magpilot-pair exited with code $pairExit. The agent is installed but unpaired. Re-run from a shell to retry."
+        }
+        else {
+            Write-Host "  pair: completed successfully."
+        }
+    }
+}
+else {
+    Write-Host "No -Bundle supplied; agent installed in disconnected mode. Run magpilot --magpilot-pair=<bundle> from /admin/enroll when ready."
+}
 

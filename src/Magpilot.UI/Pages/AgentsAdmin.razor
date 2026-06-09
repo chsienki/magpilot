@@ -1,0 +1,209 @@
+@page "/admin/agents"
+@inject HubClient Hub
+@inject NavigationManager Nav
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
+@using Magpilot.UI.Services
+@using Magpilot.Shared.Models
+
+@*
+    Pairing V2b: list paired agents + revoke. Reads the same
+    /api/agents endpoint as the main host picker, plus the new
+    EnrolledAt + RevokedAt fields landed in V2b. Revoking clears
+    the agent's per-agent bearer; subsequent hub-to-agent calls
+    return 410 Gone with a "re-pair with a fresh voucher" hint.
+*@
+
+<MudLayout>
+    <MudAppBar Elevation="1" Dense="true">
+        <MudIconButton Icon="@Icons.Material.Filled.ArrowBack" Color="Color.Inherit"
+                       OnClick="@(() => Nav.NavigateTo("/"))" Edge="Edge.Start"
+                       aria-label="Back" />
+        <MudText Typo="Typo.h6">Paired agents</MudText>
+        <MudSpacer />
+        <MudIconButton Icon="@Icons.Material.Filled.Refresh" Color="Color.Inherit"
+                       OnClick="LoadAsync" Disabled="@_loading"
+                       aria-label="Refresh" />
+    </MudAppBar>
+
+    <MudMainContent Class="mt-2 px-3">
+        <MudContainer MaxWidth="MaxWidth.Large" Class="py-4">
+            @if (_loading && _agents is null)
+            {
+                <MudProgressLinear Indeterminate="true" Color="Color.Primary" />
+            }
+            else if (_agents is null || _agents.Count == 0)
+            {
+                <MudPaper Elevation="0" Outlined="true" Class="pa-6 d-flex flex-column align-center">
+                    <MudIcon Icon="@Icons.Material.Filled.DeviceHub" Size="Size.Large" Color="Color.Default" Class="mb-2" />
+                    <MudText Typo="Typo.h6" Class="mb-2">No agents paired yet</MudText>
+                    <MudText Typo="Typo.body2" Color="Color.Default" Align="Align.Center" Class="mb-4">
+                        Open <code>/admin/enroll</code> to mint a voucher, then
+                        run <code>magpilot --magpilot-pair=&lt;bundle&gt;</code>
+                        on the new machine.
+                    </MudText>
+                    <MudButton Variant="Variant.Filled" Color="Color.Primary"
+                               StartIcon="@Icons.Material.Filled.Add"
+                               OnClick="@(() => Nav.NavigateTo("/admin/enroll"))">
+                        Pair an agent
+                    </MudButton>
+                </MudPaper>
+            }
+            else
+            {
+                <MudTable Items="@_agents" Dense="true" Hover="true" Bordered="false" Striped="false">
+                    <HeaderContent>
+                        <MudTh>Name</MudTh>
+                        <MudTh>Status</MudTh>
+                        <MudTh>URL</MudTh>
+                        <MudTh>Enrolled</MudTh>
+                        <MudTh>Last seen</MudTh>
+                        <MudTh Style="text-align: right;">Actions</MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        @{
+                            var isRevoked = context.RevokedAt is not null;
+                            var rowStyle = isRevoked ? "opacity: 0.55;" : null;
+                        }
+                        <MudTd Style="@rowStyle">
+                            <MudText Typo="Typo.body2" Style="font-weight: 500;">@context.Name</MudText>
+                        </MudTd>
+                        <MudTd Style="@rowStyle">
+                            @{
+                                Color statusColor;
+                                string statusLabel;
+                                if (isRevoked) { statusColor = Color.Error; statusLabel = "Revoked"; }
+                                else if (context.Online) { statusColor = Color.Success; statusLabel = "Online"; }
+                                else { statusColor = Color.Default; statusLabel = "Offline"; }
+                            }
+                            <MudChip T="string" Size="Size.Small" Variant="Variant.Filled" Color="@statusColor">
+                                @statusLabel
+                            </MudChip>
+                        </MudTd>
+                        <MudTd Style="@rowStyle">
+                            <MudText Typo="Typo.caption" Color="Color.Default" Style="font-family: monospace;">
+                                @(string.IsNullOrEmpty(context.Url) ? "(awaiting discovery)" : context.Url)
+                            </MudText>
+                        </MudTd>
+                        <MudTd Style="@rowStyle">
+                            <MudText Typo="Typo.caption" Color="Color.Default">
+                                @(context.EnrolledAt is { } e ? RelativeTime(e) : "(pre-V2a)")
+                            </MudText>
+                        </MudTd>
+                        <MudTd Style="@rowStyle">
+                            <MudText Typo="Typo.caption" Color="Color.Default">
+                                @(context.LastSeen is { } ls ? RelativeTime(ls) : "never")
+                            </MudText>
+                        </MudTd>
+                        <MudTd Style="text-align: right;">
+                            @if (isRevoked)
+                            {
+                                <MudText Typo="Typo.caption" Color="Color.Default">
+                                    Re-pair to restore
+                                </MudText>
+                            }
+                            else
+                            {
+                                <MudButton Size="Size.Small" Variant="Variant.Outlined" Color="Color.Error"
+                                           StartIcon="@Icons.Material.Filled.Block"
+                                           Disabled="@_busyAgents.Contains(context.Name)"
+                                           OnClick="@(() => RevokeAsync(context.Name))">
+                                    Revoke
+                                </MudButton>
+                            }
+                        </MudTd>
+                    </RowTemplate>
+                </MudTable>
+
+                <MudText Typo="Typo.caption" Color="Color.Default" Class="d-block mt-3">
+                    Revoking clears the agent's bearer token. Re-pair the
+                    agent with a fresh voucher from <code>/admin/enroll</code>
+                    to restore access.
+                </MudText>
+            }
+        </MudContainer>
+    </MudMainContent>
+</MudLayout>
+
+@code {
+    private bool _loading;
+    private List<AgentInfo>? _agents;
+    // Tracks per-row "revoke in flight" so we don't double-click a
+    // row into a confused state. Cleared on completion (success or
+    // failure) of the per-row call.
+    private readonly HashSet<string> _busyAgents = new(StringComparer.OrdinalIgnoreCase);
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        StateHasChanged();
+        try
+        {
+            _agents = await Hub.ListAgentsAsync();
+            // Stable order: revoked last (greyed), then by name. Keeps
+            // the active set visually first on hosts that have been
+            // around long enough to accumulate revocations.
+            if (_agents is not null)
+            {
+                _agents = _agents
+                    .OrderBy(a => a.RevokedAt is not null)
+                    .ThenBy(a => a.Name, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+            }
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Could not load agents: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _loading = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task RevokeAsync(string name)
+    {
+        var dialogParams = new MessageBoxOptions
+        {
+            Title = $"Revoke {name}?",
+            Message = $"This clears the per-agent bearer token. Subsequent hub-to-agent calls return 410 Gone until the agent is re-paired with a fresh voucher. Continue?",
+            YesText = "Revoke",
+            CancelText = "Cancel",
+        };
+        var ok = await DialogService.ShowMessageBoxAsync(dialogParams);
+        if (ok != true) return;
+
+        _busyAgents.Add(name);
+        StateHasChanged();
+        try
+        {
+            await Hub.RevokeAgentAsync(name);
+            Snackbar.Add($"{name} revoked", Severity.Warning);
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Could not revoke {name}: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _busyAgents.Remove(name);
+            StateHasChanged();
+        }
+    }
+
+    private static string RelativeTime(DateTimeOffset when)
+    {
+        var delta = DateTimeOffset.UtcNow - when;
+        if (delta.TotalSeconds < 60)  return "just now";
+        if (delta.TotalMinutes < 60)  return $"{(int)delta.TotalMinutes}m ago";
+        if (delta.TotalHours < 24)    return $"{(int)delta.TotalHours}h ago";
+        if (delta.TotalDays < 7)      return $"{(int)delta.TotalDays}d ago";
+        if (delta.TotalDays < 30)     return $"{(int)(delta.TotalDays / 7)}w ago";
+        if (delta.TotalDays < 365)    return $"{(int)(delta.TotalDays / 30)}mo ago";
+        return $"{(int)(delta.TotalDays / 365)}y ago";
+    }
+}

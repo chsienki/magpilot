@@ -214,19 +214,14 @@ public sealed class EnrollmentService
 
         tx.Commit();
 
-        // Sync the in-memory registry so the next outbound call uses
-        // the new token without waiting for a reload. We don't have
-        // the agent's URL right now (only redeem knows it -- the next
-        // discovery sweep will refresh), so use the stored value if
-        // any. If neither is known, use a placeholder; discovery will
-        // populate it on the next probe.
-        var existing = _registry.Get(agentName);
-        _registry.Upsert(
-            name: agentName,
-            url: agentUrl ?? existing?.Url ?? string.Empty,
-            token: agentToken,
-            online: false,
-            flavors: existing?.Flavors);
+        // Reload from disk so the next outbound call uses the new
+        // token AND picks up the enrolled_at + revoked_at = NULL we
+        // just wrote in the transaction above. Using Upsert here
+        // would clobber those columns with the cached pre-redeem
+        // values (the Upsert path preserves what the registry already
+        // has in memory, which is stale by exactly the row we just
+        // wrote).
+        _registry.Reload(agentName);
 
         _logger.LogInformation("Voucher redeemed by agent {Name} (voucher_id={Vid})", agentName, voucherId);
         return new RedeemResult(agentToken, RedeemStatus.Ok, null);

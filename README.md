@@ -153,7 +153,8 @@ See `deploy/README.md` for the LXC docker recipe.
 
 ## Install (Windows agent + launcher)
 
-Two steps: drop the files, then pair with a hub.
+Two steps: drop the files, then pair with a hub. **Or paste the
+bundle during install to do both in one go.**
 
 **1. Install** (admin not required upfront -- the installer asks for
 elevation when it needs it):
@@ -164,10 +165,17 @@ irm https://raw.githubusercontent.com/chsienki/magpilot/main/scripts/install.ps1
 
 That downloads the latest signed installer from
 [Releases](https://github.com/chsienki/magpilot/releases), verifies its
-SHA256 against the matching `.sha256` asset, and runs it. No
-configuration is collected during install -- the agent boots in a
-"disconnected" state with a random local bearer token but no hub URL,
-so it's a no-op until you pair it.
+SHA256 against the matching `.sha256` asset, and runs it. The wizard
+asks once -- on a single optional Pairing page -- for an enrollment
+bundle. Two ways to get to a paired agent:
+
+* **Have a bundle ready?** Open `https://<your-hub>/admin/enroll`
+  first, click **Create voucher** (15-minute single-use), copy the
+  `magpilot2+...` string, then start the installer and paste it
+  into the Pairing page. Install + pair happen in one go.
+* **Pair later?** Leave the Pairing field empty. The agent installs
+  in disconnected mode (random local bearer, no hub URL) and you
+  pair from a shell whenever you're ready -- see step 2.
 
 For unattended installs, fetch the script as a block so you can pass
 flags:
@@ -176,9 +184,10 @@ flags:
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/chsienki/magpilot/main/scripts/install.ps1))) -Silent
 ```
 
-**2. Pair** with your hub. On the hub's web UI, open
-`https://<your-hub>/admin/enroll`, click **Create voucher**
-(15-minute single-use), copy the bundle, then on the new machine:
+**2. Pair (or re-pair)** from a shell -- the launcher path also works
+post-install or for rotating credentials. On the hub's web UI, open
+`https://<your-hub>/admin/enroll`, click **Create voucher**, copy
+the bundle, then on the new machine:
 
 ```pwsh
 magpilot --magpilot-pair=<paste-bundle-here>
@@ -197,6 +206,12 @@ After install + pair, future upgrades go through `magpilot --magpilot-update`
 (same SHA256-verified path; preserves the existing config so re-pairing
 isn't needed). Re-run `magpilot --magpilot-pair=<new-bundle>` to
 re-point an existing agent at a different hub or rotate its credentials.
+
+**Revoking a paired agent.** Open `https://<your-hub>/admin/agents`,
+find the agent, click **Revoke**. Hub-to-agent calls return 410 Gone
+with a "re-pair with a fresh voucher" hint. Reversible: re-run
+`magpilot --magpilot-pair=<fresh-bundle>` on the agent machine and
+it's back in service.
 
 ## Architectural law
 

@@ -54,6 +54,19 @@ public static class HubEndpoints
         api.MapGet("/me", (HttpContext ctx) =>
             Results.Ok(new { identity = ctx.User.Identity?.Name }));
 
+        // V2b pairing: revoke a paired agent. Clears the agent's
+        // per-agent bearer token + sets revoked_at. The Proxy wrapper
+        // short-circuits subsequent calls to this agent with 410 Gone
+        // + a "re-pair" hint. Reversible: re-enrolling via voucher
+        // upserts revoked_at = NULL and writes a fresh token. 404 if
+        // no such agent.
+        api.MapPost("/admin/agents/{name}/revoke", (string name, AgentRegistry reg) =>
+        {
+            if (!reg.Revoke(name))
+                return Results.NotFound(new { error = $"Unknown agent {name}" });
+            return Results.Ok(reg.Get(name));
+        });
+
         // V2a pairing: mint a one-time enrollment voucher for a fresh
         // agent install. Cookie-auth-gated (this admin group requires
         // auth); a signed-in user is implicitly authorized to issue
@@ -314,6 +327,18 @@ public static class HubEndpoints
     /// </summary>
     private static async Task<IResult> Proxy(string name, AgentRegistry reg, Func<Task<IResult>> call)
     {
+        // Short-circuit revoked agents BEFORE attempting the call.
+        // The agent's token has been cleared from the registry so the
+        // call would fail with 401 anyway, but the user deserves a
+        // clear "revoked; re-pair with a fresh voucher" message
+        // instead of chasing a phantom auth issue.
+        if (reg.IsRevoked(name))
+        {
+            return Results.Json(
+                new { error = $"Agent {name} is revoked. Generate a fresh enrollment bundle on /admin/enroll and run `magpilot --magpilot-pair=<bundle>` on the machine to re-enroll.", agent = name, revoked = true },
+                statusCode: StatusCodes.Status410Gone);
+        }
+
         try
         {
             var result = await call();

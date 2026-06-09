@@ -117,7 +117,7 @@ public sealed class AgentRegistry
         using var c = new SqliteConnection(ConnString);
         c.Open();
         using var cmd = c.CreateCommand();
-        cmd.CommandText = "SELECT name, url, token, last_seen FROM agents";
+        cmd.CommandText = "SELECT name, url, token, last_seen, enrolled_at, revoked_at FROM agents";
         using var r = cmd.ExecuteReader();
         while (r.Read())
         {
@@ -126,7 +126,11 @@ public sealed class AgentRegistry
             var token = r.IsDBNull(2) ? null : r.GetString(2);
             var lastSeen = r.IsDBNull(3) ? (DateTimeOffset?)null
                 : DateTimeOffset.FromUnixTimeSeconds(r.GetInt64(3));
-            _agents[name] = new AgentInfo(name, url, false, null, lastSeen);
+            var enrolledAt = r.IsDBNull(4) ? (DateTimeOffset?)null
+                : DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(4));
+            var revokedAt = r.IsDBNull(5) ? (DateTimeOffset?)null
+                : DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(5));
+            _agents[name] = new AgentInfo(name, url, false, null, lastSeen, null, enrolledAt, revokedAt);
             if (token is not null) _tokens[name] = token;
         }
         _logger.LogInformation("Loaded {N} agents from {Db}", _agents.Count, _dbPath);
@@ -138,9 +142,16 @@ public sealed class AgentRegistry
         {
             // Reflect freshness: an agent we haven't heard from in _staleAfter
             // is presumed offline regardless of its last persisted Online flag.
+            // A revoked agent is never considered Online.
             var now = DateTimeOffset.UtcNow;
             return _agents.Values
-                .Select(a => a with { Online = a.Online && a.LastSeen is { } ls && (now - ls) <= _staleAfter })
+                .Select(a => a with
+                {
+                    Online = a.RevokedAt is null
+                        && a.Online
+                        && a.LastSeen is { } ls
+                        && (now - ls) <= _staleAfter
+                })
                 .ToList();
         }
     }
@@ -150,9 +161,28 @@ public sealed class AgentRegistry
         lock (_lock) return _agents.GetValueOrDefault(name);
     }
 
+    /// <summary>
+    /// Per-agent bearer token for the hub's outbound calls. Returns
+    /// null when the agent is unknown, has no token (discovered but
+    /// not yet enrolled), OR has been revoked. The Proxy wrapper in
+    /// <c>HubEndpoints</c> consumes null to short-circuit with a
+    /// useful error instead of letting the call hit the wire with
+    /// no auth.
+    /// </summary>
     public string? GetToken(string name)
     {
-        lock (_lock) return _tokens.GetValueOrDefault(name);
+        lock (_lock)
+        {
+            if (_agents.TryGetValue(name, out var info) && info.RevokedAt is not null)
+                return null;
+            return _tokens.GetValueOrDefault(name);
+        }
+    }
+
+    /// <summary>Returns true if the agent exists and has been revoked.</summary>
+    public bool IsRevoked(string name)
+    {
+        lock (_lock) return _agents.TryGetValue(name, out var a) && a.RevokedAt is not null;
     }
 
     public void MarkOnline(string name)
@@ -175,21 +205,24 @@ public sealed class AgentRegistry
 
     public void Upsert(string name, string url, string? token, bool online, IReadOnlyList<string>? flavors = null)
     {
-        // Preserve previously-known flavors if this caller didn't specify any
-        // (e.g. a manual /api/agents POST without discovery context).
-        var resolvedFlavors = flavors;
-        if (resolvedFlavors is null)
+        // Preserve previously-known fields the caller didn't supply.
+        // Discovery probes don't know about flavors / enrollment
+        // lineage / revocation state -- only the original enrollment
+        // does -- so they'd otherwise clobber those on every sweep.
+        IReadOnlyList<string>? resolvedFlavors = flavors;
+        DateTimeOffset? resolvedEnrolledAt = null;
+        DateTimeOffset? resolvedRevokedAt = null;
+        lock (_lock)
         {
-            lock (_lock)
+            if (_agents.TryGetValue(name, out var existing))
             {
-                if (_agents.TryGetValue(name, out var existing))
-                {
-                    resolvedFlavors = existing.Flavors;
-                }
+                resolvedFlavors ??= existing.Flavors;
+                resolvedEnrolledAt = existing.EnrolledAt;
+                resolvedRevokedAt = existing.RevokedAt;
             }
         }
 
-        var info = new AgentInfo(name, url, online, null, DateTimeOffset.UtcNow, resolvedFlavors);
+        var info = new AgentInfo(name, url, online, null, DateTimeOffset.UtcNow, resolvedFlavors, resolvedEnrolledAt, resolvedRevokedAt);
         lock (_lock)
         {
             _agents[name] = info;
@@ -228,5 +261,75 @@ public sealed class AgentRegistry
         cmd.Parameters.AddWithValue("$n", name);
         cmd.ExecuteNonQuery();
         return true;
+    }
+
+    /// <summary>
+    /// Mark the agent as revoked. The in-memory token is cleared so
+    /// <see cref="GetToken"/> returns null immediately (no race window
+    /// where the next outbound call would still go through). The DB
+    /// row is updated atomically; re-pairing via voucher redeem
+    /// upserts the row with <c>revoked_at = NULL</c> so revocation is
+    /// fully reversible from the user's perspective: revoke + run
+    /// <c>magpilot --magpilot-pair=&lt;fresh-voucher&gt;</c>.
+    /// </summary>
+    public bool Revoke(string name)
+    {
+        var now = DateTimeOffset.UtcNow;
+        lock (_lock)
+        {
+            if (!_agents.TryGetValue(name, out var existing))
+                return false;
+            _agents[name] = existing with { RevokedAt = now, Online = false };
+            _tokens.Remove(name);
+        }
+        using var c = new SqliteConnection(ConnString);
+        c.Open();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = """
+            UPDATE agents SET revoked_at = $now, token = NULL WHERE name = $n
+        """;
+        cmd.Parameters.AddWithValue("$now", now.ToUnixTimeMilliseconds());
+        cmd.Parameters.AddWithValue("$n", name);
+        var changed = cmd.ExecuteNonQuery();
+        _logger.LogWarning("Agent {Name} revoked", name);
+        return changed > 0;
+    }
+
+    /// <summary>
+    /// Refresh the in-memory <see cref="AgentInfo"/> for an agent
+    /// whose row was updated outside <see cref="Upsert"/> (currently:
+    /// the EnrollmentService's redeem flow writes the new
+    /// <c>token</c> / <c>enrolled_at</c> / <c>enrolled_via</c> /
+    /// <c>revoked_at = NULL</c> directly in its transaction). Reloads
+    /// from disk so the next call to <see cref="List"/> /
+    /// <see cref="Get"/> reflects the update.
+    /// </summary>
+    public void Reload(string name)
+    {
+        using var c = new SqliteConnection(ConnString);
+        c.Open();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = """
+            SELECT url, token, last_seen, enrolled_at, revoked_at
+            FROM agents WHERE name = $n
+        """;
+        cmd.Parameters.AddWithValue("$n", name);
+        using var r = cmd.ExecuteReader();
+        if (!r.Read()) return;
+        var url = r.GetString(0);
+        var token = r.IsDBNull(1) ? null : r.GetString(1);
+        var lastSeen = r.IsDBNull(2) ? (DateTimeOffset?)null
+            : DateTimeOffset.FromUnixTimeSeconds(r.GetInt64(2));
+        var enrolledAt = r.IsDBNull(3) ? (DateTimeOffset?)null
+            : DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(3));
+        var revokedAt = r.IsDBNull(4) ? (DateTimeOffset?)null
+            : DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(4));
+        lock (_lock)
+        {
+            var prevFlavors = _agents.TryGetValue(name, out var prev) ? prev.Flavors : null;
+            _agents[name] = new AgentInfo(name, url, false, null, lastSeen, prevFlavors, enrolledAt, revokedAt);
+            if (token is not null) _tokens[name] = token;
+            else _tokens.Remove(name);
+        }
     }
 }
