@@ -108,6 +108,44 @@ public sealed record WrapperOptions(
         return null;
     }
 
+    /// <summary>
+    /// Inspect the forward-args for a session id that is unambiguously a
+    /// UUID -- either <c>--session-id=&lt;uuid&gt;</c> (always a UUID by copilot's
+    /// own contract) or <c>--resume[=&lt;value&gt;]</c> where the value parses as a
+    /// UUID. Returns null otherwise (no flag, picker mode, name, id prefix).
+    ///
+    /// <para>
+    /// Used by the launcher to skip post-spawn session detection when the
+    /// user has already told us exactly which session they want.
+    /// <c>copilot --resume &lt;sid&gt;</c> does not refresh
+    /// <c>~/.copilot/session-state/&lt;sid&gt;/inuse.&lt;pid&gt;.lock</c> with the new
+    /// process's PID, so a detector that polls for the PID match cannot
+    /// see the resumed session -- but the user-supplied UUID is itself
+    /// the answer the detector would otherwise compute.
+    /// </para>
+    /// </summary>
+    public string? ExtractKnownSessionId()
+    {
+        for (var i = 0; i < ForwardArgs.Count; i++)
+        {
+            var a = ForwardArgs[i];
+
+            string? candidate = null;
+            if (a.StartsWith("--session-id=", StringComparison.Ordinal))
+                candidate = a["--session-id=".Length..];
+            else if (a == "--session-id" && i + 1 < ForwardArgs.Count && !ForwardArgs[i + 1].StartsWith("-"))
+                candidate = ForwardArgs[i + 1];
+            else if (a.StartsWith("--resume=", StringComparison.Ordinal))
+                candidate = a["--resume=".Length..];
+            else if (a == "--resume" && i + 1 < ForwardArgs.Count && !ForwardArgs[i + 1].StartsWith("-"))
+                candidate = ForwardArgs[i + 1];
+
+            if (!string.IsNullOrEmpty(candidate) && Guid.TryParseExact(candidate, "D", out _))
+                return candidate;
+        }
+        return null;
+    }
+
     public static string HelpText => """
         magpilot -- a thin wrapper around `copilot` that coordinates with magpilot-agent.
 

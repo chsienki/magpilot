@@ -113,11 +113,12 @@ if (opts.Status)
 }
 
 // Resolve the session id from forward args. We only know it up front
-// for explicit --resume=<UUID> -- everything else (--resume="some name",
-// --continue, no args + interactive picker, new session) needs the
-// post-spawn detection path so we can still register HostOwnership with
-// the agent and the SPA shows it as Host-owned instead of Locked.
-var sid = opts.ExtractResumeSessionId();
+// for explicit --resume=<UUID> or --session-id=<UUID> -- everything else
+// (--resume="some name", --resume=<id-prefix>, --continue, no args +
+// interactive picker, new session) needs the post-spawn detection path
+// so we can still register HostOwnership with the agent and the SPA
+// shows it as Host-owned instead of Locked.
+var sid = opts.ExtractKnownSessionId();
 
 // PTY+detection only works when we own the terminal. Redirected stdio
 // (e.g. `echo /help | magpilot`) skips it and falls back to the
@@ -152,12 +153,13 @@ catch (Exception ex)
 
 if (state is null)
 {
-    // Session unknown to the agent (not on disk yet). Either the user
-    // passed a name/--continue that copilot will resolve internally, or
-    // the session genuinely doesn't exist. Spawn in PTY and post-spawn-
-    // detect the resulting session so we can still register HostOwnership
-    // and participate in cooperative handoff.
-    return await RunSessionLoopWithDetectionAsync(agent, opts);
+    // Session unknown to the agent (scanner hasn't picked it up yet, or
+    // a fresh sid the user pre-allocated via --session-id=<uuid>). We
+    // have a UUID from ExtractKnownSessionId so we know which session
+    // copilot is going to load -- skip the post-spawn detection path
+    // and drive the normal session loop. The agent's HostOwnership map
+    // is keyed by sid alone and tolerates sids the scanner hasn't seen.
+    return await RunSessionLoopAsync(agent, sid, opts);
 }
 
 // If owned by the agent or another host, prompt to take over.
@@ -278,8 +280,12 @@ static async Task<int> RunSessionLoopAsync(AgentClient agent, string sid, Wrappe
         await using (copilotHost)
         {
             // Listen for release-requested in the background; signal via cts.
+            // Diagnostics from the listener must be deferred -- copilot owns
+            // the screen while this runs, so writing to stderr corrupts the
+            // TUI. Queue and flush after copilot exits.
             using var sseCts = new CancellationTokenSource();
             var preempted = new TaskCompletionSource<ReleaseRequested>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var deferredErrors = new System.Collections.Concurrent.ConcurrentQueue<string>();
             _ = Task.Run(async () =>
             {
                 try
@@ -296,7 +302,7 @@ static async Task<int> RunSessionLoopAsync(AgentClient agent, string sid, Wrappe
                 catch (OperationCanceledException) { }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"magpilot: SSE subscribe failed: {ex.Message}");
+                    deferredErrors.Enqueue($"magpilot: SSE subscribe failed: {ex.Message}");
                 }
             });
 
@@ -308,7 +314,8 @@ static async Task<int> RunSessionLoopAsync(AgentClient agent, string sid, Wrappe
                 // Child exited on its own. Release ownership and return.
                 var exit = await copilotHost.ExitTask;
                 try { await agent.ReleaseAsync(sid, hostPid); }
-                catch (Exception ex) { Console.Error.WriteLine($"magpilot: release failed: {ex.Message}"); }
+                catch (Exception ex) { deferredErrors.Enqueue($"magpilot: release failed: {ex.Message}"); }
+                FlushDeferredErrors(deferredErrors);
                 agent.Dispose();
                 return exit;
             }
@@ -324,7 +331,8 @@ static async Task<int> RunSessionLoopAsync(AgentClient agent, string sid, Wrappe
             Console.Out.Flush();
 
             try { await agent.ReleaseAsync(sid, hostPid); }
-            catch (Exception ex) { Console.Error.WriteLine($"magpilot: release failed: {ex.Message}"); }
+            catch (Exception ex) { deferredErrors.Enqueue($"magpilot: release failed: {ex.Message}"); }
+            FlushDeferredErrors(deferredErrors);
         }
         // PtyHost disposed here -- raw mode restored, cooked mode back.
 
@@ -425,8 +433,14 @@ static async Task<int> RunSessionLoopWithDetectionAsync(AgentClient agent, Wrapp
         // from the agent's POV, the sweep only cares that *something*
         // alive owns the session). Once registration completes, we
         // start listening for release_requested SSE events.
+        //
+        // The detection task runs concurrently with copilot's TUI, so any
+        // diagnostics it produces must be deferred -- writing to stderr
+        // while copilot is rendering corrupts the user-visible screen.
+        // Errors are queued and printed after copilot exits.
         using var sseCts = new CancellationTokenSource();
         var preempted = new TaskCompletionSource<ReleaseRequested>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var deferredErrors = new System.Collections.Concurrent.ConcurrentQueue<string>();
         string? detectedSid = null;
         _ = Task.Run(async () =>
         {
@@ -435,9 +449,9 @@ static async Task<int> RunSessionLoopWithDetectionAsync(AgentClient agent, Wrapp
                 detectedSid = await PostSpawnDetector.WaitForSessionAsync(copilotHost.Pid, sseCts.Token);
                 if (detectedSid is null)
                 {
-                    Console.Error.WriteLine(
-                        $"\r\nmagpilot: post-spawn detection timed out. " +
-                        "Session not registered for cooperative handoff; SPA may show it as Locked.\r\n");
+                    deferredErrors.Enqueue(
+                        "magpilot: post-spawn detection timed out. " +
+                        "Session not registered for cooperative handoff; SPA may show it as Locked.");
                     return;
                 }
 
@@ -447,7 +461,7 @@ static async Task<int> RunSessionLoopWithDetectionAsync(AgentClient agent, Wrapp
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"\r\nmagpilot: acquire-for-host on detected session {detectedSid} failed: {ex.Message}\r\n");
+                    deferredErrors.Enqueue($"magpilot: acquire-for-host on detected session {detectedSid} failed: {ex.Message}");
                     return;
                 }
 
@@ -467,7 +481,7 @@ static async Task<int> RunSessionLoopWithDetectionAsync(AgentClient agent, Wrapp
                 catch (OperationCanceledException) { }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"\r\nmagpilot: SSE subscribe failed: {ex.Message}\r\n");
+                    deferredErrors.Enqueue($"magpilot: SSE subscribe failed: {ex.Message}");
                 }
             }
             catch (OperationCanceledException) { }
@@ -482,8 +496,9 @@ static async Task<int> RunSessionLoopWithDetectionAsync(AgentClient agent, Wrapp
             if (detectedSid is not null)
             {
                 try { await agent.ReleaseAsync(detectedSid, copilotHost.Pid); }
-                catch (Exception ex) { Console.Error.WriteLine($"magpilot: release failed: {ex.Message}"); }
+                catch (Exception ex) { deferredErrors.Enqueue($"magpilot: release failed: {ex.Message}"); }
             }
+            FlushDeferredErrors(deferredErrors);
             agent.Dispose();
             return exit;
         }
@@ -499,8 +514,9 @@ static async Task<int> RunSessionLoopWithDetectionAsync(AgentClient agent, Wrapp
         if (detectedSid is not null)
         {
             try { await agent.ReleaseAsync(detectedSid, copilotHost.Pid); }
-            catch (Exception ex) { Console.Error.WriteLine($"magpilot: release failed: {ex.Message}"); }
+            catch (Exception ex) { deferredErrors.Enqueue($"magpilot: release failed: {ex.Message}"); }
         }
+        FlushDeferredErrors(deferredErrors);
     }
 
     // The detection-path doesn't support the post-handoff "press enter
@@ -509,4 +525,10 @@ static async Task<int> RunSessionLoopWithDetectionAsync(AgentClient agent, Wrapp
     // session. Exit cleanly.
     agent.Dispose();
     return 0;
+}
+
+static void FlushDeferredErrors(System.Collections.Concurrent.ConcurrentQueue<string> queue)
+{
+    while (queue.TryDequeue(out var msg))
+        Console.Error.WriteLine(msg);
 }

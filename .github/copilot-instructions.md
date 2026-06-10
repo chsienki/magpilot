@@ -1104,6 +1104,33 @@ Owned=0, Locked=1, Dormant=2.)
 > The original "Known leak" note (a live `--resume` not refreshing
 > a lock at all) is a stronger version of the same fact.
 >
+> Two follow-on quirks the launcher's `PostSpawnDetector` has to
+> tolerate, both confirmed empirically:
+>
+> - **A fresh `copilot --resume=<sid>` of a session that already has
+>   events writes a NEW `inuse.<new-pid>.lock` alongside the stale
+>   one** (the multi-lock scenario above). The detector's primary
+>   path is exact PID match on that new lock -- works for fresh
+>   sessions, picker selections, --continue, and most resumes.
+>
+> - **A `copilot --resume=<sid>` of a session that has NOT yet
+>   accumulated events does NOT refresh the lock at all** -- the
+>   stale `inuse.<dead-pid>.lock` is the only one on disk for the
+>   entire run. The detector's stranded-resume fallback (Pass 2
+>   in `PostSpawnDetector.WaitForSessionAsync`) covers this: a
+>   session whose lock holder PID is dead AND whose `events.jsonl`
+>   or `workspace.yaml` mtime advances past the snapshot taken at
+>   spawn time is the resume target. The dead-lock condition is
+>   re-validated each tick so a session that picks up a live lock
+>   mid-detection (handled by Pass 1) never also fires Pass 2.
+>
+> The launcher avoids both quirks entirely whenever the user gave
+> it a UUID up front -- `WrapperOptions.ExtractKnownSessionId`
+> recognizes UUID values from either `--resume=<UUID>` or
+> `--session-id=<UUID>` and `Program.cs` routes straight to
+> `RunSessionLoopAsync` with that sid instead of falling into
+> post-spawn detection.
+>
 > **Authoritative ownership lives in agent memory, NOT in the
 > filesystem.** `Sessions/HostOwnership.cs` keeps the canonical map
 > of `sessionId -> hostPid` for sessions a `magpilot` wrapper

@@ -161,19 +161,32 @@ binary stays as it is. The launcher:
    exit-on-handoff, status, help) and strips them before forwarding.
 2. Pings the agent. If unreachable, emits one warning and exec's the
    real `copilot` binary as a transparent passthrough.
-3. For an explicit `--resume=<sid>`: calls `GET /sessions/{id}/state`.
-   If the session is currently agent-owned (or held by another local
-   process), it prints an interactive Y/n/f/d take-over prompt
-   (auto-answered by the `--magpilot-*` flags or refused on non-TTY).
-4. On accept: `POST /acquire-for-host`, then spawns the real
-   `copilot --resume=<sid>` inside a real PTY (via `sch.pty.net`).
-   Bidirectional byte pump between the user's terminal (in raw mode)
-   and the PTY master; window-resize watcher.
+3. Resolves the target session id from argv: a UUID inside
+   `--resume=<UUID>` or `--session-id=<UUID>` is treated as known up
+   front. For known sids, the launcher calls `GET /sessions/{id}/state`
+   and prints an interactive Y/n/f/d take-over prompt when the session
+   is currently agent-owned (auto-answered by `--magpilot-*` flags or
+   refused on non-TTY). For everything else (`--resume="some name"`,
+   `--resume=<id-prefix>`, `--continue`, picker mode, no args), the
+   launcher takes the post-spawn detection path: spawn copilot in a
+   PTY, then watch the on-disk session-state directory until it can
+   identify which session copilot ended up holding, and only then
+   register host ownership.
+4. On accept (known-sid take-over path): `POST /acquire-for-host`,
+   then spawns the real `copilot --resume=<sid>` inside a real PTY
+   (via `sch.pty.net`). Bidirectional byte pump between the user's
+   terminal (in raw mode) and the PTY master; window-resize watcher.
 5. Subscribes to the session's SSE stream. On `release_requested`:
    writes `/exit\r` to the PTY master so copilot shuts down cleanly
    (3s grace, 1s on Force, then `PTY.Kill`), prints a banner, calls
    `POST /release`, and either exits (with `--magpilot-exit-on-handoff`)
    or sits on a "Press <enter> to take it back" prompt.
+
+All launcher-side diagnostics that fire while copilot is rendering
+its TUI (SSE-subscribe failures, post-spawn detection timeouts,
+acquire-for-host errors, release errors) are queued onto a
+`ConcurrentQueue<string>` and flushed to stderr only after copilot
+exits, so the launcher never writes mid-screen and corrupts the UI.
 
 Single-owner invariant by construction: while the wrapper holds a
 session, the agent's `/messages`/`/interrupt`/`/approvals` endpoints
