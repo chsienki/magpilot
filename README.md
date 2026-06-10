@@ -153,8 +153,8 @@ See `deploy/README.md` for the LXC docker recipe.
 
 ## Install (Windows agent + launcher)
 
-Two steps: drop the files, then pair with a hub. **Or paste the
-bundle during install to do both in one go.**
+Two steps: install, then click Adopt in the hub. **No bundles, no
+copy/paste, no env vars.**
 
 **1. Install** (admin not required upfront -- the installer asks for
 elevation when it needs it):
@@ -166,52 +166,45 @@ irm https://raw.githubusercontent.com/chsienki/magpilot/main/scripts/install.ps1
 That downloads the latest signed installer from
 [Releases](https://github.com/chsienki/magpilot/releases), verifies its
 SHA256 against the matching `.sha256` asset, and runs it. The wizard
-asks once -- on a single optional Pairing page -- for an enrollment
-bundle. Two ways to get to a paired agent:
+just collects target directory + scheduled-task settings -- no
+secrets, no hub URL. After the files copy and the scheduled task
+registers, the installer kicks off interactive pairing:
 
-* **Have a bundle ready?** Open `https://<your-hub>/admin/enroll`
-  first, click **Create voucher** (15-minute single-use), copy the
-  `magpilot2+...` string, then start the installer and paste it
-  into the Pairing page. Install + pair happen in one go.
-* **Pair later?** Leave the Pairing field empty. The agent installs
-  in disconnected mode (random local bearer, no hub URL) and you
-  pair from a shell whenever you're ready -- see step 2.
+* The launcher (`magpilot --magpilot-pair`) broadcasts a UDP query
+  on the LAN. Any magpilot hub replies with its URL.
+* If one hub is found: auto-pick. Multiple hubs: a console picker.
+* The launcher submits a pairing claim to the chosen hub and opens
+  your browser to `https://<hub>/admin/agents?pending=<id>`.
+* It prints a 6-character fingerprint on the console and the same
+  fingerprint shows next to the pending request in the hub's SPA.
+  Visually compare them, then click **Adopt**.
+* The launcher's long-poll picks up the approval, the hub mints a
+  fresh per-agent token, the launcher writes `magpilot.env`, the
+  scheduled task is bounced. Done.
 
-For unattended installs, fetch the script as a block so you can pass
-flags:
+For unattended installs (no UDP discovery available, scripted
+deployment), pair from a shell with a bundle minted on the hub's
+`/admin/enroll` page:
+
+```pwsh
+magpilot --magpilot-pair=<bundle>
+```
+
+For silent unattended install:
 
 ```pwsh
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/chsienki/magpilot/main/scripts/install.ps1))) -Silent
 ```
 
-**2. Pair (or re-pair)** from a shell -- the launcher path also works
-post-install or for rotating credentials. On the hub's web UI, open
-`https://<your-hub>/admin/enroll`, click **Create voucher**, copy
-the bundle, then on the new machine:
-
-```pwsh
-magpilot --magpilot-pair=<paste-bundle-here>
-```
-
-The launcher decodes the voucher, redeems it against the hub's
-`/api/enroll/redeem` endpoint, and the hub mints a fresh per-agent
-token in response. The three secrets the agent needs
-(`MAGPILOT_HUB_URL`, `MAGPILOT_AGENT_TOKEN`, `MAGPILOT_HUB_BEARER`)
-land in `%ProgramFiles%\Magpilot\config\magpilot.env`, and the
-`MagpilotAgent` scheduled task is bounced so the new values take
-effect immediately. Each agent gets its own token; revoking one
-won't affect the others.
-
 After install + pair, future upgrades go through `magpilot --magpilot-update`
 (same SHA256-verified path; preserves the existing config so re-pairing
-isn't needed). Re-run `magpilot --magpilot-pair=<new-bundle>` to
-re-point an existing agent at a different hub or rotate its credentials.
+isn't needed). Re-run `magpilot --magpilot-pair` to re-point an existing
+agent at a different hub or rotate its credentials.
 
 **Revoking a paired agent.** Open `https://<your-hub>/admin/agents`,
 find the agent, click **Revoke**. Hub-to-agent calls return 410 Gone
-with a "re-pair with a fresh voucher" hint. Reversible: re-run
-`magpilot --magpilot-pair=<fresh-bundle>` on the agent machine and
-it's back in service.
+with a "re-pair" hint. Reversible: re-run `magpilot --magpilot-pair`
+on the agent machine and it's back in service.
 
 ## Architectural law
 

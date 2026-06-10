@@ -227,6 +227,51 @@ public sealed class EnrollmentService
         return new RedeemResult(agentToken, RedeemStatus.Ok, null);
     }
 
+    /// <summary>
+    /// V3 bridge: mint a fresh per-agent token + upsert the agents
+    /// row inside the caller's transaction. Used by
+    /// <c>ClaimService.ApproveClaim</c> so the claim status flip and
+    /// the agent-row creation happen atomically together. Returns the
+    /// minted token so the caller can store it in the claim row for
+    /// the long-poll to pick up.
+    /// </summary>
+    /// <remarks>
+    /// Note that <c>agents.enrolled_via</c> here gets the claim id,
+    /// not a voucher id. The two id spaces don't share a counter so
+    /// strictly speaking the column is ambiguous between V2a vouchers
+    /// and V3 claims. For V3 we accept the ambiguity (the column is
+    /// audit metadata; the actual security boundary is the per-agent
+    /// token in <c>agents.token</c>). A future schema bump could add
+    /// an <c>enrolled_via_kind</c> column if disambiguation becomes
+    /// necessary.
+    /// </remarks>
+    public string MintTokenForClaim(SqliteConnection conn, SqliteTransaction tx, string agentName, int claimId)
+    {
+        var agentToken = GenerateSecret();
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        using var upsert = conn.CreateCommand();
+        upsert.Transaction = tx;
+        upsert.CommandText = """
+            INSERT INTO agents (name, url, token, last_seen, enrolled_at, enrolled_via)
+            VALUES ($name, $url, $token, $now / 1000, $now, $cid)
+            ON CONFLICT(name) DO UPDATE SET
+                url          = CASE WHEN excluded.url = '' THEN agents.url ELSE excluded.url END,
+                token        = excluded.token,
+                last_seen    = excluded.last_seen,
+                enrolled_at  = excluded.enrolled_at,
+                enrolled_via = excluded.enrolled_via,
+                revoked_at   = NULL
+        """;
+        upsert.Parameters.AddWithValue("$name", agentName);
+        upsert.Parameters.AddWithValue("$url", string.Empty);
+        upsert.Parameters.AddWithValue("$token", agentToken);
+        upsert.Parameters.AddWithValue("$now", nowMs);
+        upsert.Parameters.AddWithValue("$cid", claimId);
+        upsert.ExecuteNonQuery();
+        return agentToken;
+    }
+
     private static string GenerateSecret()
     {
         // 32 bytes (256 bits) of CSPRNG output, base64url-encoded.

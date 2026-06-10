@@ -49,6 +49,60 @@ public static class HubEndpoints
                 };
             });
 
+        // V3 pairing: agent submits a claim with a self-generated
+        // secret. Unauthenticated (the claim secret IS the auth
+        // handle: only the agent that generated it knows it). Returns
+        // the claim id + a fingerprint the launcher prints for the
+        // admin to visually verify, plus the URL the launcher opens
+        // in the user's browser.
+        routes.MapPost("/api/enroll/claim",
+            (Magpilot.Shared.Models.PairingClaimRequest req,
+             Magpilot.Hub.Auth.ClaimService claims,
+             HttpContext ctx) =>
+            {
+                if (string.IsNullOrWhiteSpace(req.Secret) || string.IsNullOrWhiteSpace(req.AgentName))
+                    return Results.BadRequest(new { error = "secret and agentName are required" });
+
+                int claimId;
+                string fingerprint;
+                try
+                {
+                    (claimId, fingerprint) = claims.CreateClaim(req.Secret, req.AgentName);
+                }
+                catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 19)
+                {
+                    // UNIQUE constraint on secret_hash. Astronomically
+                    // unlikely for 256-bit CSPRNG secrets but covered
+                    // for completeness.
+                    return Results.Conflict(new { error = "claim secret already used; generate a new one" });
+                }
+
+                // Build the approve URL from the same scheme+host the
+                // caller used so the launcher can `Process.Start(url)`
+                // and land on the right SPA.
+                var hubBase = $"{ctx.Request.Scheme}://{ctx.Request.Host}";
+                var approveUrl = $"{hubBase}/admin/agents?pending={claimId}";
+                return Results.Ok(new Magpilot.Shared.Models.PairingClaimResponse(claimId, approveUrl, fingerprint));
+            });
+
+        // V3 pairing: long-poll the claim's status. The launcher
+        // calls this in a loop with the same secret it used for
+        // CreateClaim; the hub blocks server-side for up to 60s
+        // waiting for Approve/Reject to fire. Returns immediately
+        // on terminal status (already-decided / expired) and on the
+        // long-poll timeout (status: pending -> launcher re-polls).
+        // Unauthenticated: the secret is the auth handle.
+        routes.MapGet("/api/enroll/claim-status",
+            async (string? secret,
+                   Magpilot.Hub.Auth.ClaimService claims,
+                   CancellationToken ct) =>
+            {
+                if (string.IsNullOrWhiteSpace(secret))
+                    return Results.BadRequest(new { error = "secret query parameter required" });
+                var status = await claims.AwaitStatusAsync(secret, ct);
+                return Results.Ok(status);
+            });
+
         var api = routes.MapGroup("/api").RequireAuthorization();
 
         api.MapGet("/me", (HttpContext ctx) =>
@@ -66,6 +120,29 @@ public static class HubEndpoints
                 return Results.NotFound(new { error = $"Unknown agent {name}" });
             return Results.Ok(reg.Get(name));
         });
+
+        // V3 pairing: admin-side list of recent claims (pending +
+        // recently-decided). Drives the "Pending pair requests"
+        // section of /admin/agents in the SPA.
+        api.MapGet("/admin/agents/claims",
+            (Magpilot.Hub.Auth.ClaimService claims) =>
+                Results.Ok(claims.ListClaims()));
+
+        api.MapPost("/admin/agents/claims/{id:int}/approve",
+            (int id, Magpilot.Hub.Auth.ClaimService claims, HttpContext ctx) =>
+            {
+                if (!claims.ApproveClaim(id, ctx.User.Identity?.Name))
+                    return Results.NotFound(new { error = $"Claim {id} not found, already decided, or expired" });
+                return Results.NoContent();
+            });
+
+        api.MapPost("/admin/agents/claims/{id:int}/reject",
+            (int id, Magpilot.Hub.Auth.ClaimService claims, HttpContext ctx) =>
+            {
+                if (!claims.RejectClaim(id, ctx.User.Identity?.Name))
+                    return Results.NotFound(new { error = $"Claim {id} not found or not pending" });
+                return Results.NoContent();
+            });
 
         // V2a pairing: mint a one-time enrollment voucher for a fresh
         // agent install. Cookie-auth-gated (this admin group requires

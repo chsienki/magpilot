@@ -27,6 +27,8 @@ public sealed record WrapperOptions(
     bool Update,
     /// <summary>Pair this agent with a hub using a bundle copied from the hub's /admin/enroll page; writes magpilot.env and restarts the scheduled task.</summary>
     string? Pair,
+    /// <summary>V3 interactive discovery: --magpilot-pair with no bundle argument; UDP-discover hubs on the LAN, generate a claim, open the admin's browser to approve.</summary>
+    bool PairDiscover,
     /// <summary>One-shot: register an already-running copilot session as host-owned (no spawn).</summary>
     string? Claim,
     /// <summary>Argv with all <c>--magpilot-*</c> flags stripped, ready to forward to the real copilot binary.</summary>
@@ -39,6 +41,7 @@ public sealed record WrapperOptions(
         var status = false; var help = false;
         var version = false; var update = false;
         string? pair = null;
+        var pairDiscover = false;
         string? claim = null;
         var forward = new List<string>(argv.Length);
 
@@ -58,6 +61,7 @@ public sealed record WrapperOptions(
                 case "--magpilot-help":            help = true; break;
                 case "--magpilot-version":         version = true; break;
                 case "--magpilot-update":          update = true; break;
+                case "--magpilot-pair":            pairDiscover = true; break;
                 default:
                     if (a.StartsWith("--magpilot-claim=", StringComparison.Ordinal))
                     {
@@ -80,7 +84,7 @@ public sealed record WrapperOptions(
         if (take && noTake)
             throw new ArgumentException("Contradictory flags: --magpilot-take (or --magpilot-force) and --magpilot-no-take both set.");
 
-        return new WrapperOptions(take, force, noTake, skipCheck, exitOnHandoff, status, help, version, update, pair, claim, forward);
+        return new WrapperOptions(take, force, noTake, skipCheck, exitOnHandoff, status, help, version, update, pair, pairDiscover, claim, forward);
     }
 
     /// <summary>
@@ -117,9 +121,11 @@ public sealed record WrapperOptions(
           --magpilot-status            don't spawn copilot; print agent reachability + sessions + exit
           --magpilot-version           print local + agent-reported version info, then exit
           --magpilot-update            download and run the latest installer from GitHub Releases, then exit
-          --magpilot-pair=<bundle>     pair this agent with a hub. <bundle> is copied from the hub's
-                                       /admin/enroll page. Writes magpilot.env and restarts the
-                                       installed scheduled task so the new values take effect.
+          --magpilot-pair              interactive pairing: UDP-discover a hub on the LAN, submit a claim,
+                                       open your browser to approve. The hub admin clicks "Adopt" on the
+                                       resulting pending request and the launcher finishes the handshake.
+          --magpilot-pair=<bundle>     non-interactive pairing: redeem a voucher bundle copied from the
+                                       hub's /admin/enroll page. Bypasses UDP discovery.
           --magpilot-claim=<sid>       one-shot: register a stranded already-running copilot session
                                        as host-owned in the agent (no spawn). The agent's PID-liveness
                                        sweep handles cleanup when the copilot child eventually exits.

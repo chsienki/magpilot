@@ -98,36 +98,19 @@ begin
   Result := Pos(';' + Uppercase(NewPath) + ';', ';' + Uppercase(CurrentPath) + ';') = 0;
 end;
 
-// V2b of magpilot-pairing (2026-06-09 evening): the installer
-// optionally collects an enrollment bundle on a single wizard page.
-// Leaving the field empty preserves the V1+V2a "disconnected install"
-// behaviour: install-task.ps1 creates a minimal magpilot.env with
-// just a random MAGPILOT_AGENT_TOKEN, agent boots idle, user pairs
-// later via:
+// V3 of magpilot-pairing (2026-06-09 evening): the installer is
+// purely files + scheduled task. No wizard pairing fields. After
+// install completes, install-task.ps1 invokes
 //
-//     magpilot --magpilot-pair=<bundle>
+//     magpilot --magpilot-pair
 //
-// When the field is non-empty, install-task.ps1 invokes the
-// launcher with --magpilot-pair=<the-pasted-bundle> right after
-// scheduled-task registration so install+pair complete in one go.
-// All actual pairing logic still lives in MagpilotPair.cs in the
-// launcher -- the Pascal side just collects the string and hands it
-// off, keeping the Inno Setup surface minimal.
-
-var
-  PairingPage: TInputQueryWizardPage;
-
-procedure InitializeWizard();
-begin
-  PairingPage := CreateInputQueryPage(
-    wpSelectTasks,
-    'Pair with a hub (optional)',
-    'Paste an enrollment bundle from your hub now, or pair later from the command line.',
-    'On your hub, open /admin/enroll and click "Create voucher" (15-minute single-use). Paste the resulting magpilot2+ string below to wire the agent up to that hub immediately. Leave empty to install the agent in "disconnected" mode and pair later via:' + #13#10 + #13#10 +
-    '  magpilot --magpilot-pair=<bundle>');
-  PairingPage.Add('Enrollment bundle (optional):', False);
-  PairingPage.Values[0] := '';
-end;
+// in a visible console window; the launcher does UDP discovery,
+// finds a hub on the LAN, submits a pairing claim, opens the
+// user's browser to /admin/agents?pending=<id> for the admin to
+// click Adopt. Earlier flows (paste bundle in wizard / paste bundle
+// after install) are still available via
+// `magpilot --magpilot-pair=<bundle>` for unattended scripting --
+// just not exposed through the wizard.
 
 procedure RunPwsh(ScriptPath, Args: String);
 var
@@ -192,10 +175,11 @@ begin
 
     if WizardIsComponentSelected('agent') then
     begin
-      // V2b: collect the optional enrollment bundle from PairingPage
-      // and pass it through to install-task.ps1 (which forwards to
-      // `magpilot --magpilot-pair=<bundle>` after registering the
-      // scheduled task). Empty bundle = disconnected install.
+      // V3: no wizard-collected secrets. install-task.ps1 registers
+      // the scheduled task, creates a minimal magpilot.env with a
+      // random MAGPILOT_AGENT_TOKEN placeholder, then invokes
+      // `magpilot --magpilot-pair` to walk the user through the
+      // interactive UDP-discover + adopt-in-SPA pairing flow.
 
       // Pass -User if we have a real one. install-task.ps1 has its own
       // discovery chain when -User is empty (Win32_ComputerSystem, quser,
@@ -209,17 +193,6 @@ begin
       end
       else
         Log('  install-task user: <unset, install-task.ps1 will auto-discover>');
-
-      if Trim(PairingPage.Values[0]) <> '' then
-      begin
-        // The bundle is opaque base64url -- no quoting issues, no
-        // spaces. Pass it as a separate -Bundle parameter; install-
-        // task.ps1 handles it (and "" if absent).
-        installTaskArgs := installTaskArgs + ' -Bundle "' + Trim(PairingPage.Values[0]) + '"';
-        Log('  install-task: bundle supplied (will pair after registration)');
-      end
-      else
-        Log('  install-task: no bundle (disconnected install; pair later via --magpilot-pair)');
 
       if WizardIsTaskSelected('schedtask') then
         RunPwsh(ExpandConstant('{app}\install-task.ps1'), installTaskArgs);

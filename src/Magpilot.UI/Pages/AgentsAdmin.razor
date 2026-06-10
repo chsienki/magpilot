@@ -3,15 +3,16 @@
 @inject NavigationManager Nav
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
+@implements IDisposable
 @using Magpilot.UI.Services
 @using Magpilot.Shared.Models
 
 @*
-    Pairing V2b: list paired agents + revoke. Reads the same
-    /api/agents endpoint as the main host picker, plus the new
-    EnrolledAt + RevokedAt fields landed in V2b. Revoking clears
-    the agent's per-agent bearer; subsequent hub-to-agent calls
-    return 410 Gone with a "re-pair with a fresh voucher" hint.
+    V2b: list paired agents + revoke.
+    V3: pending pairing-claim approval (Adopt / Reject buttons).
+    Both share /api/agents and the new /api/admin/agents/claims as
+    data sources. Polled every 5s so a launcher running on a fresh
+    install shows up promptly in the SPA without a page reload.
 *@
 
 <MudLayout>
@@ -28,6 +29,61 @@
 
     <MudMainContent Class="mt-2 px-3">
         <MudContainer MaxWidth="MaxWidth.Large" Class="py-4">
+
+            @{
+                var pendingClaims = _claims?.Where(c => c.Status == PairingClaimState.Pending).ToList() ?? new();
+            }
+            @if (pendingClaims.Count > 0)
+            {
+                <MudText Typo="Typo.h6" Class="mb-2">Pending pair requests</MudText>
+                <MudText Typo="Typo.body2" Color="Color.Default" Class="mb-3">
+                    A magpilot agent is asking to pair with this hub. Compare the
+                    fingerprint below with what the agent's launcher console
+                    printed, then Adopt or Reject. Each request expires after
+                    5 minutes.
+                </MudText>
+                @foreach (var claim in pendingClaims)
+                {
+                    var isHighlighted = _highlightedClaimId is int hl && hl == claim.Id;
+                    var paperClass = isHighlighted
+                        ? "pa-3 mb-3 mud-elevation-4"
+                        : "pa-3 mb-3";
+                    <MudPaper Elevation="0" Outlined="true" Class="@paperClass">
+                        <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center">
+                            <MudIcon Icon="@Icons.Material.Filled.DeviceUnknown" Color="Color.Primary" />
+                            <div style="flex: 1; min-width: 0;">
+                                <MudText Typo="Typo.subtitle2" Style="font-weight: 500;">@claim.AgentName</MudText>
+                                <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center">
+                                    <MudText Typo="Typo.caption" Color="Color.Default">Fingerprint:</MudText>
+                                    <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
+                                             Color="Color.Default" Style="font-family: monospace;">
+                                        @claim.Fingerprint
+                                    </MudChip>
+                                    <MudText Typo="Typo.caption" Color="Color.Default">
+                                        expires @RelativeFuture(claim.ExpiresAt)
+                                    </MudText>
+                                </MudStack>
+                            </div>
+                            <MudButton Variant="Variant.Filled" Color="Color.Primary"
+                                       StartIcon="@Icons.Material.Filled.Check"
+                                       Disabled="@_busyClaims.Contains(claim.Id)"
+                                       OnClick="@(() => ApproveAsync(claim))">
+                                Adopt
+                            </MudButton>
+                            <MudButton Variant="Variant.Text" Color="Color.Default"
+                                       StartIcon="@Icons.Material.Filled.Close"
+                                       Disabled="@_busyClaims.Contains(claim.Id)"
+                                       OnClick="@(() => RejectAsync(claim))">
+                                Reject
+                            </MudButton>
+                        </MudStack>
+                    </MudPaper>
+                }
+                <MudDivider Class="my-4" />
+            }
+
+            <MudText Typo="Typo.h6" Class="mb-2">Paired agents</MudText>
+
             @if (_loading && _agents is null)
             {
                 <MudProgressLinear Indeterminate="true" Color="Color.Primary" />
@@ -37,16 +93,13 @@
                 <MudPaper Elevation="0" Outlined="true" Class="pa-6 d-flex flex-column align-center">
                     <MudIcon Icon="@Icons.Material.Filled.DeviceHub" Size="Size.Large" Color="Color.Default" Class="mb-2" />
                     <MudText Typo="Typo.h6" Class="mb-2">No agents paired yet</MudText>
-                    <MudText Typo="Typo.body2" Color="Color.Default" Align="Align.Center" Class="mb-4">
-                        Open <code>/admin/enroll</code> to mint a voucher, then
-                        run <code>magpilot --magpilot-pair=&lt;bundle&gt;</code>
-                        on the new machine.
+                    <MudText Typo="Typo.body2" Color="Color.Default" Align="Align.Center" Class="mb-2">
+                        Install magpilot on a machine and run <code>magpilot --magpilot-pair</code>.
                     </MudText>
-                    <MudButton Variant="Variant.Filled" Color="Color.Primary"
-                               StartIcon="@Icons.Material.Filled.Add"
-                               OnClick="@(() => Nav.NavigateTo("/admin/enroll"))">
-                        Pair an agent
-                    </MudButton>
+                    <MudText Typo="Typo.caption" Color="Color.Default" Align="Align.Center">
+                        Or visit <code>/admin/enroll</code> to mint a bundle for the non-interactive
+                        <code>magpilot --magpilot-pair=&lt;bundle&gt;</code> flow.
+                    </MudText>
                 </MudPaper>
             }
             else
@@ -117,8 +170,7 @@
 
                 <MudText Typo="Typo.caption" Color="Color.Default" Class="d-block mt-3">
                     Revoking clears the agent's bearer token. Re-pair the
-                    agent with a fresh voucher from <code>/admin/enroll</code>
-                    to restore access.
+                    agent with <code>magpilot --magpilot-pair</code> to restore access.
                 </MudText>
             }
         </MudContainer>
@@ -128,12 +180,43 @@
 @code {
     private bool _loading;
     private List<AgentInfo>? _agents;
-    // Tracks per-row "revoke in flight" so we don't double-click a
-    // row into a confused state. Cleared on completion (success or
-    // failure) of the per-row call.
+    private List<PairingClaimSummary>? _claims;
     private readonly HashSet<string> _busyAgents = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<int> _busyClaims = new();
+    private System.Threading.Timer? _poller;
+    // Claim id from ?pending=<id> URL param so a freshly-redirected
+    // launcher-opened browser visually emphasizes the right card.
+    private int? _highlightedClaimId;
 
-    protected override async Task OnInitializedAsync() => await LoadAsync();
+    protected override async Task OnInitializedAsync()
+    {
+        // Parse ?pending=<id> from the URL the launcher opened so we
+        // can visually emphasize that claim row when it shows up.
+        // Uri.Query is the raw "?...&..." string; minimal manual parse
+        // is enough -- no dependency on Microsoft.AspNetCore.WebUtilities.
+        var query = new Uri(Nav.Uri).Query.TrimStart('?');
+        foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var eq = pair.IndexOf('=');
+            if (eq <= 0) continue;
+            var key = pair[..eq];
+            var val = pair[(eq + 1)..];
+            if (string.Equals(key, "pending", StringComparison.OrdinalIgnoreCase)
+                && int.TryParse(val, out var pid))
+            {
+                _highlightedClaimId = pid;
+                break;
+            }
+        }
+
+        await LoadAsync();
+        // Poll every 5s so a launcher pairing in the background shows
+        // up promptly without the admin having to refresh. Same poll
+        // covers the agent list so a Revoke triggered by another tab
+        // is reflected here too.
+        _poller = new System.Threading.Timer(_ => InvokeAsync(LoadAsync), null,
+            TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+    }
 
     private async Task LoadAsync()
     {
@@ -141,13 +224,14 @@
         StateHasChanged();
         try
         {
-            _agents = await Hub.ListAgentsAsync();
-            // Stable order: revoked last (greyed), then by name. Keeps
-            // the active set visually first on hosts that have been
-            // around long enough to accumulate revocations.
-            if (_agents is not null)
+            var agentsTask = Hub.ListAgentsAsync();
+            var claimsTask = Hub.ListPairingClaimsAsync();
+            await Task.WhenAll(agentsTask, claimsTask);
+            var agents = await agentsTask;
+            _claims = await claimsTask;
+            if (agents is not null)
             {
-                _agents = _agents
+                _agents = agents
                     .OrderBy(a => a.RevokedAt is not null)
                     .ThenBy(a => a.Name, StringComparer.OrdinalIgnoreCase)
                     .ToList();
@@ -160,6 +244,48 @@
         finally
         {
             _loading = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task ApproveAsync(PairingClaimSummary claim)
+    {
+        _busyClaims.Add(claim.Id);
+        StateHasChanged();
+        try
+        {
+            await Hub.ApproveClaimAsync(claim.Id);
+            Snackbar.Add($"Adopted {claim.AgentName}", Severity.Success);
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Could not approve: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _busyClaims.Remove(claim.Id);
+            StateHasChanged();
+        }
+    }
+
+    private async Task RejectAsync(PairingClaimSummary claim)
+    {
+        _busyClaims.Add(claim.Id);
+        StateHasChanged();
+        try
+        {
+            await Hub.RejectClaimAsync(claim.Id);
+            Snackbar.Add($"Rejected {claim.AgentName}", Severity.Info);
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Could not reject: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _busyClaims.Remove(claim.Id);
             StateHasChanged();
         }
     }
@@ -206,4 +332,19 @@
         if (delta.TotalDays < 365)    return $"{(int)(delta.TotalDays / 30)}mo ago";
         return $"{(int)(delta.TotalDays / 365)}y ago";
     }
+
+    private static string RelativeFuture(DateTimeOffset when)
+    {
+        var delta = when - DateTimeOffset.UtcNow;
+        if (delta <= TimeSpan.Zero) return "now";
+        if (delta.TotalMinutes < 1) return $"in {(int)delta.TotalSeconds}s";
+        if (delta.TotalHours < 1)   return $"in {(int)delta.TotalMinutes}m {delta.Seconds}s";
+        return $"in {(int)delta.TotalHours}h";
+    }
+
+    public void Dispose()
+    {
+        _poller?.Dispose();
+    }
 }
+

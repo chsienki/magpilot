@@ -37,6 +37,11 @@ if (opts.Pair is not null)
     return await MagpilotPair.RunAsync(opts.Pair);
 }
 
+if (opts.PairDiscover)
+{
+    return await MagpilotPairDiscover.RunAsync();
+}
+
 if (opts.Claim is not null)
 {
     return await MagpilotClaim.RunAsync(opts.Claim);

@@ -79,6 +79,27 @@ public sealed class AgentRegistry
                 created_by_user TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_vouchers_hash ON vouchers(secret_hash);
+            -- V3 pairing (magpilot-pairing.md): agent-generated claims for
+            -- the interactive UDP-discover + admin-approve flow. Same hash-only
+            -- storage discipline as the vouchers table: the hub never
+            -- holds the plaintext claim secret. fingerprint is a public
+            -- low-entropy hint (e.g. last 6 chars of the secret) the
+            -- admin visually verifies against what the agent's launcher
+            -- printed -- not a security boundary on its own.
+            CREATE TABLE IF NOT EXISTS claims (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                secret_hash BLOB NOT NULL UNIQUE,
+                agent_name TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                agent_token TEXT,
+                decided_at INTEGER,
+                decided_by_user TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_claims_hash ON claims(secret_hash);
+            CREATE INDEX IF NOT EXISTS idx_claims_status ON claims(status, expires_at);
         """;
         cmd.ExecuteNonQuery();
 

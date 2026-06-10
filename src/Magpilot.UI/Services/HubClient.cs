@@ -80,6 +80,27 @@ public sealed class HubClient
         return await resp.Content.ReadFromJsonAsync<AgentInfo>(cancellationToken: ct);
     }
 
+    /// <summary>
+    /// V3 pairing: list recent pairing claims (pending + recently
+    /// decided) for the /admin/agents "Pending pair requests" section.
+    /// </summary>
+    public Task<List<PairingClaimSummary>?> ListPairingClaimsAsync(CancellationToken ct = default) =>
+        _http.GetFromJsonAsync<List<PairingClaimSummary>>("api/admin/agents/claims", ct);
+
+    /// <summary>Approve a pending pairing claim. 404 if already decided.</summary>
+    public async Task ApproveClaimAsync(int claimId, CancellationToken ct = default)
+    {
+        var resp = await _http.PostAsync($"api/admin/agents/claims/{claimId}/approve", content: null, ct);
+        resp.EnsureSuccessStatusCode();
+    }
+
+    /// <summary>Reject a pending pairing claim. 404 if already decided.</summary>
+    public async Task RejectClaimAsync(int claimId, CancellationToken ct = default)
+    {
+        var resp = await _http.PostAsync($"api/admin/agents/claims/{claimId}/reject", content: null, ct);
+        resp.EnsureSuccessStatusCode();
+    }
+
     public Task<List<SessionInfo>?> ListSessionsAsync(string agent, CancellationToken ct = default) =>
         _http.GetFromJsonAsync<List<SessionInfo>>($"api/agents/{agent}/sessions", ct);
 

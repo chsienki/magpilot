@@ -499,35 +499,162 @@ Parameters (use the scriptblock form to pass them through `irm | iex`):
   Releases page instead, or fork to a public mirror and point
   `-Repo` at it.
 
-### Pairing V2a + V2b (`magpilot --magpilot-pair=<bundle>`)
+### Pairing V2a / V2b / V3 (`magpilot --magpilot-pair`)
 
-The installer's wizard has a single optional Pairing page that
-collects an enrollment bundle if the user has one ready. Two install
-shapes share the same code path:
+The installer is purely files + scheduled task -- no wizard pairing
+fields. After install completes, install-task.ps1 invokes
+`magpilot --magpilot-pair` (V3 interactive discovery) in a visible
+console; the launcher UDP-broadcasts to find a hub, submits a
+pairing claim, opens the user's browser to
+`/admin/agents?pending=<id>` for the admin to click Adopt. Three
+flows live side by side, all converging on
+<see cref="MagpilotPairWriter"/> for the env-file write + task
+bounce:
 
-* **Paste bundle during install (V2b path):** wizard's Pairing field
-  is non-empty -> installer passes `-Bundle "<value>"` to
-  install-task.ps1 -> after registering the scheduled task,
-  install-task.ps1 calls
-  `magpilot.exe --magpilot-pair=<bundle>`. Install + pair complete
-  in one go; agent boots fully wired up on next logon.
-* **Pair later (V2a path):** Pairing field left empty.
-  `install-task.ps1` creates a minimal `magpilot.env` with just a
-  CSPRNG-strength random `MAGPILOT_AGENT_TOKEN` placeholder; agent
-  boots, listens on `:5099`, but is unreachable from the hub
-  (placeholder token has no matching row in the hub's `agents`
-  table). User pairs from a shell via
-  `magpilot --magpilot-pair=<bundle>` whenever they're ready.
+* **V3 interactive (the default, installer-triggered):**
+  `magpilot --magpilot-pair` -- no argument. UDP-discover hubs,
+  pick one, claim, browser, long-poll, write env. Agent name is
+  `Environment.MachineName` (overridable via
+  `MAGPILOT_AGENT_NAME`).
+* **V2a non-interactive bundle paste:**
+  `magpilot --magpilot-pair=<magpilot2+...>` -- bundle copied from
+  the hub's `/admin/enroll` page. Decodes -> POST
+  `/api/enroll/redeem` -> writes env. Bypasses UDP entirely; useful
+  for scripted deployments where the agent has no human at the
+  console.
+* **V2b revocation:** `/admin/agents` admin page lists paired
+  agents + per-row Revoke button. Revoked agents render with 410
+  Gone from the Proxy wrapper; re-pair via V3 or V2a restores them
+  (`revoked_at = NULL` in the agents row upsert).
 
-V2a uses **voucher-based enrollment**: each pairing mints a fresh
-per-agent token. There's no shared `MAGPILOT_AGENT_TOKEN` on the hub
-anymore -- the hub looks up per-agent bearers from its own database
-keyed by agent name. An agent that hasn't been paired is unreachable
-from the hub; the act of pairing IS what registers the agent + its
+V2a uses **voucher-based enrollment**: hub-side
+<see cref="EnrollmentService.CreateVoucher"/> mints a 15-minute
+single-use voucher; agent's launcher posts the voucher to
+`/api/enroll/redeem`; hub atomically check-and-consumes + mints a
+fresh per-agent token + upserts the agents row + returns the token.
+
+V3 inverts the secret-generation direction: agent-generated claim
+secret, admin-confirmed approval. The hub-side
+<see cref="ClaimService.CreateClaim"/> stores `SHA256(secret)` + a
+6-char fingerprint (last 6 chars of the secret, public hint) with
+a 5-min TTL. The launcher POSTs to `/api/enroll/claim`; the
+launcher's long-poll against `/api/enroll/claim-status?secret=...`
+blocks server-side up to 60s, signaled immediately by
+Approve/Reject via an in-process `TaskCompletionSource` keyed by
+claim id. Approval reuses
+<see cref="EnrollmentService.MintTokenForClaim"/> -- the same
+upsert path as voucher redeem -- so the agents-table side stays
+identical across the two enrollment flavors.
+
+There's no shared `MAGPILOT_AGENT_TOKEN` on the hub anymore. The
+hub looks up per-agent bearers from its own database keyed by
+agent name. An agent that hasn't been paired is unreachable from
+the hub; the act of pairing IS what registers the agent + its
 bearer with the hub.
 
-V2b adds **revocation**: an admin page at `/admin/agents` shows the
-paired agents with a Revoke button per row. Revoking clears the
+**V3 wire protocol:**
+
+* UDP/47824 (distinct from the agent-side discovery on 47823 so
+  both can co-exist on one machine). Magic string
+  `MAGPILOT-PAIR-DISCOVER-v1`. Always-on listener
+  (`PairingDiscoveryResponder` background service in the hub);
+  no enable/disable button -- the auth gate is the
+  admin-approve step in the SPA, not discovery.
+* Hub's UDP reply carries `{ magic, hubUrl, hubName }`. URL
+  resolution follows the same chain as
+  `EnrollmentService.ResolveHubPublicUrl` plus a "match my LAN
+  IP to the probing agent's subnet" fallback when the bound
+  listen URL is a wildcard.
+
+**V3 HTTP endpoints (claim flow):**
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| POST | `/api/enroll/claim` | NONE (secret IS the auth) | Body `PairingClaimRequest{Secret, AgentName}`. Stores `SHA256(secret)` + 6-char fingerprint + 5min TTL. Returns `PairingClaimResponse{ClaimId, ApproveUrl, Fingerprint}`. |
+| GET | `/api/enroll/claim-status?secret=...` | NONE | Long-poll (~60s server-side). Returns `PairingClaimStatus{Status, AgentToken?}`. Status is `Pending` on timeout (launcher re-polls), terminal otherwise. |
+| GET | `/api/admin/agents/claims` | cookie | `PairingClaimSummary[]` for the SPA's pending-requests section. |
+| POST | `/api/admin/agents/claims/{id}/approve` | cookie | Atomic: verify pending + non-expired; mint per-agent token via `MintTokenForClaim`; upsert agents row; mark consumed; signal waiters. 404 if not found / already-decided / expired. |
+| POST | `/api/admin/agents/claims/{id}/reject` | cookie | Mark rejected; signal waiters. 404 if not pending. |
+
+**V3 DB schema:**
+
+```sql
+CREATE TABLE claims (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    secret_hash BLOB NOT NULL UNIQUE,
+    agent_name TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    agent_token TEXT,
+    decided_at INTEGER,
+    decided_by_user TEXT
+);
+```
+
+Same hash-only discipline as the V2a `vouchers` table -- the hub
+never holds the plaintext claim secret. Status is stored as a
+string for legibility; `PairingClaimState` enum on the wire is
+`[JsonStringEnumConverter]`-serialized to match the codebase
+convention for other enums.
+
+The `agents.enrolled_via` column gets the claim id (vs voucher id
+in the V2a path). The two id spaces don't share a counter so the
+column is strictly ambiguous between voucher / claim sources --
+acceptable for V3 (the column is audit metadata; security boundary
+is the per-agent token in `agents.token`). A future schema bump
+could add `enrolled_via_kind` if disambiguation matters.
+
+**V3 launcher discovery loop:**
+
+`MagpilotPairDiscover.RunAsync` (`src/Magpilot.Host/MagpilotPairDiscover.cs`):
+
+1. Broadcast `MAGPILOT-PAIR-DISCOVER-v1` 3 times across a 3-second
+   window. Concurrent listener collects unicast replies into a
+   `Dictionary<HubUrl, DiscoveredHub>` (dedup).
+2. No hubs found -> exit code 4 with hint to use
+   `--magpilot-pair=<bundle>` instead.
+3. One hub -> auto-pick. Multiple -> console picker (`[1] HENDRIK
+   (http://...)` / `[c] cancel`).
+4. Generate CSPRNG 32-byte secret (base64url-encoded, 43 chars).
+5. POST `/api/enroll/claim`. Print fingerprint + approve URL.
+   `Process.Start(approveUrl) { UseShellExecute = true }` for
+   browser open (silent failure logs the URL for manual open).
+6. Long-poll `/api/enroll/claim-status?secret=...` (5-min total
+   budget; each HTTP call has a 90-second timeout so the 60-second
+   server-side block has slack). Status transitions:
+   - `Approved` -> write env via `MagpilotPairWriter.UpsertEnv`,
+     bounce task, exit 0.
+   - `Rejected` -> exit 7.
+   - `Expired` -> exit 7 with "no decision within 5 minutes" hint.
+   - `Pending` -> re-poll.
+7. Same `MAGPILOT_ENV_FILE`-aware task-bounce skip as the V2a
+   path so dev / test runs don't kill the installed agent.
+
+**V3 SPA admin page:**
+
+`Pages/AgentsAdmin.razor` mounts at `/admin/agents`. Shows two
+sections:
+
+* "Pending pair requests" at the top -- one card per claim with
+  agent name + fingerprint chip + expiry countdown + Adopt /
+  Reject buttons. Reads `?pending=<id>` from the URL so the
+  freshly-redirected browser visually emphasizes the right card
+  via `mud-elevation-4`. 5-second poll keeps it live without page
+  refresh.
+* "Paired agents" below -- V2b MudTable with name / status / url
+  / enrolled / last-seen + per-row Revoke. Revoked rows greyed.
+
+**Gotcha (carried from V2a / V2b)**: running `--magpilot-pair`
+without `MAGPILOT_ENV_FILE` set on a machine where the installed
+`MagpilotAgent` task is configured WILL bounce the installed
+agent. If a `dotnet run --project src/Magpilot.Agent` dev agent is
+bound to `:5099`, the installed task will fight for the port and
+one will lose. Always set `MAGPILOT_ENV_FILE` to a throwaway path
+when testing pair from source.
+
+**V2b revocation specifics:**
 agent's per-agent token in the database + in-memory; subsequent
 hub-to-agent calls return 410 Gone with a "re-pair with a fresh
 voucher" hint from the Proxy wrapper. Fully reversible: re-running
@@ -1357,7 +1484,7 @@ future "what's left?" sweep doesn't accidentally re-pick them):
 
 Open items:
 
-- ~~2026-05-18: agent/hub connect handshake -- either a single condensed token bundling all connection info, or a UDP discovery mode (think WPS but for agents and the hub) so users don't have to copy a bunch of random strings~~ -> shipped V1 + V2a + V2b: V1 paste-bundle flow + installer drop of the Settings page (2026-06-09 morning); V2a per-agent tokens + voucher TTL/single-use enrollment via `POST /api/enroll/redeem` (2026-06-09 afternoon); V2b revocation UI at /admin/agents + 410 Proxy guard + installer Pairing page that paste-pairs in one go (2026-06-09 evening). UDP discovery is the only deferred V2-era item -- see projects/magpilot-pairing.md log.
+- ~~2026-05-18: agent/hub connect handshake -- either a single condensed token bundling all connection info, or a UDP discovery mode (think WPS but for agents and the hub) so users don't have to copy a bunch of random strings~~ -> shipped V1 + V2a + V2b + V3 (2026-06-09, all in one day): V1 paste-bundle morning; V2a per-agent tokens + voucher TTL/single-use afternoon; V2b revocation UI + installer Pairing page late afternoon; V3 interactive UDP discovery + admin-Adopt-in-SPA + Pairing-page-removed evening. Full WPS-style pairing flow is live; install becomes "irm | iex -> browser opens -> click Adopt".
 - 2026-06-08: cleanup status bar at top to be less confusing
 - ~~2026-06-08: powershell one-liner that downloads, verifies and runs the installer as an easy bootstrap~~ -> shipped: `scripts/install.ps1` -- fetches version.json from /releases/latest/download/, downloads the installer + .sha256, verifies, runs with UAC elevation. README has the canonical `irm ... | iex` one-liner; instructions have the parameter-passing scriptblock form for `-Silent` / `-Version` / `-Repo` / `-DryRun`. Documented draft + private-repo failure modes alongside the hub-autoupdate ones.
 - 2026-06-08: drop 'past' sessions list, replace with 'resume previous' button that opens a filterable/searchable list
