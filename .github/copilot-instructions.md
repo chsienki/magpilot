@@ -714,7 +714,7 @@ from the hub's source IP when unset.
 
 * `vouchers (id, secret_hash, created_at, expires_at, consumed_at, consumed_by_agent_name, created_by_user)` -- the hub stores only `SHA256(secret)`, never plaintext.
 * `agents` gains `enrolled_at`, `enrolled_via` (FK to `vouchers.id`), `revoked_at` (null = active). Per-agent token still lives in `agents.token` as it always did; V2a just stops sharing a single value.
-* `AgentRegistry.InitDb` runs the migration idempotently via `PRAGMA table_info` -- safe to upgrade in place.
+* `AgentRegistry.InitDb` runs the migration idempotently via the `AddColumnIfMissing` helper (probes `PRAGMA table_info` and only runs the `ALTER` when the column is genuinely absent) -- safe to upgrade in place. Use this same helper for any new agents / vouchers / claims column; do not write bare `ALTER TABLE` statements in `InitDb`.
 
 **MagpilotPair.RunAsync** (`src/Magpilot.Host/MagpilotPair.cs`):
 
@@ -765,22 +765,85 @@ when testing pair from source.
   there instead would clobber the columns we just wrote in the
   transaction.
 
-**V2b installer integration:**
+**V3 installer integration:**
 
-* `installer/magpilot.iss` has a single optional InputQueryPage
-  (`PairingPage`) with one text field for the enrollment bundle.
-  Empty = disconnected install (V2a path); non-empty = pass
-  `-Bundle "<value>"` to install-task.ps1.
-* `install-task.ps1` reads `-Bundle`. After scheduled-task
-  registration + initial `Start-ScheduledTask`, if a bundle was
-  supplied it shells out to
-  `<install>/bin/magpilot.exe --magpilot-pair=$Bundle`. A
-  non-zero exit logs a `Write-Warning` but doesn't fail the
-  install -- the user can re-run from a shell.
-* No Pascal-side bundle decoding / HTTP -- the launcher does the
-  work, the Pascal side just collects the string and hands it
-  off. Keeps the Inno Setup surface minimal (one text field) and
-  avoids needing to ship an HTTPS client in the installer.
+* `installer/magpilot.iss` has **NO wizard pairing fields**. Pairing
+  is post-install, not at install time. The installer just lays
+  down files + registers the scheduled task; the legacy V2b
+  `PairingPage` (single optional bundle text field) and the
+  matching `-Bundle` parameter on `install-task.ps1` are both gone.
+* `install-task.ps1` unconditionally shells out to
+  `<install>\bin\magpilot.exe --magpilot-pair` (V3 interactive
+  discovery) in a visible console after scheduled-task
+  registration. The user's browser opens to
+  `/admin/agents?pending=<id>`; the launcher long-polls until the
+  admin clicks Adopt, then writes `magpilot.env` and bounces the
+  task. Non-zero exit logs a `Write-Warning` but doesn't fail the
+  install -- the user can re-run `magpilot --magpilot-pair` from
+  any shell to retry.
+* Pascal-side surface is intentionally minimal -- no UDP, no HTTP
+  POST, no bundle decoding. Inno Setup's Pascal Script has no
+  native UDP and only `DownloadTemporaryFile` (GET) for HTTP, so
+  doing real pairing work in Pascal would mean shipping a parallel
+  HTTPS + UDP stack. The launcher does everything in C# instead;
+  Pascal just invokes it.
+* For unattended scripted installs (no human at the console at
+  install time), the V2a bundle path is still available:
+  `magpilot --magpilot-pair=<magpilot2+...>` run manually
+  post-install. Generate the bundle from the hub's `/admin/enroll`
+  page. Not wired into the installer wizard.
+
+### Reusable hub-side patterns (extend, don't reinvent)
+
+These primitives crystallized during the pairing work and now
+own their respective concerns. New features should extend them
+rather than spawn parallel implementations.
+
+* **`AgentRegistry.AddColumnIfMissing(conn, table, column, type)`** --
+  the idempotent schema-migration helper. Probes `PRAGMA
+  table_info`, only runs the `ALTER TABLE` when the column is
+  genuinely absent. Used three times in `InitDb` today
+  (`enrolled_at`, `enrolled_via`, `revoked_at`); any new
+  agents / vouchers / claims column goes through here. Default-NULL
+  semantics mean pre-migration rows stay valid, so you can ship
+  the column without a downtime. Don't write bare `ALTER TABLE`
+  in `InitDb` -- it'll throw on the second startup.
+
+* **`Proxy(name, reg, ...)` in `HubEndpoints`** -- the single
+  choke point for every per-agent-name HTTP route on the hub.
+  Already gates revocation (returns 410 Gone with `revoked: true`
+  when `reg.IsRevoked(name)`). Any future per-agent policy
+  decision (visibility filtering for multi-user, RBAC,
+  rate-limiting, agent-status preconditions) belongs here -- one
+  decision point that returns the right status code consistently.
+  Per-route guards duplicated across the dozen `/api/agents/...`
+  endpoints will drift; the wrapper exists precisely so they
+  don't have to.
+
+* **`TaskCompletionSource<bool>` keyed by entity id** -- the
+  hub-side push-style long-poll pattern, demonstrated in
+  `ClaimService` for claim-status. The waiter awaits the TCS with
+  a server-side timeout (~60s); the mutator (Approve/Reject)
+  completes the TCS via a `ConcurrentDictionary<int, TCS>` keyed
+  by claim id, so a status flip wakes the waiter within ~30ms
+  instead of waiting for the next poll tick. Same shape works
+  for any "user did a thing in the SPA, agent / launcher needs to
+  know right now" flow. In-process only -- if magpilot ever
+  grows to multiple hub replicas this graduates to Redis
+  pub/sub or similar, but that's a long way off.
+
+* **`MagpilotPairWriter.UpsertEnv` + `TryRestartScheduledTaskAsync`**
+  (`src/Magpilot.Host/MagpilotPairWriter.cs`) -- the agent-side
+  helpers shared by `MagpilotPair` (V2a bundle path) and
+  `MagpilotPairDiscover` (V3 interactive path). Any future pair
+  flow that needs to atomically upsert keys into `magpilot.env`
+  + bounce the installed `MagpilotAgent` scheduled task uses
+  these. Don't duplicate the temp+move write, the env-file
+  resolution chain, or the `MAGPILOT_ENV_FILE`-set-skip-bounce
+  guard -- extend the helper instead. The guard exists so a dev
+  run with a throwaway env file doesn't accidentally bounce an
+  unrelated installed agent (see the "Gotcha" above the V2b
+  revocation specifics).
 
 ### Autoupdate visibility: two ways the chain silently breaks
 
