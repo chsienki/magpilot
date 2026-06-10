@@ -17,14 +17,23 @@ that:
   reachable).
 - Optionally opens Windows Firewall for `TCP 5099` + `UDP 47823` (LAN +
   WireGuard CIDRs).
-- Prompts for `MAGPILOT_HUB_URL`, `MAGPILOT_AGENT_TOKEN`, and
-  `MAGPILOT_AGENT_PUBLIC_URL`, and writes them to
-  `%ProgramFiles%\Magpilot\config\magpilot.env`.
+- Writes a placeholder `%ProgramFiles%\Magpilot\config\magpilot.env`
+  with a randomly-generated `MAGPILOT_AGENT_TOKEN` and commented-out
+  `MAGPILOT_HUB_URL`. The real values get filled in post-install by
+  pairing (see below) -- the wizard collects no secrets, no hub URL,
+  no agent token.
+- Kicks off interactive pairing (`magpilot --magpilot-pair`) in a
+  visible console as the final install step. The launcher
+  UDP-broadcasts to find a hub, submits a pairing claim, opens the
+  user's browser to the hub's `/admin/agents?pending=<id>` page,
+  and long-polls for an admin to click **Adopt**. On approval the
+  hub mints a fresh per-agent token, the launcher upserts it into
+  `magpilot.env`, and bounces the scheduled task.
 
 The launcher's own `magpilot --magpilot-update` subcommand downloads the
-latest installer and runs it with `/SILENT`. Existing settings in
-`magpilot.env` are read at install time so silent re-installs preserve
-them.
+latest installer and runs it with `/SILENT`. Existing `magpilot.env`
+keys (hub URL + agent token) survive the silent re-install untouched,
+so an upgrade does NOT require re-pairing.
 
 ## Building locally
 
@@ -54,7 +63,7 @@ extract them per-run and slow startup.
 
 | File | Purpose |
 |---|---|
-| `magpilot.iss` | Inno Setup script. Defines components, tasks, custom Settings page, and PATH/scheduled-task wire-up. |
+| `magpilot.iss` | Inno Setup script. Defines components, tasks, PATH/scheduled-task wire-up, and the post-install `--magpilot-pair` hand-off. No wizard pairing fields -- pairing happens post-install. |
 | `install-task.ps1` | Registers the `MagpilotAgent` scheduled task at user logon. Loads `magpilot.env` before exec'ing the agent. |
 | `uninstall-task.ps1` | Stops + unregisters the scheduled task. Idempotent. |
 | `firewall.ps1` | Adds/removes the two inbound firewall rules. |
@@ -79,7 +88,8 @@ EV/OV code-signing is not worth the cost.
       conpty.dll
       OpenConsole.exe
   config\
-    magpilot.env             (hub URL, agent token, public URL)
+    magpilot.env             (hub URL + per-agent token, written by
+                              `magpilot --magpilot-pair` post-install)
   install-task.ps1
   uninstall-task.ps1
   firewall.ps1
@@ -115,3 +125,24 @@ When `install-task.ps1` can't determine a user, it exits with code
 2 and prints a clear error telling you to pass `-User`. The
 installer's main log (`/LOG=<path>`) captures all `RunPwsh` exit
 codes so silent failures are diagnosable.
+
+### Pairing in a headless install
+
+V3 interactive pairing (`magpilot --magpilot-pair`) expects an
+interactive console and an open browser to click **Adopt**.
+Neither exists in an SSH/SYSTEM context, so `install-task.ps1`
+will log a `Write-Warning` and leave the agent in the
+"disconnected" state (placeholder `magpilot.env` with no
+`MAGPILOT_HUB_URL` set).
+
+To finish pairing headlessly, mint an enrollment bundle on the
+hub's `/admin/enroll` page and run the non-interactive V2a path
+from the target user's session (not SYSTEM):
+
+```powershell
+magpilot --magpilot-pair=<magpilot2+...>
+```
+
+The launcher decodes the bundle, POSTs to `/api/enroll/redeem`,
+writes the env, and bounces the scheduled task -- no UDP, no
+browser, no console picker.
