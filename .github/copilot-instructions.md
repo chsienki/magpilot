@@ -924,6 +924,17 @@ them by breaking them.
   return 202 immediately, await the prompt in a background `Task`,
   and tell the SPA the turn ended via an SSE `TurnComplete`
   event. Never let the request thread sit on `await session/prompt`.
+- **A second `session/prompt` while a turn is still running INTERRUPTS
+  the first.** Copilot CLI cancels the in-flight turn (emitting an
+  `Info: Operation cancelled by user` assistant chunk + a `turn_complete`
+  for it), then runs a fresh turn that has both user messages in context.
+  It does NOT queue. Every subscriber to the session's SSE stream sees
+  that cancellation `turn_complete`, so any reply consumer that stops on
+  the first `turn_complete` cuts the original reply short. Clients driving
+  a shared/pinned session must serialize prompts themselves -- the SPA
+  queues while a turn is in flight (Send -> Queue, FIFO drain on
+  `TurnComplete`); any new ACP-driving client needs the same per-session
+  in-flight guard.
 - **ACP `sessionUpdate` kind values for tools are `tool_call` + `tool_call_update`, NOT `tool_call_start` / `tool_call_progress` / `tool_call_end`.** The latter (suffix variants) are what `Magpilot.Shared.Models.StreamEvent` calls them on the SSE wire, and they're the names the [ACP spec](https://agentclientprotocol.com/) uses in prose, but the actual JSON `sessionUpdate` field that Copilot CLI emits is the un-suffixed pair:
   * `"sessionUpdate":"tool_call"` with `"status":"pending"` -- a new tool call (built-in or MCP).
   * `"sessionUpdate":"tool_call_update"` with `"status":"in_progress"|"completed"|"failed"` -- subsequent updates.
@@ -1033,6 +1044,15 @@ conversation instead of spawning a throwaway one.
   provided, the agent adopts-on-demand and routes the prompt to that
   session. When omitted, it creates an ephemeral session, runs the
   prompt, and detaches.
+- **`POST /api/sessions/{id}/messages` does NOT adopt-on-demand** -- only
+  `/quick-prompt` does. `/messages` assumes the session is already loaded
+  and drives `session/prompt` directly; against a dormant (unloaded)
+  pinned session the prompt fails silently (turn ends `stopReason="error"`,
+  no assistant text). Clients that POST `/messages` at a pinned session
+  (the SPA's live path, sidecars) rely on it being loaded already -- the
+  SPA adopts-on-open, and a deployment's bootstrap should adopt each pinned
+  session on restart. Leaving one dormant after an agent restart is the
+  classic "talked to it after a power-cut and got no reply" failure.
 - ACP only emits `user_message_chunk` during `session/load` history
   replay -- never for live prompts. So `/quick-prompt` against a
   pinned sessionId synthesizes a `UserDelta` into the broadcast

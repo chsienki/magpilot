@@ -313,10 +313,16 @@ pinned to Magnus's well-known session id).
   bootstrap script and recorded at `/home/magnus/.magnus/.session-id` so
   the bootstrap is idempotent across container restarts.
 
-Magpilot's adopt-on-demand logic means even a dormant session can be
-re-activated lazily: any operation on it (POST /messages, GET /stream)
-triggers `AdoptAsync` first, which respawns the ACP wiring and starts
-streaming again from where the events.jsonl left off.
+Magpilot's adopt-on-demand logic re-activates a dormant pinned session
+lazily, but **only** through the endpoints that call `AdoptAsync`:
+`POST /quick-prompt` (with a pinned `sessionId`), `POST /sessions/{id}/adopt`,
+and `GET /stream?load=true`. **`POST /messages` and a plain `GET /stream`
+do NOT adopt** -- they drive `session/prompt` on the ACP child directly and
+assume the session is already loaded. Prompting a dormant session that way
+fails silently: `session/prompt` errors, the turn ends `stopReason="error"`
+with no assistant text. A client that pins a session must make sure it is
+loaded first -- open it in the SPA, hit `/adopt`, or have the deployment's
+bootstrap adopt it on every restart.
 
 ## End-to-end: what happens when you...
 
