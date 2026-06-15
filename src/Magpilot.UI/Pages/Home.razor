@@ -219,24 +219,29 @@
             }
             else
             {
-                @foreach (var (state, label, group) in EnumerateGroups(_sessions))
-                {
-                    var expanded = _expandedGroups.Contains(state);
-                    var visible = expanded ? group : group.Take(CollapsedLimit).ToList();
-                    var hidden = group.Count - visible.Count;
-                    var (chipColor, chipIcon) = GroupVisuals(state);
-
-                    <MudListSubheader Class="d-flex align-center gap-1 px-4">
-                        <MudIcon Icon="@chipIcon" Size="Size.Small" Color="@chipColor" />
-                        <MudText Typo="Typo.overline" Class="ml-1">@label</MudText>
-                        <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="Color.Default" Class="ml-1">@group.Count</MudChip>
-                    </MudListSubheader>
-
-                    <MudList T="string" Dense="true" SelectedValue="@SessionId" SelectedValueChanged="@OnSessionSelected">
-                        @foreach (var s in visible)
+                @* Flat list of currently-loadable sessions: Active first
+                   (you own it), then Locked (held by another process).
+                   Each row prefixes a small state icon so the user can
+                   tell at a glance which is which without needing a
+                   group header. Past sessions live in the resume-
+                   previous dialog (history icon in the toolbar above). *@
+                <MudList T="string" Dense="true" SelectedValue="@SessionId" SelectedValueChanged="@OnSessionSelected">
+                    @foreach (var s in ActiveAndLockedSessions(_sessions))
+                    {
+                        var (stateColor, stateIcon) = GroupVisuals(s.State);
+                        var stateTooltip = s.State switch
                         {
-                            <MudListItem T="string" Value="@s.Id" Class="py-2">
-                                <MudStack Spacing="0">
+                            SessionState.Owned  => "Active -- this hub owns the session",
+                            SessionState.Locked => "Locked -- held by another process; opening will adopt it",
+                            _                   => s.State.ToString(),
+                        };
+
+                        <MudListItem T="string" Value="@s.Id" Class="py-2">
+                            <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center" Style="min-width: 0;">
+                                <MudTooltip Text="@stateTooltip" Placement="Placement.Right">
+                                    <MudIcon Icon="@stateIcon" Color="@stateColor" Size="Size.Small" />
+                                </MudTooltip>
+                                <MudStack Spacing="0" Style="min-width: 0; flex: 1;">
                                     <MudText Typo="Typo.body2" Class="text-truncate" Style="font-weight: 500;">
                                         @(s.Summary ?? s.Id[..8])
                                     </MudText>
@@ -277,31 +282,10 @@
                                         }
                                     </MudStack>
                                 </MudStack>
-                            </MudListItem>
-                        }
-                    </MudList>
-
-                    @if (hidden > 0)
-                    {
-                        <div class="px-4 pb-2">
-                            <MudButton Variant="Variant.Text" Size="Size.Small" Color="Color.Primary"
-                                       StartIcon="@Icons.Material.Filled.ExpandMore"
-                                       OnClick="@(() => ToggleGroup(state))">
-                                Show @hidden more
-                            </MudButton>
-                        </div>
+                            </MudStack>
+                        </MudListItem>
                     }
-                    else if (expanded && group.Count > CollapsedLimit)
-                    {
-                        <div class="px-4 pb-2">
-                            <MudButton Variant="Variant.Text" Size="Size.Small" Color="Color.Default"
-                                       StartIcon="@Icons.Material.Filled.ExpandLess"
-                                       OnClick="@(() => ToggleGroup(state))">
-                                Show less
-                            </MudButton>
-                        </div>
-                    }
-                }
+                </MudList>
             }
         }
     </MudDrawer>
@@ -644,7 +628,6 @@
     private bool _drawerOpen = true;
     private bool _showHostsPane;
     private bool _sessionsRefreshing;
-    private readonly HashSet<SessionState> _expandedGroups = new();
     private readonly ObservableCollection<ChatMessage> _messages = new();
     private ChatMessage? _streamingAssistant;
     private ChatMessage? _streamingThought;
@@ -1406,45 +1389,18 @@
         Nav.NavigateTo($"/agents/{name}");
     }
 
-    private void ToggleGroup(SessionState state)
-    {
-        if (!_expandedGroups.Add(state))
-        {
-            _expandedGroups.Remove(state);
-        }
-    }
-
     /// <summary>
-    /// Cap on items shown per group before "Load more" is required.
+    /// Flatten the server's session list into the order the sidebar
+    /// renders it: Active (Owned -- this hub drives them) first, then
+    /// Locked (held by another process). Within each state the server's
+    /// UpdatedAt-DESC ordering is preserved (LINQ OrderBy is stable).
+    /// Past (Dormant) sessions are excluded -- they live in the
+    /// "Resume previous" dialog opened from the sessions-pane header.
     /// </summary>
-    private const int CollapsedLimit = 5;
-
-    /// <summary>
-    /// Group the server-sorted (UpdatedAt DESC) session list by SessionState
-    /// and return them in display order. Most-actionable group first:
-    /// Active (we own it) followed by Locked (held by someone else).
-    /// Past (Dormant) sessions are deliberately excluded -- they live in
-    /// the "Resume previous" dialog (a searchable overlay opened from
-    /// the sessions-pane header) so a host with hundreds of historical
-    /// chats doesn't push Active + Locked off-screen.
-    /// </summary>
-    private static IEnumerable<(SessionState State, string Label, List<SessionInfo> Group)>
-        EnumerateGroups(IEnumerable<SessionInfo> sessions)
-    {
-        var byState = sessions.GroupBy(s => s.State).ToDictionary(g => g.Key, g => g.ToList());
-        var ordered = new (SessionState State, string Label)[]
-        {
-            (SessionState.Owned,   "Active"),
-            (SessionState.Locked,  "Locked"),
-        };
-        foreach (var (state, label) in ordered)
-        {
-            if (byState.TryGetValue(state, out var group) && group.Count > 0)
-            {
-                yield return (state, label, group);
-            }
-        }
-    }
+    private static IEnumerable<SessionInfo> ActiveAndLockedSessions(IEnumerable<SessionInfo> sessions) =>
+        sessions
+            .Where(s => s.State == SessionState.Owned || s.State == SessionState.Locked)
+            .OrderBy(s => s.State == SessionState.Owned ? 0 : 1);
 
     /// <summary>
     /// Count of Dormant ("Past") sessions for the current host -- drives
