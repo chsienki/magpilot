@@ -175,6 +175,16 @@
                                    Disabled="@_sessionsRefreshing"
                                    aria-label="Refresh session list" />
                 </MudTooltip>
+                @if (PastSessionCount > 0)
+                {
+                    <MudTooltip Text="@($"Resume a previous session ({PastSessionCount})")">
+                        <MudIconButton Icon="@Icons.Material.Filled.History"
+                                       Size="Size.Small"
+                                       Color="Color.Default"
+                                       OnClick="@OpenResumeDialog"
+                                       aria-label="Resume a previous session" />
+                    </MudTooltip>
+                }
                 <MudTooltip Text="New chat">
                     <MudIconButton Icon="@Icons.Material.Filled.Add"
                                    Size="Size.Small"
@@ -518,6 +528,101 @@
             </MudContainer>
         }
     </MudMainContent>
+
+    @* Resume-previous overlay: opened from the sessions-pane history icon.
+       Replaces the old always-visible "Past" group in the drawer so a host
+       with hundreds of historical chats doesn't push Active + Locked out
+       of view. Searchable by summary / repo / cwd / id. *@
+    <MudDialog @bind-Visible="_resumeDialogOpen"
+               Options="@(new DialogOptions { FullWidth = true, MaxWidth = MaxWidth.Small, CloseButton = true })">
+        <TitleContent>
+            <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center">
+                <MudIcon Icon="@Icons.Material.Filled.History" />
+                <MudText Typo="Typo.h6">Resume previous session on @Agent</MudText>
+            </MudStack>
+        </TitleContent>
+        <DialogContent>
+            <MudTextField T="string"
+                          Value="@_resumeSearch"
+                          ValueChanged="@OnResumeSearchChanged"
+                          Placeholder="Search by name, repo, or directory..."
+                          Variant="Variant.Outlined"
+                          Margin="Margin.Dense"
+                          Immediate="true"
+                          DebounceInterval="150"
+                          Adornment="Adornment.Start"
+                          AdornmentIcon="@Icons.Material.Filled.Search"
+                          Clearable="true"
+                          Class="mb-3" />
+            @{
+                var pastFiltered = FilteredPastSessions();
+            }
+            <MudText Typo="Typo.caption" Color="Color.Default" Class="mb-2 d-block">
+                @if (string.IsNullOrWhiteSpace(_resumeSearch))
+                {
+                    <text>@pastFiltered.Count of @PastSessionCount past session@(PastSessionCount == 1 ? "" : "s")</text>
+                }
+                else
+                {
+                    <text>@pastFiltered.Count match@(pastFiltered.Count == 1 ? "" : "es")</text>
+                }
+            </MudText>
+            <MudPaper Elevation="0" Outlined="true" Style="max-height: 60dvh; overflow-y: auto;">
+                @if (pastFiltered.Count == 0)
+                {
+                    <div class="pa-6 d-flex flex-column align-center">
+                        <MudIcon Icon="@Icons.Material.Filled.SearchOff" Size="Size.Large" Color="Color.Default" />
+                        <MudText Typo="Typo.body2" Color="Color.Default" Class="mt-2">No matches</MudText>
+                    </div>
+                }
+                else
+                {
+                    <MudList T="string" Dense="true">
+                        @foreach (var s in pastFiltered)
+                        {
+                            <MudListItem T="string" Value="@s.Id" Class="py-2"
+                                         OnClick="@(() => OnResumePick(s.Id))">
+                                <MudStack Spacing="0">
+                                    <MudText Typo="Typo.body2" Class="text-truncate" Style="font-weight: 500;">
+                                        @(s.Summary ?? s.Id[..8])
+                                    </MudText>
+                                    <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center" Class="mt-1">
+                                        @if (!string.IsNullOrWhiteSpace(s.Repository))
+                                        {
+                                            var fullRepoLabel = string.IsNullOrWhiteSpace(s.Branch)
+                                                ? s.Repository!
+                                                : s.Repository + "@" + s.Branch;
+                                            var shortRepoLabel = string.IsNullOrWhiteSpace(s.Branch)
+                                                ? DisplayRepo(s.Repository)
+                                                : DisplayRepo(s.Repository) + "@" + s.Branch;
+                                            <MudTooltip Text="@fullRepoLabel" Placement="Placement.Bottom">
+                                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
+                                                         Color="Color.Default" Icon="@Icons.Material.Filled.FolderOpen"
+                                                         Class="repo-chip">
+                                                    @shortRepoLabel
+                                                </MudChip>
+                                            </MudTooltip>
+                                        }
+                                        else if (!string.IsNullOrWhiteSpace(s.Cwd))
+                                        {
+                                            <MudText Typo="Typo.caption" Color="Color.Default" Class="text-truncate" Style="max-width: 200px;" title="@s.Cwd">
+                                                @ShortPath(s.Cwd)
+                                            </MudText>
+                                        }
+                                        @if (s.UpdatedAt is { } ua)
+                                        {
+                                            <MudSpacer />
+                                            <MudText Typo="Typo.caption" Color="Color.Default">@RelativeTime(ua)</MudText>
+                                        }
+                                    </MudStack>
+                                </MudStack>
+                            </MudListItem>
+                        }
+                    </MudList>
+                }
+            </MudPaper>
+        </DialogContent>
+    </MudDialog>
 </MudLayout>
 
 @code {
@@ -655,6 +760,14 @@
     private string? _newSessionError;
     private bool _newSessionBusy;
     private List<string> _cwdSuggestions = new();
+
+    // Resume-previous overlay state. The dialog is opened from the
+    // sessions-pane header (history icon) and lets the user search
+    // through Dormant sessions without flooding the drawer with hundreds
+    // of historical entries. _resumeSearch is bound to a debounced
+    // MudTextField; FilteredPastSessions reads it on each render.
+    private bool _resumeDialogOpen;
+    private string _resumeSearch = "";
 
     /// <summary>
     /// GitHub login of the currently signed-in user (from
@@ -1309,8 +1422,11 @@
     /// <summary>
     /// Group the server-sorted (UpdatedAt DESC) session list by SessionState
     /// and return them in display order. Most-actionable group first:
-    /// Active (we own it) -> Locked (held by someone else) -> Past.
-    /// Empty groups are skipped.
+    /// Active (we own it) followed by Locked (held by someone else).
+    /// Past (Dormant) sessions are deliberately excluded -- they live in
+    /// the "Resume previous" dialog (a searchable overlay opened from
+    /// the sessions-pane header) so a host with hundreds of historical
+    /// chats doesn't push Active + Locked off-screen.
     /// </summary>
     private static IEnumerable<(SessionState State, string Label, List<SessionInfo> Group)>
         EnumerateGroups(IEnumerable<SessionInfo> sessions)
@@ -1320,7 +1436,6 @@
         {
             (SessionState.Owned,   "Active"),
             (SessionState.Locked,  "Locked"),
-            (SessionState.Dormant, "Past"),
         };
         foreach (var (state, label) in ordered)
         {
@@ -1329,6 +1444,56 @@
                 yield return (state, label, group);
             }
         }
+    }
+
+    /// <summary>
+    /// Count of Dormant ("Past") sessions for the current host -- drives
+    /// both the visibility of the history toggle in the sessions-pane
+    /// header and its tooltip count.
+    /// </summary>
+    private int PastSessionCount =>
+        _sessions?.Count(s => s.State == SessionState.Dormant) ?? 0;
+
+    /// <summary>
+    /// Past sessions matching the resume-dialog search box, sorted
+    /// newest first (the API already returns UpdatedAt DESC). Empty
+    /// search returns all. Match is case-insensitive substring across
+    /// summary, repo, branch, cwd, and session id so the user can
+    /// pick whichever bit they remember.
+    /// </summary>
+    private List<SessionInfo> FilteredPastSessions()
+    {
+        if (_sessions is null) return new();
+        var dormant = _sessions.Where(s => s.State == SessionState.Dormant);
+        var q = _resumeSearch?.Trim();
+        if (string.IsNullOrEmpty(q)) return dormant.ToList();
+        return dormant
+            .Where(s =>
+                (s.Summary    is { } sm && sm.Contains(q, StringComparison.OrdinalIgnoreCase)) ||
+                (s.Repository is { } rp && rp.Contains(q, StringComparison.OrdinalIgnoreCase)) ||
+                (s.Branch     is { } br && br.Contains(q, StringComparison.OrdinalIgnoreCase)) ||
+                (s.Cwd        is { } cw && cw.Contains(q, StringComparison.OrdinalIgnoreCase)) ||
+                s.Id.Contains(q, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+    }
+
+    private void OpenResumeDialog()
+    {
+        _resumeSearch = "";
+        _resumeDialogOpen = true;
+    }
+
+    private void OnResumeSearchChanged(string value)
+    {
+        _resumeSearch = value ?? "";
+    }
+
+    private void OnResumePick(string sessionId)
+    {
+        _resumeDialogOpen = false;
+        // Same route the drawer list uses; OnParametersSetAsync will
+        // do the right session-state routing (Dormant -> AdoptAsync(load: true)).
+        Nav.NavigateTo($"/agents/{Agent}/sessions/{sessionId}");
     }
 
     private void GoBackToSidebar()
