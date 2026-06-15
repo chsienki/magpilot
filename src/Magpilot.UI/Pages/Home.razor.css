@@ -1,6 +1,15 @@
 /* Most layout is now handled by MudBlazor (MudLayout/MudAppBar/MudDrawer).
    This file only carries small overrides where MudBlazor utilities don't
-   express what we want. */
+   express what we want.
+
+   NOTE: the `.repo-chip` clipping rules used to live here behind
+   `::deep .repo-chip { ... }`, but the scope attribute Razor injects
+   doesn't reach into MudListItem's rendered subtree, so the rule
+   silently never applied -- short repo names rendered fine by accident
+   and long ones (e.g. "roslyn@sonic/N_deferred_markup") blew past the
+   nominal 180px cap and misaligned timestamps in the session list.
+   Those rules now live in Magpilot.Web/wwwroot/css/app.css so they
+   reach the chip from the global stylesheet. */
 
 ::deep .chat-toolbar-mud {
     border-bottom: 1px solid var(--mud-palette-divider);
@@ -14,25 +23,4 @@
         drop-shadow(0 0 2px rgba(246, 242, 230, 0.85))
         drop-shadow(0 0 4px rgba(246, 242, 230, 0.55))
         drop-shadow(0 0 8px rgba(246, 242, 230, 0.35));
-}
-
-/* Constrain repository chip width so a long repo or branch name
-   can`'t blow out the session-list row. The full label remains in
-   the wrapping MudTooltip so hover recovers it. We have to use
-   ::deep + .mud-chip-content because MudChip renders inside a
-   shadow descendant the scoped-CSS engine wouldn`'t otherwise reach
-   into, and the chip`'s natural intrinsic width otherwise ignores
-   the parent flex container. The min-width: 0 is the critical bit
-   -- without it flex items refuse to shrink below their content. */
-::deep .repo-chip {
-    max-width: 180px;
-    min-width: 0;
-    overflow: hidden;
-}
-::deep .repo-chip .mud-chip-content {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    display: block;
 }

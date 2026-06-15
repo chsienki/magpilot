@@ -44,6 +44,35 @@ a, .btn-link {
     color: red;
 }
 
+/* Constrain the .repo-chip MudChip width so a long repo or branch name
+   can't blow out the session-list row (e.g. roslyn@sonic/N_deferred_markup
+   was 220px naturally and pushed the row's trailing timestamp out of
+   alignment with all the other rows). The full label remains in the
+   wrapping MudTooltip so hover recovers it.
+
+   These rules live globally (NOT in Home.razor.css) because Razor's
+   scoped CSS attribute doesn't propagate into MudListItem's rendered
+   subtree, so `::deep .repo-chip { ... }` from a page-scoped sheet
+   silently never applied. The selectors here use the global class name
+   directly, which the chip element does carry.
+
+   The min-width: 0 on both the chip root AND the inner content is
+   load-bearing -- flex items default to min-width: auto which means
+   "don't shrink below content", and the chip's natural intrinsic
+   width otherwise wins over max-width. */
+.repo-chip {
+    max-width: 180px;
+    min-width: 0;
+    overflow: hidden;
+}
+.repo-chip .mud-chip-content {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: block;
+}
+
 #blazor-error-ui {
     color-scheme: light only;
     background: lightyellow;

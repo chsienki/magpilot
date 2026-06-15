@@ -1429,8 +1429,14 @@ config; do NOT enable Caching in the NPM UI.
   renders content into an inner slot) needs three things together
   -- any one missing and the chip stays wider than the parent
   flexbox can accommodate:
-  1. `::deep .your-chip-class` from the parent component's scoped
-     CSS to penetrate into MudChip's rendered DOM.
+  1. The selector must reach the chip from a sheet that's actually
+     loaded for it. Razor's `::deep` scoping silently does NOT
+     propagate into `MudListItem`'s rendered subtree (and probably
+     other MudBlazor wrappers too), so a `::deep .my-chip` rule from
+     a page's scoped `.razor.css` will fail to match when the chip
+     lives inside MudListItem. Put the rule in
+     `Magpilot.Web/wwwroot/css/app.css` (global) and select the
+     class name directly -- no `::deep`.
   2. `min-width: 0` on BOTH the chip root AND `.mud-chip-content`
      -- flex items default to `min-width: auto` which means
      "don't shrink below content", and the chip's own intrinsic
@@ -1439,8 +1445,8 @@ config; do NOT enable Caching in the NPM UI.
   3. `overflow: hidden` + `text-overflow: ellipsis` +
      `white-space: nowrap` + `display: block` on `.mud-chip-content`
      so the truncated text gets the ellipsis treatment.
-  See the `repo-chip` rule in `Pages/Home.razor.css` for the
-  canonical pattern. The wrapping `MudTooltip` is the matching
+  See the `.repo-chip` rule in `Magpilot.Web/wwwroot/css/app.css` for
+  the canonical pattern. The wrapping `MudTooltip` is the matching
   recovery affordance -- hover restores the full text.
 - **Owner-prefix stripping** for `SessionInfo.Repository`: the
   Copilot CLI writes the repo name as `owner/repo` in
