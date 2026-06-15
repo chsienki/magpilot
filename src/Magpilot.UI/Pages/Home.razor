@@ -30,7 +30,8 @@
             @if (_currentSessionTitle is not null)
             {
                 <MudIcon Icon="@Icons.Material.Filled.ChevronRight" Size="Size.Small" Class="mx-1" />
-                <MudText Typo="Typo.body2" Class="text-truncate" Style="max-width: 40vw;">@_currentSessionTitle</MudText>
+                <MudText Typo="Typo.body2" Class="text-truncate" Style="max-width: 40vw;"
+                         title="@_currentSessionTitle">@_currentSessionTitle</MudText>
             }
             @if (SessionId is not null)
             {
@@ -165,7 +166,7 @@
                              Color="@(currentAgent.Online ? Color.Success : Color.Default)"
                              Size="Size.Small" />
                 }
-                <MudText Typo="Typo.subtitle1" Class="ml-1 text-truncate" Style="min-width: 0;">@Agent</MudText>
+                <MudText Typo="Typo.subtitle1" Class="ml-1 text-truncate" Style="min-width: 0;" title="@Agent">@Agent</MudText>
                 <MudSpacer />
                 <MudTooltip Text="Refresh session list">
                     <MudIconButton Icon="@Icons.Material.Filled.Refresh"
@@ -242,7 +243,8 @@
                                     <MudIcon Icon="@stateIcon" Color="@stateColor" Size="Size.Small" />
                                 </MudTooltip>
                                 <MudStack Spacing="0" Style="min-width: 0; flex: 1;">
-                                    <MudText Typo="Typo.body2" Class="text-truncate" Style="font-weight: 500;">
+                                    <MudText Typo="Typo.body2" Class="text-truncate" Style="font-weight: 500;"
+                                             title="@(s.Summary ?? s.Id)">
                                         @(s.Summary ?? s.Id[..8])
                                     </MudText>
                                     <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center" Class="mt-1">
@@ -567,7 +569,8 @@
                             <MudListItem T="string" Value="@s.Id" Class="py-2"
                                          OnClick="@(() => OnResumePick(s.Id))">
                                 <MudStack Spacing="0">
-                                    <MudText Typo="Typo.body2" Class="text-truncate" Style="font-weight: 500;">
+                                    <MudText Typo="Typo.body2" Class="text-truncate" Style="font-weight: 500;"
+                                             title="@(s.Summary ?? s.Id)">
                                         @(s.Summary ?? s.Id[..8])
                                     </MudText>
                                     <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center" Class="mt-1">
