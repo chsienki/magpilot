@@ -5,10 +5,12 @@
 @inject HubLogClient HubLog
 @inject NavigationManager Nav
 @inject IJSRuntime JS
+@inject ILogger<Home> Log
 @implements IAsyncDisposable
 @using System.Collections.ObjectModel
 @using System.Text.Json
 @using Magpilot.UI.Services
+@using Microsoft.Extensions.Logging
 
 <MudLayout>
     <MudAppBar Elevation="1" Dense="true">
@@ -500,6 +502,7 @@
                       QueuedMessages="@_queuedMessages"
                       OnDeleteQueued="HandleDeleteQueued"
                       DraftText="@_currentDraft"
+                      SessionKey="@_streamingFor"
                       OnDraftChanged="HandleDraftChanged"
                       OnApproval="HandleApproval" />
         }
@@ -598,6 +601,16 @@
     /// </summary>
     private bool _suppressReplayEvents;
     private bool _thinking;
+    // Debounced re-arm of the "thinking" dots between segments of one turn.
+    // Copilot CLI's built-in tools (bash/read/write) run without emitting any
+    // SSE events, so after an assistant segment finishes a turn can sit silent
+    // for tens of seconds while _busy stays true -- the chat's last row is a
+    // completed bubble and looks idle even though work is ongoing. Each content
+    // event hides the dots and arms this timer; if the lull outlasts the window
+    // the dots reappear as a "still working" cue. The debounce keeps them from
+    // flickering between the many small deltas of an actively-streaming message.
+    private const int ThinkingDebounceMs = 800;
+    private CancellationTokenSource? _thinkingDebounceCts;
     // Paging cursor for the demand-load-older flow (see HandleLoadOlder).
     // _oldestCursor is the ordinal id of the oldest entry currently in
     // _messages; pass back as ?before= on the next history call. Reset
@@ -1517,7 +1530,8 @@
         var agent = Agent;
         var sid = SessionId;
         var streamId = ++_streamGeneration;
-        Console.WriteLine($"[stream {streamId}] start agent={agent} sid={sid} load={load} reconnect={isReconnect}");
+        Log.LogTrace("[stream {StreamId}] start agent={Agent} sid={Sid} load={Load} reconnect={IsReconnect}",
+            streamId, agent, sid, load, isReconnect);
         _ = Task.Run(async () =>
         {
             var gotAnyEvent = false;
@@ -1530,7 +1544,8 @@
                         if (streamId != _streamGeneration)
                         {
                             // A newer stream task has taken over; this one is stale.
-                            Console.WriteLine($"[stream {streamId}] stale, dropping {evt.GetType().Name}");
+                            Log.LogTrace("[stream {StreamId}] stale, dropping {EventType}",
+                                streamId, evt.GetType().Name);
                             return;
                         }
                         if (!gotAnyEvent && _streamReconnectAttempts > 0)
@@ -1615,7 +1630,8 @@
                     $"[stream {streamId}] disconnected (gotAny={gotAnyEvent}); reconnect attempt {attempt} of {maxAttempts} in {delaySec}s",
                     category: nameof(Home), sessionId: sid,
                     extra: new { agent, generation = streamId, attempt, maxAttempts, delaySec, gotAnyEvent });
-                Console.WriteLine($"[stream {streamId}] disconnected (gotAny={gotAnyEvent}); reconnect attempt {attempt} in {delaySec}s");
+                Log.LogTrace("[stream {StreamId}] disconnected (gotAny={GotAny}); reconnect attempt {Attempt} in {DelaySec}s",
+                    streamId, gotAnyEvent, attempt, delaySec);
                 _streamStatus = StreamStatus.Reconnecting;
                 _reconnectNextAttemptAt = DateTime.UtcNow.AddSeconds(delaySec);
                 await InvokeAsync(StateHasChanged);
@@ -1687,12 +1703,51 @@
 
     private async Task StopStreamingAsync()
     {
+        CancelThinkingDebounce();
         if (_streamCts is not null)
         {
             await _streamCts.CancelAsync();
             _streamCts.Dispose();
             _streamCts = null;
         }
+    }
+
+    /// <summary>
+    /// Hide the thinking dots now and re-show them if the turn goes quiet for
+    /// <see cref="ThinkingDebounceMs"/> while still in flight. See the field
+    /// comment on <see cref="_thinkingDebounceCts"/> for why a mid-turn lull
+    /// (a silent built-in tool) needs its own indicator.
+    /// </summary>
+    private void ArmThinkingDebounce()
+    {
+        _thinking = false;
+        CancelThinkingDebounce();
+        var cts = new CancellationTokenSource();
+        _thinkingDebounceCts = cts;
+        _ = ShowThinkingAfterLullAsync(cts.Token);
+    }
+
+    private async Task ShowThinkingAfterLullAsync(CancellationToken token)
+    {
+        try { await Task.Delay(ThinkingDebounceMs, token); }
+        catch (OperationCanceledException) { return; }
+        await InvokeAsync(() =>
+        {
+            // A newer activity event (cancels this token), TurnComplete
+            // (_busy false), or a pending approval each mean "don't show".
+            Log.LogTrace("[think] lull elapsed busy={Busy} cancelled={Cancelled}",
+                _busy, token.IsCancellationRequested);
+            if (token.IsCancellationRequested || !_busy || _pendingApproval is not null) return;
+            _thinking = true;
+            StateHasChanged();
+        });
+    }
+
+    private void CancelThinkingDebounce()
+    {
+        _thinkingDebounceCts?.Cancel();
+        _thinkingDebounceCts?.Dispose();
+        _thinkingDebounceCts = null;
     }
 
     private void Apply(StreamEvent evt)
@@ -1711,7 +1766,7 @@
         switch (evt)
         {
             case AssistantDelta d:
-                _thinking = false;
+                ArmThinkingDebounce();
                 _streamingThought = null;
                 if (_streamingAssistant is null)
                 {
@@ -1720,12 +1775,26 @@
                 }
                 _streamingAssistant.Text += d.Text;
                 if (d.Text.Length <= 32)
-                    Console.WriteLine($"[apply] AssistantDelta gen={_streamGeneration} len={d.Text.Length} text={JsonSerializer.Serialize(d.Text)}");
+                    Log.LogTrace("[apply] AssistantDelta gen={Gen} len={Len} text={Text}",
+                        _streamGeneration, d.Text.Length, JsonSerializer.Serialize(d.Text));
                 else
-                    Console.WriteLine($"[apply] AssistantDelta gen={_streamGeneration} len={d.Text.Length}");
+                    Log.LogTrace("[apply] AssistantDelta gen={Gen} len={Len}",
+                        _streamGeneration, d.Text.Length);
                 break;
             case ThoughtDelta td:
-                _thinking = false;
+                ArmThinkingDebounce();
+                // Finalize any in-progress assistant bubble so the next
+                // assistant text starts a fresh one. A thought is the only
+                // segment delimiter we get for Copilot CLI's built-in tools
+                // (bash/read/write don't surface as tool_call_start -- only
+                // MCP tools do), and the model almost always thinks briefly
+                // between user-visible responses. Without this, consecutive
+                // narration segments in one turn merge into a single bubble
+                // and -- because the thought row lands between them in
+                // _messages while the second segment appends to the first
+                // bubble -- render out of order. Same thought-as-delimiter
+                // heuristic the WhatsApp sidecar uses to split messages.
+                _streamingAssistant = null;
                 if (_streamingThought is null)
                 {
                     _streamingThought = new ChatMessage { Role = "thought", Text = "" };
@@ -1755,7 +1824,13 @@
                 _messages.Add(new ChatMessage { Role = "user", Text = d.Text });
                 break;
             case ToolCallStart t:
-                _thinking = false;
+                // A tool is running: nothing streams into the chat but the
+                // pending chip, so show the dots to signal the turn is still
+                // working. Deterministic (no debounce timer) -- the chip's
+                // own appearance is the start signal.
+                _thinking = true;
+                CancelThinkingDebounce();
+                Log.LogTrace("[think] tool start -> dots on");
                 _streamingAssistant = null;
                 _streamingThought = null;
                 // One chip per tool call. The matching ToolCallEnd
@@ -1770,8 +1845,18 @@
                     ToolStatus = ToolStatus.Pending,
                 });
                 break;
+            case ToolCallProgress:
+                // Tool still working -- keep the dots up.
+                _thinking = true;
+                CancelThinkingDebounce();
+                break;
             case ToolCallEnd t:
                 {
+                    // Tool finished; the model usually produces more output
+                    // next. Keep the dots up until that arrives so the gap
+                    // between tool result and next response isn't dead air.
+                    _thinking = true;
+                    CancelThinkingDebounce();
                     var existing = FindToolMessage(t.ToolCallId);
                     if (existing is not null)
                     {
@@ -1796,10 +1881,12 @@
                 }
             case ApprovalRequired a:
                 _thinking = false;
+                CancelThinkingDebounce();
                 _pendingApproval = a;
                 break;
             case TurnComplete:
                 _thinking = false;
+                CancelThinkingDebounce();
                 _streamingAssistant = null;
                 _streamingThought = null;
                 _busy = false;

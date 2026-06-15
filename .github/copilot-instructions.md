@@ -1300,6 +1300,22 @@ a debuggable trail without the user having to open browser devtools.
     (static `[JSInvokable]`) into `HubLogClient`. Several
     `Home.razor` try/catch sites also call `HubLog.LogError(...)`
     explicitly with `sessionId` + `agent` in extras.
+  - SPA `ILogger<T>`: `Magpilot.UI.Logging.HubLoggerProvider` is
+    registered as an `ILoggerProvider`, so any component that
+    `@inject ILogger<Foo>` and calls `LogTrace/LogDebug/...` flows
+    through the same hub sink. Filtered by
+    `Magpilot.UI.Logging.LogLevelGate.MinLevel` -- the gate is
+    runtime-mutable from the verbosity dropdown on `/admin/logs` or
+    the `?logLevel=Trace` query param, with localStorage
+    persistence (`magpilot.logLevel`). The framework filter only
+    runs the gate against `Magpilot.*` categories; framework
+    categories (`Microsoft.AspNetCore.*`, `System.*`) stay pinned
+    to `Information` so a Trace toggle doesn't unleash render-tree
+    debug noise (~10k events per turn).
+    **Use `_logger.LogTrace` (with structured templates) for any
+    diagnostic breadcrumbs in SPA components instead of
+    `Console.WriteLine`** -- the latter bypasses the gate, can't be
+    toggled remotely, and never reaches `/admin/logs`.
   - Agents: `Magpilot.Agent.Logging.HubLoggerProvider` is registered
     in `Program.cs` as an `ILoggerProvider`. It filters
     `LogLevel.Warning+` and POSTs batches every ~2s. No-op when

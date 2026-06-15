@@ -13,8 +13,12 @@ namespace Magpilot.UI.Services;
 /// entries when the queue overflows so a flaky hub can't OOM the SPA.
 ///
 /// The SPA wires three sources into this client:
-///   * <see cref="HubLoggerProvider"/> -- mirrors all
-///     <see cref="LogLevel.Warning"/>+ events from <see cref="ILogger"/>.
+///   * <see cref="Magpilot.UI.Logging.HubLoggerProvider"/> -- mirrors
+///     <see cref="ILogger"/> events whose level passes
+///     <see cref="Magpilot.UI.Logging.LogLevelGate.MinLevel"/>.
+///     Only categories under <c>Magpilot.*</c> are forwarded so a
+///     verbose toggle doesn't flood the central log with framework
+///     render-tree noise.
 ///   * <c>error-capture.js</c> -- the browser's <c>window.onerror</c>
 ///     and <c>unhandledrejection</c> handlers.
 ///   * Direct calls from app code via <see cref="LogError"/> /

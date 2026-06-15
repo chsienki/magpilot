@@ -1,7 +1,9 @@
 using Magpilot.UI.Abstractions;
+using Magpilot.UI.Logging;
 using Magpilot.UI.Services;
 using Microsoft.AspNetCore.Components.Web;
 using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
+using Microsoft.Extensions.Logging;
 using Magpilot.Web;
 using MudBlazor.Services;
 
@@ -10,6 +12,19 @@ builder.RootComponents.Add<App>("#app");
 builder.RootComponents.Add<HeadOutlet>("head::after");
 
 builder.Services.AddMudServices();
+
+// Logging: keep the framework filter permissive (Trace) and gate every
+// provider with a runtime-mutable filter that reads from LogLevelGate.
+// The runtime gate applies ONLY to our own Magpilot.* categories so a
+// verbose toggle doesn't unleash the renderer's render-tree debug noise
+// (~10k events per turn). Framework categories stay at Information.
+builder.Logging.SetMinimumLevel(LogLevel.Trace);
+builder.Logging.AddFilter((category, level) =>
+{
+    if (category is not null && category.StartsWith("Magpilot.", StringComparison.Ordinal))
+        return level >= LogLevelGate.MinLevel;
+    return level >= LogLevel.Information;
+});
 
 builder.Services.AddSingleton<IHubAuthProvider, WebHubAuthProvider>();
 builder.Services.AddScoped(sp =>
@@ -37,6 +52,11 @@ builder.Services.AddSingleton(sp =>
     };
     return new HubLogClient(http, auth);
 });
+
+// Bridge ILogger<T> calls into the central log via HubLogClient. The default
+// WebAssemblyConsoleLogger stays registered, so the same events still appear
+// in the browser F12 console -- both surfaces share the LogLevelGate filter.
+builder.Services.AddSingleton<ILoggerProvider, Magpilot.UI.Logging.HubLoggerProvider>();
 
 var host = builder.Build();
 

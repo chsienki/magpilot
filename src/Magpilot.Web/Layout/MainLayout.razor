@@ -2,6 +2,8 @@
 @inject NavigationManager Nav
 @inject Magpilot.UI.Services.HubLogClient HubLog
 @implements IDisposable
+@using Magpilot.UI.Logging
+@using Microsoft.Extensions.Logging
 
 <MudThemeProvider Theme="MagpilotTheme.Default" @bind-IsDarkMode="_isDarkMode" />
 <MudPopoverProvider />
@@ -42,6 +44,27 @@
     {
         if (!firstRender) return;
 
+        // Hydrate the runtime log-level gate from (a) the ?logLevel=X
+        // query param (highest precedence -- a fresh URL wins over a
+        // stored preference) and (b) localStorage. Until this fires the
+        // gate sits at its default (Information), so framework + app
+        // logs at startup are still emitted at the normal level.
+        try
+        {
+            var fromUrl = ReadLogLevelFromUrl(Nav.Uri);
+            if (fromUrl is not null)
+            {
+                LogLevelGate.Set(fromUrl.Value);
+            }
+            else
+            {
+                var stored = await JS.InvokeAsync<string?>("localStorage.getItem", LogLevelGate.LocalStorageKey);
+                var parsed = LogLevelGate.TryParse(stored);
+                if (parsed is not null) LogLevelGate.Set(parsed.Value);
+            }
+        }
+        catch { /* localStorage / URL parse failures keep the default */ }
+
         // Pick up the persisted dark mode + capture browser User-Agent into
         // the hub-log client so server-side viewer rows show which device
         // raised the error.
@@ -69,6 +92,15 @@
         {
             HubLog.LogError("installErrorCapture failed", ex.ToString(), category: nameof(MainLayout));
         }
+    }
+
+    private static LogLevel? ReadLogLevelFromUrl(string uri)
+    {
+        if (!Uri.TryCreate(uri, UriKind.Absolute, out var parsed)) return null;
+        var query = parsed.Query;
+        if (string.IsNullOrEmpty(query)) return null;
+        var qs = System.Web.HttpUtility.ParseQueryString(query);
+        return LogLevelGate.TryParse(qs[LogLevelGate.QueryParamName]);
     }
 
     public void Dispose() => Nav.LocationChanged -= OnLocationChanged;

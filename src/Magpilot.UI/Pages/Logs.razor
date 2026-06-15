@@ -1,7 +1,10 @@
 @page "/admin/logs"
 @inject HubClient Hub
 @inject NavigationManager Nav
+@using Magpilot.UI.Logging
 @using Magpilot.UI.Services
+@using Microsoft.Extensions.Logging
+@implements IDisposable
 
 <MudLayout>
     <MudAppBar Elevation="1" Dense="true">
@@ -37,6 +40,7 @@
                 <MudSelectItem T="string" Value="@("Warning")">Warning</MudSelectItem>
                 <MudSelectItem T="string" Value="@("Information")">Information</MudSelectItem>
                 <MudSelectItem T="string" Value="@("Debug")">Debug</MudSelectItem>
+                <MudSelectItem T="string" Value="@("Trace")">Trace</MudSelectItem>
             </MudSelect>
             <MudTextField T="string" Label="Search" Value="_search" ValueChanged="OnSearchChanged" Adornment="Adornment.End" AdornmentIcon="@Icons.Material.Filled.Search" Immediate="false" DebounceInterval="500" Margin="Margin.Dense" Style="min-width: 200px;" />
             <MudTextField T="string" Label="Session" Value="_sessionId" ValueChanged="OnSessionIdChanged" Margin="Margin.Dense" Style="min-width: 200px;" />
@@ -47,6 +51,20 @@
                 <MudSelectItem T="int" Value="1440">24 hours</MudSelectItem>
                 <MudSelectItem T="int" Value="0">All</MudSelectItem>
             </MudSelect>
+            <MudDivider Vertical="true" FlexItem="true" Class="mx-2" />
+            <MudTooltip Text="What the SPA captures and forwards. Persists in localStorage. Higher = noisier."
+                        Arrow="true" Placement="Placement.Top">
+                <MudSelect T="LogLevel" Label="SPA verbosity" Value="_gateLevel" ValueChanged="OnGateLevelChanged"
+                           Dense="true" Style="min-width: 150px;">
+                    <MudSelectItem T="LogLevel" Value="LogLevel.Trace">Trace</MudSelectItem>
+                    <MudSelectItem T="LogLevel" Value="LogLevel.Debug">Debug</MudSelectItem>
+                    <MudSelectItem T="LogLevel" Value="LogLevel.Information">Information</MudSelectItem>
+                    <MudSelectItem T="LogLevel" Value="LogLevel.Warning">Warning</MudSelectItem>
+                    <MudSelectItem T="LogLevel" Value="LogLevel.Error">Error</MudSelectItem>
+                    <MudSelectItem T="LogLevel" Value="LogLevel.Critical">Critical</MudSelectItem>
+                    <MudSelectItem T="LogLevel" Value="LogLevel.None">None</MudSelectItem>
+                </MudSelect>
+            </MudTooltip>
         </MudPaper>
 
         <MudPaper Elevation="0" Outlined="true" Class="flex-grow-1" Style="overflow: auto;">
@@ -126,6 +144,8 @@
 </MudLayout>
 
 @code {
+    [Inject] private IJSRuntime JS { get; set; } = default!;
+
     private List<HubClient.LogEntry> _rows = new();
     private List<string> _sources = new();
     private string? _source;
@@ -137,6 +157,7 @@
     private bool _loading;
     private bool _autoRefresh = true;
     private System.Threading.Timer? _timer;
+    private LogLevel _gateLevel = LogLevelGate.MinLevel;
 
     private Color CountColor =>
         _rows.Count > 0 && _rows.Any(r => r.Level is "Error" or "Critical")
@@ -144,6 +165,12 @@
 
     protected override async Task OnInitializedAsync()
     {
+        // Sync the dropdown with whatever value MainLayout already
+        // hydrated from localStorage / ?logLevel=X, and keep it in
+        // sync if some other code path mutates the gate.
+        _gateLevel = LogLevelGate.MinLevel;
+        LogLevelGate.Changed += OnGateChangedExternally;
+
         await LoadSourcesAsync();
         await LoadAsync();
         _timer = new System.Threading.Timer(async _ =>
@@ -155,7 +182,27 @@
 
     public void Dispose()
     {
+        LogLevelGate.Changed -= OnGateChangedExternally;
         _timer?.Dispose();
+    }
+
+    private void OnGateChangedExternally()
+    {
+        if (_gateLevel == LogLevelGate.MinLevel) return;
+        _gateLevel = LogLevelGate.MinLevel;
+        InvokeAsync(StateHasChanged);
+    }
+
+    private async Task OnGateLevelChanged(LogLevel value)
+    {
+        _gateLevel = value;
+        LogLevelGate.Set(value);
+        try
+        {
+            await JS.InvokeVoidAsync("localStorage.setItem",
+                LogLevelGate.LocalStorageKey, value.ToString());
+        }
+        catch { /* localStorage unavailable -- choice persists for this tab only */ }
     }
 
     private async Task LoadSourcesAsync()
