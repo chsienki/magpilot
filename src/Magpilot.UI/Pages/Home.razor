@@ -182,7 +182,7 @@
                         <MudIconButton Icon="@Icons.Material.Filled.History"
                                        Size="Size.Small"
                                        Color="Color.Default"
-                                       OnClick="@OpenResumeDialog"
+                                       OnClick="@OpenResumePanel"
                                        aria-label="Resume a previous session" />
                     </MudTooltip>
                 }
@@ -335,6 +335,111 @@
                                 <span>Create</span>
                             }
                         </MudButton>
+                    </MudStack>
+                </MudPaper>
+            </MudContainer>
+        }
+        else if (_resumePanelOpen)
+        {
+            @* Resume-previous panel: opened from the sessions-pane history
+               icon. Replaces the old always-visible "Past" group in the
+               drawer so a host with hundreds of historical chats doesn't
+               push Active + Locked out of view. Mirrors the inline
+               new-chat panel layout below so the two affordances feel
+               consistent -- both take over the chat surface instead of
+               floating as overlays. Cancel returns the user to whatever
+               was on screen before (chat or no-session welcome). *@
+            <MudContainer MaxWidth="MaxWidth.Medium" Class="my-8">
+                <MudPaper Class="pa-6 d-flex flex-column" Elevation="2" Style="max-height: calc(100dvh - 8rem);">
+                    <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center" Class="mb-2">
+                        <MudIcon Icon="@Icons.Material.Filled.History" />
+                        <MudText Typo="Typo.h5">Resume previous session on @Agent</MudText>
+                    </MudStack>
+                    <MudText Typo="Typo.body2" Color="Color.Default" Class="mb-4">
+                        Search past conversations by summary, repository, working directory, or session id.
+                    </MudText>
+                    <MudTextField T="string"
+                                  Value="@_resumeSearch"
+                                  ValueChanged="@OnResumeSearchChanged"
+                                  Placeholder="Search by name, repo, or directory..."
+                                  Variant="Variant.Outlined"
+                                  Margin="Margin.Dense"
+                                  Immediate="true"
+                                  DebounceInterval="150"
+                                  Adornment="Adornment.Start"
+                                  AdornmentIcon="@Icons.Material.Filled.Search"
+                                  Clearable="true"
+                                  Class="mb-3" />
+                    @{
+                        var pastFiltered = FilteredPastSessions();
+                    }
+                    <MudText Typo="Typo.caption" Color="Color.Default" Class="mb-2 d-block">
+                        @if (string.IsNullOrWhiteSpace(_resumeSearch))
+                        {
+                            <text>@pastFiltered.Count of @PastSessionCount past session@(PastSessionCount == 1 ? "" : "s")</text>
+                        }
+                        else
+                        {
+                            <text>@pastFiltered.Count match@(pastFiltered.Count == 1 ? "" : "es")</text>
+                        }
+                    </MudText>
+                    <MudPaper Elevation="0" Outlined="true" Class="flex-grow-1 mb-4" Style="overflow-y: auto; min-height: 0;">
+                        @if (pastFiltered.Count == 0)
+                        {
+                            <div class="pa-6 d-flex flex-column align-center">
+                                <MudIcon Icon="@Icons.Material.Filled.SearchOff" Size="Size.Large" Color="Color.Default" />
+                                <MudText Typo="Typo.body2" Color="Color.Default" Class="mt-2">No matches</MudText>
+                            </div>
+                        }
+                        else
+                        {
+                            <MudList T="string" Dense="true">
+                                @foreach (var s in pastFiltered)
+                                {
+                                    <MudListItem T="string" Value="@s.Id" Class="py-2"
+                                                 OnClick="@(() => OnResumePick(s.Id))">
+                                        <MudStack Spacing="0">
+                                            <MudText Typo="Typo.body2" Class="text-truncate" Style="font-weight: 500;"
+                                                     title="@(s.Summary ?? s.Id)">
+                                                @(s.Summary ?? s.Id[..8])
+                                            </MudText>
+                                            <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center" Class="mt-1">
+                                                @if (!string.IsNullOrWhiteSpace(s.Repository))
+                                                {
+                                                    var fullRepoLabel = string.IsNullOrWhiteSpace(s.Branch)
+                                                        ? s.Repository!
+                                                        : s.Repository + "@" + s.Branch;
+                                                    var shortRepoLabel = string.IsNullOrWhiteSpace(s.Branch)
+                                                        ? DisplayRepo(s.Repository)
+                                                        : DisplayRepo(s.Repository) + "@" + s.Branch;
+                                                    <MudTooltip Text="@fullRepoLabel" Placement="Placement.Bottom">
+                                                        <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
+                                                                 Color="Color.Default" Icon="@Icons.Material.Filled.FolderOpen"
+                                                                 Class="repo-chip">
+                                                            @shortRepoLabel
+                                                        </MudChip>
+                                                    </MudTooltip>
+                                                }
+                                                else if (!string.IsNullOrWhiteSpace(s.Cwd))
+                                                {
+                                                    <MudText Typo="Typo.caption" Color="Color.Default" Class="text-truncate" Style="max-width: 200px;" title="@s.Cwd">
+                                                        @ShortPath(s.Cwd)
+                                                    </MudText>
+                                                }
+                                                @if (s.UpdatedAt is { } ua)
+                                                {
+                                                    <MudSpacer />
+                                                    <MudText Typo="Typo.caption" Color="Color.Default">@RelativeTime(ua)</MudText>
+                                                }
+                                            </MudStack>
+                                        </MudStack>
+                                    </MudListItem>
+                                }
+                            </MudList>
+                        }
+                    </MudPaper>
+                    <MudStack Row="true" Spacing="2" Justify="Justify.FlexEnd">
+                        <MudButton Variant="Variant.Text" OnClick="@CancelResumePanel">Cancel</MudButton>
                     </MudStack>
                 </MudPaper>
             </MudContainer>
@@ -514,102 +619,6 @@
             </MudContainer>
         }
     </MudMainContent>
-
-    @* Resume-previous overlay: opened from the sessions-pane history icon.
-       Replaces the old always-visible "Past" group in the drawer so a host
-       with hundreds of historical chats doesn't push Active + Locked out
-       of view. Searchable by summary / repo / cwd / id. *@
-    <MudDialog @bind-Visible="_resumeDialogOpen"
-               Options="@(new DialogOptions { FullWidth = true, MaxWidth = MaxWidth.Small, CloseButton = true })">
-        <TitleContent>
-            <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center">
-                <MudIcon Icon="@Icons.Material.Filled.History" />
-                <MudText Typo="Typo.h6">Resume previous session on @Agent</MudText>
-            </MudStack>
-        </TitleContent>
-        <DialogContent>
-            <MudTextField T="string"
-                          Value="@_resumeSearch"
-                          ValueChanged="@OnResumeSearchChanged"
-                          Placeholder="Search by name, repo, or directory..."
-                          Variant="Variant.Outlined"
-                          Margin="Margin.Dense"
-                          Immediate="true"
-                          DebounceInterval="150"
-                          Adornment="Adornment.Start"
-                          AdornmentIcon="@Icons.Material.Filled.Search"
-                          Clearable="true"
-                          Class="mb-3" />
-            @{
-                var pastFiltered = FilteredPastSessions();
-            }
-            <MudText Typo="Typo.caption" Color="Color.Default" Class="mb-2 d-block">
-                @if (string.IsNullOrWhiteSpace(_resumeSearch))
-                {
-                    <text>@pastFiltered.Count of @PastSessionCount past session@(PastSessionCount == 1 ? "" : "s")</text>
-                }
-                else
-                {
-                    <text>@pastFiltered.Count match@(pastFiltered.Count == 1 ? "" : "es")</text>
-                }
-            </MudText>
-            <MudPaper Elevation="0" Outlined="true" Style="max-height: 60dvh; overflow-y: auto;">
-                @if (pastFiltered.Count == 0)
-                {
-                    <div class="pa-6 d-flex flex-column align-center">
-                        <MudIcon Icon="@Icons.Material.Filled.SearchOff" Size="Size.Large" Color="Color.Default" />
-                        <MudText Typo="Typo.body2" Color="Color.Default" Class="mt-2">No matches</MudText>
-                    </div>
-                }
-                else
-                {
-                    <MudList T="string" Dense="true">
-                        @foreach (var s in pastFiltered)
-                        {
-                            <MudListItem T="string" Value="@s.Id" Class="py-2"
-                                         OnClick="@(() => OnResumePick(s.Id))">
-                                <MudStack Spacing="0">
-                                    <MudText Typo="Typo.body2" Class="text-truncate" Style="font-weight: 500;"
-                                             title="@(s.Summary ?? s.Id)">
-                                        @(s.Summary ?? s.Id[..8])
-                                    </MudText>
-                                    <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center" Class="mt-1">
-                                        @if (!string.IsNullOrWhiteSpace(s.Repository))
-                                        {
-                                            var fullRepoLabel = string.IsNullOrWhiteSpace(s.Branch)
-                                                ? s.Repository!
-                                                : s.Repository + "@" + s.Branch;
-                                            var shortRepoLabel = string.IsNullOrWhiteSpace(s.Branch)
-                                                ? DisplayRepo(s.Repository)
-                                                : DisplayRepo(s.Repository) + "@" + s.Branch;
-                                            <MudTooltip Text="@fullRepoLabel" Placement="Placement.Bottom">
-                                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
-                                                         Color="Color.Default" Icon="@Icons.Material.Filled.FolderOpen"
-                                                         Class="repo-chip">
-                                                    @shortRepoLabel
-                                                </MudChip>
-                                            </MudTooltip>
-                                        }
-                                        else if (!string.IsNullOrWhiteSpace(s.Cwd))
-                                        {
-                                            <MudText Typo="Typo.caption" Color="Color.Default" Class="text-truncate" Style="max-width: 200px;" title="@s.Cwd">
-                                                @ShortPath(s.Cwd)
-                                            </MudText>
-                                        }
-                                        @if (s.UpdatedAt is { } ua)
-                                        {
-                                            <MudSpacer />
-                                            <MudText Typo="Typo.caption" Color="Color.Default">@RelativeTime(ua)</MudText>
-                                        }
-                                    </MudStack>
-                                </MudStack>
-                            </MudListItem>
-                        }
-                    </MudList>
-                }
-            </MudPaper>
-        </DialogContent>
-    </MudDialog>
 </MudLayout>
 
 @code {
@@ -747,12 +756,13 @@
     private bool _newSessionBusy;
     private List<string> _cwdSuggestions = new();
 
-    // Resume-previous overlay state. The dialog is opened from the
-    // sessions-pane header (history icon) and lets the user search
-    // through Dormant sessions without flooding the drawer with hundreds
-    // of historical entries. _resumeSearch is bound to a debounced
-    // MudTextField; FilteredPastSessions reads it on each render.
-    private bool _resumeDialogOpen;
+    // Resume-previous panel state. The panel is opened from the
+    // sessions-pane header (history icon) and renders inline in
+    // MudMainContent (matching the new-chat flow) so it doesn't
+    // disrupt the user as a floating overlay. _resumeSearch is bound
+    // to a debounced MudTextField; FilteredPastSessions reads it on
+    // each render.
+    private bool _resumePanelOpen;
     private string _resumeSearch = "";
 
     /// <summary>
@@ -1436,10 +1446,15 @@
             .ToList();
     }
 
-    private void OpenResumeDialog()
+    private void OpenResumePanel()
     {
         _resumeSearch = "";
-        _resumeDialogOpen = true;
+        _resumePanelOpen = true;
+    }
+
+    private void CancelResumePanel()
+    {
+        _resumePanelOpen = false;
     }
 
     private void OnResumeSearchChanged(string value)
@@ -1449,7 +1464,7 @@
 
     private void OnResumePick(string sessionId)
     {
-        _resumeDialogOpen = false;
+        _resumePanelOpen = false;
         // Same route the drawer list uses; OnParametersSetAsync will
         // do the right session-state routing (Dormant -> AdoptAsync(load: true)).
         Nav.NavigateTo($"/agents/{Agent}/sessions/{sessionId}");
