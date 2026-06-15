@@ -17,13 +17,17 @@ builder.Services.AddMudServices();
 // provider with a runtime-mutable filter that reads from LogLevelGate.
 // The runtime gate applies ONLY to our own Magpilot.* categories so a
 // verbose toggle doesn't unleash the renderer's render-tree debug noise
-// (~10k events per turn). Framework categories stay at Information.
+// (~10k events per turn). Framework categories (Microsoft.*, System.*)
+// stay at Warning+ -- noisy enough is silent, but framework error
+// reports (especially the renderer's unhandled-exception logs that
+// drive the yellow blazor-error-ui banner) reach /admin/logs so we
+// can debug the actual crash from any device.
 builder.Logging.SetMinimumLevel(LogLevel.Trace);
 builder.Logging.AddFilter((category, level) =>
 {
     if (category is not null && category.StartsWith("Magpilot.", StringComparison.Ordinal))
         return level >= LogLevelGate.MinLevel;
-    return level >= LogLevel.Information;
+    return level >= LogLevel.Warning;
 });
 
 builder.Services.AddSingleton<IHubAuthProvider, WebHubAuthProvider>();
