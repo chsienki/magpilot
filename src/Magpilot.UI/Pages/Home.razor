@@ -1589,7 +1589,6 @@
                     HubLog.LogError($"[stream {streamId}] {ex.Message}", ex.ToString(),
                         category: nameof(Home), sessionId: sid,
                         extra: new { agent, generation = streamId });
-                    Console.Error.WriteLine($"[stream {streamId}] {ex.Message}");
                 }
 
                 // Reached when the SSE stream ended -- either naturally (e.g.
@@ -1609,7 +1608,6 @@
                         $"[stream {streamId}] giving up after {attempt - 1} reconnect attempts",
                         stack: null, category: nameof(Home), sessionId: sid,
                         extra: new { agent, generation = streamId });
-                    Console.Error.WriteLine($"[stream {streamId}] giving up after {attempt - 1} reconnect attempts");
                     _streamStatus = StreamStatus.Offline;
                     _reconnectNextAttemptAt = null;
                     await InvokeAsync(StateHasChanged);
@@ -1665,10 +1663,14 @@
                 // it's debuggable, but NEVER bubbles to Blazor's unhandled-
                 // exception handler (which would pop the "An unhandled error
                 // has occurred. Reload" yellow banner and force a refresh).
+                //
+                // NOTE: also never use Console.Error.WriteLine here --
+                // Blazor WASM routes stderr through dotNetCriticalError
+                // which itself pops the yellow banner. Defeating the
+                // whole point of catching the exception.
                 HubLog.LogError($"[stream {streamId}] pump task crashed: {ex.Message}", ex.ToString(),
                     category: nameof(Home), sessionId: sid,
                     extra: new { agent, generation = streamId, fatal = true });
-                Console.Error.WriteLine($"[stream {streamId}] pump task crashed: {ex.Message}");
                 // Try to surface to the user via the offline UI rather than
                 // leaving the chat in a phantom-Connected state.
                 try

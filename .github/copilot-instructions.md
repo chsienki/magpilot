@@ -1223,6 +1223,43 @@ Always go through `HubClient` (or extend it). This bit `Logs.razor`
 on 2026-05-11 -- it injected bare `HttpClient` and exploded on
 every navigation to `/admin/logs` until rerouted.
 
+### SPA pitfall: `Console.Error.WriteLine` shows the yellow error banner
+
+The Blazor WebAssembly runtime config wires `Console.Error` (C# stderr)
+through its `dotNetCriticalError` handler, which does
+`console.error(msg) + showBlazorErrorUi()`. Any C# code that calls
+`Console.Error.WriteLine(...)` -- even just to log a recoverable
+"hub-flush failed once" -- pops the yellow "An unhandled error has
+occurred. Reload." banner over the entire page.
+
+This bit us hard on mobile on 2026-06-15: every time `HubLogClient`'s
+drain task hit a transient `TypeError: Failed to fetch` after a tab
+resumed from being backgrounded, `Console.Error.WriteLine` made the
+banner appear, the user reloaded, and the experience felt like the
+app crashed -- when in fact the SSE auto-reconnect had already
+recovered. Same pitfall for any other recoverable-error-with-a-
+diagnostic-log site (catch + report + retry, etc.).
+
+Rule:
+
+- **In Magpilot.Web / Magpilot.UI: NEVER use `Console.Error.WriteLine`
+  unless you genuinely want to terminate the SPA with the yellow
+  banner.** For diagnostic output, use `Console.WriteLine` (stdout
+  goes to F12 console at info level without triggering the banner)
+  or, better, `ILogger<T>` (registered SPA-side provider routes to
+  `/admin/logs` plus the F12 console at the runtime-mutable
+  verbosity level).
+- The recovery-path callers in `HubLogClient` + `Logs.razor` use
+  `Console.WriteLine` deliberately -- they can't go through `HubLog`
+  or `ILogger` without risking a feedback loop (those failures are
+  what they're reporting).
+- The JS-side belt-and-braces shim in `Magpilot.Web/wwwroot/js/error-capture.js`
+  still installs a `MutationObserver` on `#blazor-error-ui` and
+  `sendBeacon`s the captured text to `/api/log` with source
+  `spa-fatal` if the banner ever does show, so a genuine future
+  unhandled exception still surfaces -- but the bar shouldn't be
+  triggered by app code in the first place.
+
 ### Cooperative single-owner handoff (magpilot launcher)
 
 The shim project. A `magpilot` wrapper (in `src/Magpilot.Host`)

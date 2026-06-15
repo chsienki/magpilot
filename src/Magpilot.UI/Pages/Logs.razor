@@ -233,7 +233,11 @@
             _rows = new();
             // Don't recurse: this page itself failing to fetch logs is just
             // shown as empty + the snack. We'd loop forever otherwise.
-            Console.Error.WriteLine($"logs page load failed: {ex.Message}");
+            // Console.WriteLine, not Console.Error.WriteLine: Blazor
+            // WASM surfaces stderr writes as a yellow #blazor-error-ui
+            // banner via its dotNetCriticalError handler, which is way
+            // too dramatic for "logs page couldn't reach the hub".
+            Console.WriteLine($"logs page load failed: {ex.Message}");
         }
         finally
         {

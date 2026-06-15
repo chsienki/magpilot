@@ -127,7 +127,15 @@ public sealed class HubLogClient : IAsyncDisposable
                 }
                 catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
-                    Console.Error.WriteLine($"[HubLogClient] flush failed: {ex.Message}");
+                    // Console.WriteLine (NOT Console.Error.WriteLine):
+                    // Blazor WASM routes Console.Error through its
+                    // dotNetCriticalError handler, which both
+                    // console.error's the message AND shows the yellow
+                    // #blazor-error-ui banner. A transient hub-flush
+                    // failure is not a fatal app error -- we recover
+                    // via DropOldest on the channel -- so it must go
+                    // to stdout instead.
+                    Console.WriteLine($"[HubLogClient] flush failed: {ex.Message}");
                 }
 
                 // Brief settle so we coalesce bursty events into a single batch.
@@ -137,7 +145,9 @@ public sealed class HubLogClient : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[HubLogClient] drain crashed: {ex}");
+            // Console.WriteLine, not Console.Error.WriteLine -- see the
+            // comment on the per-flush failure path above.
+            Console.WriteLine($"[HubLogClient] drain crashed: {ex}");
         }
     }
 
