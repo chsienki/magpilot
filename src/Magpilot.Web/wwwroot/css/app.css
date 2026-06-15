@@ -55,8 +55,44 @@ a, .btn-link {
     padding: 0.6rem 1.25rem 0.7rem 1.25rem;
     position: fixed;
     width: 100%;
-    z-index: 1000;
+    /* Above every MudBlazor surface (AppBar=1100, Drawer=1200,
+       Popover=1300, Dialog=1400, Snackbar=1500). The error bar is
+       the user's only signal that the app is broken; it must not be
+       hidden by the host selector / drawer that the user can't see
+       through. */
+    z-index: 2000;
+    /* Cap height so a long stack trace doesn't take the whole screen.
+       The injected .magpilot-fatal-details <pre> scrolls internally. */
+    max-height: 60dvh;
+    overflow: auto;
 }
+
+    #blazor-error-ui .magpilot-fatal-version {
+        display: inline-block;
+        margin-left: 0.4rem;
+        padding: 0.05rem 0.4rem;
+        background: #ff8c00;
+        color: white;
+        border-radius: 0.25rem;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.7rem;
+        font-weight: 600;
+        vertical-align: middle;
+    }
+
+    #blazor-error-ui .magpilot-fatal-details {
+        margin: 0.4rem 0 0.2rem 0;
+        padding: 0.4rem 0.5rem;
+        background: rgba(0, 0, 0, 0.06);
+        border-radius: 0.25rem;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.72rem;
+        line-height: 1.35;
+        max-height: 38dvh;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+    }
 
     #blazor-error-ui .dismiss {
         cursor: pointer;

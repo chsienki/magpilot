@@ -8,7 +8,7 @@
     <base href="/" />
     <link rel="stylesheet" href="lib/bootstrap/dist/css/bootstrap.min.css" />
     <link rel="stylesheet" href="_content/MudBlazor/MudBlazor.min.css" />
-    <link rel="stylesheet" href="css/app.css" />
+    <link rel="stylesheet" href="css/app.css?v=1" />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <link rel="icon" type="image/x-icon" href="favicon.ico" />
     <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png" />
@@ -40,7 +40,12 @@
     </div>
     <script src="_framework/blazor.webassembly.js"></script>
     <script src="_content/MudBlazor/MudBlazor.min.js"></script>
-    <script src="js/error-capture.js"></script>
+    <!-- ?v=N busts the browser cache when this file changes.
+         Blazor framework files are content-hashed automatically,
+         but our hand-written wwwroot/js + css aren't. Bump v on
+         every behavioural change to error-capture.js / app.css
+         until we wire proper asset fingerprinting. -->
+    <script src="js/error-capture.js?v=1"></script>
     <script>
         window.magpilot = window.magpilot || {};
         window.magpilot.scrollToBottom = function (el) {
