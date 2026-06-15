@@ -14,12 +14,13 @@
 
 <MudLayout>
     <MudAppBar Elevation="1" Dense="true">
-        <MudIconButton Icon="@Icons.Material.Filled.Menu"
-                       Color="Color.Inherit"
-                       Edge="Edge.Start"
-                       OnClick="@ToggleDrawer"
-                       Class="d-md-none"
-                       aria-label="Toggle navigation" />
+        <MudHidden Breakpoint="Breakpoint.LgAndUp">
+            <MudIconButton Icon="@Icons.Material.Filled.Menu"
+                           Color="Color.Inherit"
+                           Edge="Edge.Start"
+                           OnClick="@ToggleDrawer"
+                           aria-label="Toggle navigation" />
+        </MudHidden>
         <MudText Typo="Typo.h6" Class="ml-1 mr-4">Magpilot</MudText>
         @if (Agent is not null)
         {
@@ -75,7 +76,7 @@
     <MudDrawer @bind-Open="_drawerOpen"
                ClipMode="DrawerClipMode.Always"
                Variant="DrawerVariant.Responsive"
-               Breakpoint="Breakpoint.Md"
+               Breakpoint="Breakpoint.Lg"
                Elevation="1"
                Color="Color.Surface">
         @if (Agent is null || _showHostsPane)
