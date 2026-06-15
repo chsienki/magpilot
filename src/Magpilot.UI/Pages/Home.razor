@@ -280,7 +280,8 @@
                                         @if (s.UpdatedAt is { } ua)
                                         {
                                             <MudSpacer />
-                                            <MudText Typo="Typo.caption" Color="Color.Default">@RelativeTime(ua)</MudText>
+                                            <MudText Typo="Typo.caption" Color="Color.Default"
+                                                     Style="white-space: nowrap; flex-shrink: 0;">@RelativeTime(ua)</MudText>
                                         }
                                     </MudStack>
                                 </MudStack>
@@ -429,7 +430,8 @@
                                                 @if (s.UpdatedAt is { } ua)
                                                 {
                                                     <MudSpacer />
-                                                    <MudText Typo="Typo.caption" Color="Color.Default">@RelativeTime(ua)</MudText>
+                                                    <MudText Typo="Typo.caption" Color="Color.Default"
+                                                             Style="white-space: nowrap; flex-shrink: 0;">@RelativeTime(ua)</MudText>
                                                 }
                                             </MudStack>
                                         </MudStack>
