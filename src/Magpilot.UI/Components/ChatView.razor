@@ -254,6 +254,14 @@
     [Parameter] public string DraftText { get; set; } = "";
 
     /// <summary>
+    /// Identity of the session this composer is attached to. When it
+    /// changes, ChatView adopts the incoming session's <see cref="DraftText"/>;
+    /// while it stays the same, the local <see cref="_draft"/> is left alone
+    /// so re-renders can't overwrite what the user is typing.
+    /// </summary>
+    [Parameter] public string? SessionKey { get; set; }
+
+    /// <summary>
     /// Fires on every keystroke in the composer textarea AND after a
     /// successful send (with empty string). The host persists this to
     /// localStorage so a refresh or session-switch round-trip restores
@@ -280,11 +288,14 @@
     [Parameter] public EventCallback OnLoadMore { get; set; }
 
     private string _draft = "";
-    // Last DraftText parameter value we observed from the host. When the
-    // parameter changes (e.g. session switch loaded a different saved
-    // draft) we sync into _draft; when it matches we leave _draft alone
-    // so in-progress keystrokes aren't clobbered by re-renders.
-    private string _previousDraftParam = "";
+    // The session key whose saved draft we last adopted into _draft. The
+    // composer's text is user-owned for the life of a session: the host's
+    // saved DraftText is copied in only when the session itself changes,
+    // never on an incidental re-render. Keying on session (not on the draft
+    // value) is what stops a background render -- a streaming delta, the
+    // thinking indicator, a heartbeat -- from echoing a momentarily-stale
+    // DraftText back over text the user is mid-way through typing.
+    private string? _lastSessionKey;
     private string ComposerPlaceholder => Busy
         ? "Message will queue while the agent is working... (Enter to queue)"
         : "Message... (Enter to send, Shift+Enter for newline)";
@@ -407,23 +418,20 @@
 
     protected override void OnParametersSet()
     {
-        // Sync the host's saved-draft parameter into our local working
-        // copy only when it actually changes (e.g. session switch).
-        // Comparing against _previousDraftParam (NOT _draft) means a
-        // keystroke that already updated _draft + reported back via
-        // OnDraftChanged doesn't get clobbered on the next render
-        // when the host echoes the same value into DraftText.
-        if (DraftText != _previousDraftParam)
+        // Adopt the host's saved draft only on a real session change. Within
+        // a session _draft is authoritative (driven by the textarea), so we
+        // ignore DraftText echoes -- otherwise a stale echo during a
+        // background re-render would clobber in-progress input.
+        if (SessionKey != _lastSessionKey)
         {
-            _draft = DraftText;
-            _previousDraftParam = DraftText;
+            _lastSessionKey = SessionKey;
+            _draft = DraftText ?? "";
         }
     }
 
     private async Task OnDraftInput(ChangeEventArgs e)
     {
         _draft = e.Value?.ToString() ?? "";
-        _previousDraftParam = _draft;
         if (OnDraftChanged.HasDelegate)
             await OnDraftChanged.InvokeAsync(_draft);
     }
@@ -441,7 +449,6 @@
         if (string.IsNullOrWhiteSpace(_draft)) return;
         var text = _draft;
         _draft = "";
-        _previousDraftParam = "";
         // Notify the host so its persisted draft is cleared too --
         // otherwise a refresh after sending would re-populate the
         // composer with the just-sent text.
