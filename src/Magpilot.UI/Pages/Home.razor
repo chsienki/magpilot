@@ -631,7 +631,7 @@
         }
         else if (Agent is not null && SessionId is not null)
         {
-            @if (_loading)
+            @if (_loading || _switchingSession)
             {
                 <MudProgressLinear Indeterminate="true" Color="Color.Primary" Size="Size.Small" />
             }
@@ -760,6 +760,12 @@
     private CancellationTokenSource? _streamCts;
     private bool _busy;
     private bool _loading;
+    // Set true when OnParametersSetAsync detects a session switch, cleared
+    // by StartStreamingAsync once the new session's content is ready to
+    // render. Drives the top-of-pane MudProgressLinear so the user has
+    // immediate feedback that the click registered, even on dormant
+    // sessions where /history + session/load take several seconds.
+    private bool _switchingSession;
     /// <summary>
     /// Messages the user typed and sent while a turn was still in
     /// flight. They get drained FIFO each time the agent emits a
@@ -1262,6 +1268,7 @@
         {
             await StopStreamingAsync();
             _streamingFor = null;
+            _switchingSession = false;
             return;
         }
 
@@ -1284,6 +1291,22 @@
             // duplicate stream task.
             var target = $"{Agent}/{SessionId}";
             _streamingFor = target;
+
+            // Visually commit to the switch immediately. The OUTGOING
+            // session's chat is gone the moment the user clicks; the
+            // INCOMING session's content lands when it lands. Without
+            // this, the previous chat hangs around for the duration of
+            // any /history fetch (multiple seconds for large dormant
+            // sessions), which makes the click feel like a no-op until
+            // the new content suddenly snaps in. _switchingSession
+            // gates a top-of-pane loading bar so the user has feedback
+            // that something IS happening; StartStreamingAsync clears
+            // the flag once it's ready to render the new content.
+            _messages.Clear();
+            _streamingAssistant = null;
+            _pendingApproval = null;
+            _switchingSession = true;
+            StateHasChanged();
 
             // Snapshot the OUTGOING session's ephemeral composer state
             // (queue + draft text) under its OWN key before we adopt the
@@ -1338,8 +1361,12 @@
             if (info?.State == SessionState.Locked)
             {
                 // Show confirmation; user must click "Adopt" to proceed.
+                // Drop the switch-loading bar -- we're done switching;
+                // the user is now mid-decision in the Adopt dialog and
+                // an Indeterminate bar would imply work is in flight.
                 _pendingOrphan = info;
                 _streamingFor = $"{Agent}/{SessionId}";
+                _switchingSession = false;
                 StateHasChanged();
                 return;
             }
@@ -1845,6 +1872,13 @@
                 });
         }
         _loading = load;
+        // Session switch is visually committed: clear the flag the
+        // OnParametersSetAsync session-switch branch raised, so the
+        // top-of-pane progress bar drops as soon as restoreFrom (or
+        // the empty starting state) is rendered. _loading takes over
+        // from here for sessions that still have a session/load
+        // history-replay phase ahead of them.
+        _switchingSession = false;
         // Drop ACP history-replay events from session/load when the chat
         // was already populated from the disk projection. See field comment.
         _suppressReplayEvents = load && restoreFrom is not null;
