@@ -195,6 +195,17 @@
                 </MudTooltip>
             </div>
 
+            @* Indeterminate progress bar across the full pane width
+               whenever a session-list fetch is in flight: either the
+               initial load on agent switch (_sessions is null and we
+               have an Agent + no route error) or an explicit user-
+               triggered Refresh. Mirrors the Logs.razor loading-bar
+               pattern so feedback is consistent across the SPA. *@
+            @if (_sessionsRefreshing || (_sessions is null && Agent is not null && _routeError is null))
+            {
+                <MudProgressLinear Indeterminate="true" Color="Color.Primary" Size="Size.Small" />
+            }
+
             @if (_sessions is null)
             {
                 <MudList T="string" Dense="true">
@@ -807,6 +818,13 @@
     private bool _sessionsListFailed;
     private bool _routeRetryBusy;
 
+    // Last Agent value we successfully fetched _sessions for. Tracked so
+    // OnParametersSetAsync can drop stale data on a real agent switch
+    // without clobbering the list every time we re-enter the lifecycle
+    // for an unrelated parameter change (e.g. SessionId navigation
+    // within the same agent).
+    private string? _lastLoadedAgent;
+
     private sealed record PendingForceTake(string Text, int HostPid);
 
     // Per-session in-memory snapshot of messages, keyed by "{Agent}/{SessionId}".
@@ -1049,6 +1067,18 @@
 
         if (Agent is not null)
         {
+            // Drop the previous agent's session list synchronously on
+            // a real agent switch so the drawer doesn't briefly show
+            // HENDRIK's sessions while we're loading SANDBOX's. The
+            // null state renders skeletons; the post-fetch assignment
+            // below replaces them. Don't do this on a same-agent
+            // SessionId navigation -- the list is still valid.
+            if (!string.Equals(Agent, _lastLoadedAgent, StringComparison.OrdinalIgnoreCase))
+            {
+                _sessions = null;
+                StateHasChanged();
+            }
+
             // First, validate the agent against our cached host list.
             // If we know what hosts exist and Agent isn't one of them,
             // bail out before hammering the hub with a doomed
@@ -1060,7 +1090,11 @@
             }
             else
             {
-                try { _sessions = await Hub.ListSessionsAsync(Agent); }
+                try
+                {
+                    _sessions = await Hub.ListSessionsAsync(Agent);
+                    _lastLoadedAgent = Agent;
+                }
                 catch (Exception ex)
                 {
                     HubLog.LogError($"ListSessionsAsync failed for {Agent}: {ex.Message}", ex.ToString(),
