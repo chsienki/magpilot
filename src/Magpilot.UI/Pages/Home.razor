@@ -24,9 +24,19 @@
         <MudText Typo="Typo.h6" Class="ml-1 mr-4">Magpilot</MudText>
         @if (Agent is not null)
         {
-            <MudChip T="string" Size="Size.Small" Color="Color.Secondary" Variant="Variant.Filled">
-                <MagpieMark Size="16" Class="mr-1" /> @Agent
-            </MudChip>
+            @* The host pill is redundant when the drawer is open (the
+               sessions-pane header has its own HostName at the top
+               left). Below MudBlazor's Lg breakpoint the drawer is a
+               temporary overlay that's normally hidden, so the AppBar
+               surface is the only place to identify the current host;
+               show it there. The breadcrumb + stream status icon
+               below stay visible at all sizes -- they're not
+               duplicated by the drawer at any breakpoint. *@
+            <MudHidden Breakpoint="Breakpoint.LgAndUp">
+                <HostName Agent="@Agent"
+                          Online="@(_agents?.FirstOrDefault(a => a.Name == Agent)?.Online)"
+                          Class="mud-chip mud-chip-filled mud-chip-color-secondary mud-chip-size-small px-2" />
+            </MudHidden>
             @if (_currentSessionTitle is not null)
             {
                 <MudIcon Icon="@Icons.Material.Filled.ChevronRight" Size="Size.Small" Class="mx-1" />
@@ -66,12 +76,6 @@
                            Color="Color.Inherit"
                            OnClick="@OnToggleDarkMode" />
         </MudTooltip>
-        @if (_agents is { Count: > 0 })
-        {
-            <MudTooltip Text="@($"{_agents.Count} host{(_agents.Count == 1 ? string.Empty : "s")} online")">
-                <MudIcon Icon="@Icons.Material.Filled.Cloud" Size="Size.Small" Class="ml-2" />
-            </MudTooltip>
-        }
     </MudAppBar>
 
     <MudDrawer @bind-Open="_drawerOpen"
@@ -160,13 +164,10 @@
                                    OnClick="@GoBackToHosts"
                                    aria-label="Back to hosts" />
                 </MudTooltip>
-                @if (_agents?.FirstOrDefault(a => a.Name == Agent) is { } currentAgent)
-                {
-                    <MudIcon Icon="@(currentAgent.Online ? Icons.Material.Filled.RadioButtonChecked : Icons.Material.Filled.RadioButtonUnchecked)"
-                             Color="@(currentAgent.Online ? Color.Success : Color.Default)"
-                             Size="Size.Small" />
-                }
-                <MudText Typo="Typo.subtitle1" Class="ml-1 text-truncate" Style="min-width: 0;" title="@Agent">@Agent</MudText>
+                <HostName Agent="@Agent"
+                          Online="@(_agents?.FirstOrDefault(a => a.Name == Agent)?.Online)"
+                          TextTypo="Typo.subtitle1"
+                          Class="ml-1" />
                 <MudSpacer />
                 <MudTooltip Text="Refresh session list">
                     <MudIconButton Icon="@Icons.Material.Filled.Refresh"

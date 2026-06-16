@@ -1,0 +1,52 @@
+@namespace Magpilot.UI.Components
+@using MudBlazor
+
+@* Inline status-dot + hostname pair. Used in two surfaces:
+   * Sessions-pane drawer header (always visible whenever the drawer
+     is open, on any viewport).
+   * AppBar host pill (only on viewports where the drawer is
+     collapsed -- i.e. below MudBlazor's Lg breakpoint -- so the
+     active host is still identifiable when the drawer isn't there
+     to show it).
+   The two callers wrap this in MudHidden / position differently;
+   the component itself is layout-agnostic. *@
+
+<MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center" Class="@Class" Style="min-width: 0; max-width: 100%;">
+    <MudTooltip Text="@StatusTooltip" Placement="Placement.Bottom">
+        <MudIcon Icon="@StatusIcon" Color="@StatusColor" Size="@IconSize" />
+    </MudTooltip>
+    <MudText Typo="@TextTypo" Class="text-truncate" Style="min-width: 0;" title="@Agent">@Agent</MudText>
+</MudStack>
+
+@code {
+    [Parameter, EditorRequired] public string Agent { get; set; } = "";
+
+    /// <summary>
+    /// True = host is online (green checked dot), false = offline
+    /// (grey unchecked dot), null = state unknown (grey unchecked
+    /// dot, "unknown" tooltip).
+    /// </summary>
+    [Parameter] public bool? Online { get; set; }
+
+    /// <summary>Forwarded to the inner MudIcon. Defaults to Small.</summary>
+    [Parameter] public Size IconSize { get; set; } = Size.Small;
+
+    /// <summary>Forwarded to the hostname MudText. Defaults to Body2.</summary>
+    [Parameter] public Typo TextTypo { get; set; } = Typo.body2;
+
+    /// <summary>Extra class names (e.g. spacing) for the wrapping MudStack.</summary>
+    [Parameter] public string? Class { get; set; }
+
+    private string StatusIcon => Online == true
+        ? Icons.Material.Filled.RadioButtonChecked
+        : Icons.Material.Filled.RadioButtonUnchecked;
+
+    private Color StatusColor => Online == true ? Color.Success : Color.Default;
+
+    private string StatusTooltip => Online switch
+    {
+        true  => $"{Agent} is online",
+        false => $"{Agent} is offline",
+        null  => $"{Agent} status unknown",
+    };
+}
