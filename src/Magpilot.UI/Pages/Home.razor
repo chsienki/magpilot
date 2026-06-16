@@ -243,16 +243,22 @@
 
                         <MudListItem T="string" Value="@s.Id" Class="py-1">
                             <MudStack Spacing="0" Style="min-width: 0;">
-                                @* Title row owns the state icon so the icon
-                                   aligns with the title baseline rather than
-                                   being centred on the whole multi-line cell.
-                                   Folder + branch rows below indent past the
-                                   icon column so they read as nested under
-                                   the title. *@
+                                @* All three rows (title / folder / branch)
+                                   use the same 1.25rem icon slot + 2-unit
+                                   gap so the icons centre on a shared left
+                                   column and the text on every row starts
+                                   at the same x. The state icon stays at
+                                   Size.Small (1.25rem, fills the slot)
+                                   while folder / branch icons render at
+                                   1rem and centre inside the same slot,
+                                   so the bigger title-row icon doesn't
+                                   shift the column. *@
                                 <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center" Style="min-width: 0;">
                                     <MudTooltip Text="@stateTooltip" Placement="Placement.Right">
-                                        <MudIcon Icon="@stateIcon" Color="@stateColor" Size="Size.Small"
-                                                 Style="flex-shrink: 0;" />
+                                        <span class="d-inline-flex align-center justify-center"
+                                              style="width: 1.25rem; height: 1.25rem; flex-shrink: 0;">
+                                            <MudIcon Icon="@stateIcon" Color="@stateColor" Size="Size.Small" />
+                                        </span>
                                     </MudTooltip>
                                     <MudText Typo="Typo.body2" Class="text-truncate"
                                              Style="font-weight: 500; min-width: 0; flex: 1;"
@@ -275,11 +281,13 @@
                                 </MudStack>
                                 @if (!string.IsNullOrWhiteSpace(folderLabel))
                                 {
-                                    <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center"
-                                              Style="min-width: 0; padding-left: 28px;">
-                                        <MudIcon Icon="@Icons.Material.Filled.FolderOpen"
-                                                 Style="font-size: 1rem; flex-shrink: 0;"
-                                                 Color="Color.Default" />
+                                    <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center" Style="min-width: 0;">
+                                        <span class="d-inline-flex align-center justify-center"
+                                              style="width: 1.25rem; height: 1.25rem; flex-shrink: 0;">
+                                            <MudIcon Icon="@Icons.Material.Filled.FolderOpen"
+                                                     Style="font-size: 1rem !important;"
+                                                     Color="Color.Default" />
+                                        </span>
                                         <MudText Typo="Typo.caption" Color="Color.Default" Class="text-truncate"
                                                  Style="min-width: 0;" title="@folderTooltip">
                                             @folderLabel
@@ -288,11 +296,13 @@
                                 }
                                 @if (!string.IsNullOrWhiteSpace(s.Branch))
                                 {
-                                    <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center"
-                                              Style="min-width: 0; padding-left: 28px;">
-                                        <MudIcon Icon="@Icons.Material.Filled.CallSplit"
-                                                 Style="font-size: 1rem; flex-shrink: 0;"
-                                                 Color="Color.Default" />
+                                    <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center" Style="min-width: 0;">
+                                        <span class="d-inline-flex align-center justify-center"
+                                              style="width: 1.25rem; height: 1.25rem; flex-shrink: 0;">
+                                            <MudIcon Icon="@Icons.Material.Filled.CallSplit"
+                                                     Style="font-size: 1rem !important;"
+                                                     Color="Color.Default" />
+                                        </span>
                                         <MudText Typo="Typo.caption" Color="Color.Default" Class="text-truncate"
                                                  Style="min-width: 0;" title="@s.Branch">
                                             @s.Branch
