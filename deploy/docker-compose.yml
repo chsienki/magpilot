@@ -7,6 +7,14 @@
 # Bring up:
 #   cd /srv/magpilot && docker compose up -d
 #
+# Image source:
+#   ghcr.io/chsienki/magpilot-hub -- a public GitHub Container Registry
+#   package built by .github/workflows/hub-image.yml on every main push
+#   and on tag push. The :latest tag is what the watchtower service
+#   below polls for. Rolling back to a prior release: edit the `image:`
+#   line to ghcr.io/chsienki/magpilot-hub:<version> (e.g. :0.1.10) and
+#   `docker compose up -d hub`. Watchtower respects the explicit tag.
+#
 # Required env (in /srv/magpilot/.env):
 #   MAGPILOT_AGENT_TOKEN=<shared secret matching the agents>
 #   MAGPILOT_HUB_BEARER=<secret used by agents+sidecars to POST /api/log>
@@ -27,10 +35,16 @@
 
 services:
   hub:
-    image: magpilot-hub:latest
+    image: ghcr.io/chsienki/magpilot-hub:latest
     container_name: magpilot-hub
     restart: unless-stopped
     network_mode: host
+    # Watchtower (below) only auto-updates services it sees this label
+    # on. Opt-in design: a future sibling service we add to this
+    # compose file (e.g. a metrics exporter) won't be auto-updated
+    # unless it explicitly opts in too.
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
     environment:
       ASPNETCORE_URLS: http://0.0.0.0:7088
       ASPNETCORE_ENVIRONMENT: Production
@@ -45,3 +59,29 @@ services:
       MAGPILOT_DEV_BYPASS_AUTH: ${MAGPILOT_DEV_BYPASS_AUTH:-}
     volumes:
       - ./data:/data
+
+  # Periodically polls GHCR for a newer digest of the hub image and
+  # restarts the hub container in place when one's available. Scoped
+  # to label-enabled services only, so an accidental sibling service
+  # without the watchtower.enable=true label can't be auto-updated.
+  #
+  # The hub image is public on GHCR so no docker login is needed;
+  # watchtower can pull anonymously. If the package is ever flipped to
+  # private, mount /root/.docker/config.json into watchtower at
+  # /config.json:ro and create that file via `docker login ghcr.io`.
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: magpilot-watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      WATCHTOWER_LABEL_ENABLE: "true"
+      WATCHTOWER_POLL_INTERVAL: "300"   # 5 minutes
+      WATCHTOWER_CLEANUP: "true"        # gc the previous image after a successful pull
+      WATCHTOWER_INCLUDE_RESTARTING: "true"
+      # Restart-policy nicety: if the hub is mid-restart for an unrelated
+      # reason when we poll, treat it as if it were running -- otherwise
+      # we'd skip the update on this cycle and the user has to wait
+      # another 5 min.
+      TZ: ${TZ:-UTC}

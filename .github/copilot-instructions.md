@@ -306,9 +306,25 @@ if you skipped step (3) above.
 
 `deploy/README.md` is the canonical recipe. Short version:
 
-1. `docker buildx build --platform linux/amd64 -f src/Magpilot.Hub/Dockerfile -t magpilot-hub:latest --load .`
-2. `docker save` -> `scp` to proxmox -> `pct push 102` -> `docker load` inside the container.
-3. `pct exec 102 -- bash -c 'cd /srv/magpilot && docker compose up -d'`
+1. **CI builds + publishes the image** -- `.github/workflows/hub-image.yml`
+   triggers on every push to `main` and on every `vX.Y.Z` tag, building
+   linux/amd64 and pushing to `ghcr.io/chsienki/magpilot-hub` (public
+   package). Tag conventions: `:main` + `:main-<sha>` on main pushes,
+   `:0.1.11` + `:0.1` + `:latest` on tag pushes.
+2. **Watchtower auto-pulls on the LXC** -- the `watchtower` service in
+   `/srv/magpilot/docker-compose.yml` polls GHCR every 5 min for a
+   newer digest of the `:latest` tag and recreates the hub container
+   in place when one's available. Label-gated
+   (`com.centurylinklabs.watchtower.enable=true` on the hub service)
+   so accidental siblings can't auto-update.
+3. **Force-an-update / pin a version** -- `docker compose pull hub && docker compose up -d hub`
+   on the LXC for an immediate update; edit the `image:` line to
+   `:0.1.10` (or any specific tag) for staging/rollback. Watchtower
+   respects pinned tags, only auto-bumps `:latest`.
+4. **Emergency local build** -- when CI is down or you're shipping an
+   unreviewed patch, `docker buildx build -f src/Magpilot.Hub/Dockerfile -t ghcr.io/chsienki/magpilot-hub:emergency-<timestamp> --load .`
+   then `docker save` -> `scp` -> `pct push 102` -> `docker load` ->
+   point the compose file at the emergency tag.
 
 **Critical `tar`/exclude gotcha when shipping source**: do NOT exclude
 `**/wwwroot` blanket-style — that kills `Magpilot.Web/wwwroot/index.html`
@@ -1511,9 +1527,16 @@ ssh proxmox "pct exec 102 -- docker logs --tail 200 -f magpilot-hub"
 # Restart the agent on HENDRIK (in the existing 'agent' async session)
 #  (in the agent shell: Ctrl+C, then `dotnet run --project src/Magpilot.Agent`)
 
-# Ship a freshly-built image to the LXC (Docker Desktop is local on Windows;
-# the LXC has its own daemon, so it's a save -> scp -> pct push -> docker load).
-docker save magpilot-hub:latest -o magpilot-hub.tar
+# Ship a freshly-built image to the LXC.
+#
+# Routine releases: NOTHING TO DO HERE -- the GitHub Action publishes
+# ghcr.io/chsienki/magpilot-hub on tag push and watchtower on the LXC
+# auto-pulls within 5 min. To force the pull immediately:
+ssh proxmox "pct exec 102 -- bash -lc 'cd /srv/magpilot && docker compose pull hub && docker compose up -d hub'"
+
+# Emergency local build (CI down, unreviewed patch): the old
+# save-load flow still works, just tag for ghcr so compose finds it.
+docker save ghcr.io/chsienki/magpilot-hub:emergency-$(Get-Date -Format yyyyMMdd-HHmm) -o magpilot-hub.tar
 scp magpilot-hub.tar proxmox:/tmp/magpilot-hub.tar
 ssh proxmox "pct push 102 /tmp/magpilot-hub.tar /tmp/magpilot-hub.tar && \
              pct exec 102 -- docker load -i /tmp/magpilot-hub.tar && \

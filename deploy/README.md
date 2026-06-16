@@ -22,23 +22,83 @@ Deployment artifacts for running the hub on the docker LXC (102) in the home lab
 
 ## Build + ship
 
-From the repo root on a build host with docker:
+The hub image is built and published by GitHub Actions
+(`.github/workflows/hub-image.yml`) on every push to `main` and on
+every `vX.Y.Z` tag. Published as a public package to
+`ghcr.io/chsienki/magpilot-hub`. Tag conventions:
+
+| Trigger | Tags |
+|---|---|
+| Push to main | `:main`, `:main-<short-sha>` |
+| Tag push v0.1.11 | `:0.1.11`, `:0.1`, `:latest` |
+
+The LXC's `watchtower` service (declared in `docker-compose.yml`)
+polls GHCR every 5 min for a new digest of the `:latest` tag. When
+it finds one, it pulls + recreates the hub container in place. No
+manual `docker save`/`scp`/`pct push` dance for ordinary releases.
+
+### Watching the rollout
+
+After publishing a release tag (`gh release edit vX.Y.Z --draft=false`),
+the workflow takes ~5-8 min to push the new image. Then watchtower's
+next 5-min poll picks it up and recreates the hub. Total
+release-to-deployed time is on the order of 15 min worst-case.
+
+To verify a deployment landed:
+
+```powershell
+# Image digest the LXC is currently running (compare against GHCR's :latest).
+ssh proxmox "pct exec 102 -- docker inspect magpilot-hub --format '{{ index .Config.Labels \"org.opencontainers.image.version\" }}'"
+ssh proxmox "pct exec 102 -- docker logs --tail 50 magpilot-watchtower"
+```
+
+### Force an immediate update
+
+If you've just published and don't want to wait for the next poll:
+
+```powershell
+ssh proxmox "pct exec 102 -- bash -c 'cd /srv/magpilot && docker compose pull hub && docker compose up -d hub'"
+```
+
+### Pinning to a specific version
+
+For staging or rollback, edit `/srv/magpilot/docker-compose.yml` to
+reference an immutable version tag (e.g. `:0.1.11` instead of
+`:latest`) and `docker compose up -d hub`. Watchtower respects
+explicit tags -- it doesn't auto-bump pinned versions, only the
+floating `:latest`. Switching back to auto-update is just flipping
+the tag back to `:latest`.
+
+### Emergency local build
+
+When CI is down or you're shipping an unreviewed patch and need the
+LXC to run a build that doesn't exist on GHCR yet, the old
+save/scp/pct-push flow still works:
 
 ```powershell
 docker buildx build --platform linux/amd64 `
     -f src/Magpilot.Hub/Dockerfile `
-    -t magpilot-hub:latest --load .
+    -t ghcr.io/chsienki/magpilot-hub:emergency-$(Get-Date -Format yyyyMMdd-HHmm) --load .
 
-docker save magpilot-hub:latest -o magpilot-hub.tar
+docker save ghcr.io/chsienki/magpilot-hub:emergency-... -o magpilot-hub.tar
 ssh proxmox "pct push 102 - /tmp/magpilot-hub.tar" < magpilot-hub.tar
 ssh proxmox "pct exec 102 -- docker load -i /tmp/magpilot-hub.tar"
-ssh proxmox "pct exec 102 -- rm /tmp/magpilot-hub.tar"
+# Edit /srv/magpilot/docker-compose.yml to point at the emergency tag,
+# then docker compose up -d hub. Watchtower will skip it (the tag isn't
+# :latest) until you flip back.
+```
 
+### First-time setup on a fresh LXC
+
+```powershell
 ssh proxmox "pct exec 102 -- mkdir -p /srv/magpilot/data"
 Get-Content deploy\docker-compose.yml | ssh proxmox `
     "pct exec 102 -- bash -c 'cat > /srv/magpilot/docker-compose.yml'"
+# Create /srv/magpilot/.env with the secrets above, then:
 ssh proxmox "pct exec 102 -- bash -c 'cd /srv/magpilot && docker compose up -d'"
+# Watchtower starts alongside the hub; first hub pull is from GHCR.
 ```
+
 
 ## NPM proxy host
 
