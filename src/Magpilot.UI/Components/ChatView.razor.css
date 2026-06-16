@@ -44,19 +44,20 @@
     margin-top: 2px;
 }
 
-/* The magpie-mark variant of the avatar slot. MudAvatar's circle
-   chrome would clash with the bird (background colour fights the
-   transparent SVG, and the rounded mask clips the bird's tail), so
-   we render the bird in a same-size bare div instead. The size +
-   alignment here mirror what MudAvatar Size.Small produces, so
-   magpie rows line up vertically with the Person/Lightbulb/Terminal
-   avatars on neighbouring rows. */
-.magpie-avatar {
-    width: 32px;
-    height: 32px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+/* Magpie chat avatar uses a MudAvatar Variant.Outlined wrapper so it
+   shares the 32x32 chrome + circle border with Person/Lightbulb/
+   Terminal avatars (rows align horizontally). MudAvatar's clip mask
+   would crop the bird's tail when the SVG renders at its natural
+   intrinsic size, so MagpieMark inside is dropped to Size=22 (vs 28
+   for a bare slot) which centres the bird's visible content inside
+   the circle without significant clipping. The inner padding on
+   .mud-avatar gets removed so the bird fills the circle uniformly
+   instead of leaving a halo of background colour around it. */
+.magpie-avatar.mud-avatar {
+    padding: 0;
+}
+.magpie-avatar.mud-avatar > * {
+    flex-shrink: 0;
 }
 
 /* Tool-call rows: avatar (terminal icon) sits next to a smaller chip
@@ -212,6 +213,21 @@
 .composer-textarea:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+}
+
+/* Composer row: textarea + Send/Stop buttons. AlignItems.Stretch on
+   the MudStack lets each child fill the row's height, so the buttons
+   no longer look stranded above an N-row textarea. The buttons keep
+   their square-icon look on a 1-row composer (where the row is at
+   the textarea's min-height of 44px), and stretch up to match a
+   grown textarea. The min-height here matches .composer-textarea's
+   min-height so even on the very first paint the two are flush. */
+.composer-row {
+    align-items: stretch;
+}
+.composer-action-button {
+    min-height: 44px;
+    align-self: stretch;
 }
 
 /* Typing dots while the assistant is thinking. */

@@ -44,9 +44,17 @@
                     break;
                 case "assistant":
                     <div class="msg-row msg-row-assistant">
-                        <div class="msg-avatar magpie-avatar">
-                            <MagpieMark Size="28" />
-                        </div>
+                        @* Magpie inside a MudAvatar Outlined so it shares
+                           the same 32x32 chrome as Person/Lightbulb/Terminal
+                           avatars and rows align horizontally. The bird
+                           drops to Size=22 so its visible content fits
+                           inside the circle's clip without losing its
+                           tail; Variant.Outlined keeps the chrome
+                           transparent so the multi-colour SVG isn't
+                           fighting a solid fill. *@
+                        <MudAvatar Size="Size.Small" Variant="Variant.Outlined" Color="Color.Default" Class="msg-avatar magpie-avatar">
+                            <MagpieMark Size="22" />
+                        </MudAvatar>
                         <MudPaper Elevation="0" Outlined="true" Class="msg-bubble msg-bubble-assistant pa-3">
                             <MarkdownView Text="@m.Text" />
                         </MudPaper>
@@ -123,9 +131,9 @@
         @if (Thinking)
         {
             <div class="msg-row msg-row-assistant">
-                <div class="msg-avatar magpie-avatar">
-                    <MagpieMark Size="28" />
-                </div>
+                <MudAvatar Size="Size.Small" Variant="Variant.Outlined" Color="Color.Default" Class="msg-avatar magpie-avatar">
+                    <MagpieMark Size="22" />
+                </MudAvatar>
                 <MudPaper Elevation="0" Outlined="true" Class="msg-bubble msg-bubble-assistant pa-3 d-flex align-center">
                     <span class="thinking-dots" aria-label="thinking"><span></span><span></span><span></span></span>
                 </MudPaper>
@@ -177,7 +185,7 @@
                 }
             </div>
         }
-        <MudStack Row="true" Spacing="1" AlignItems="AlignItems.End">
+        <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Stretch" Class="composer-row">
             <textarea @ref="_textarea" value="@_draft" @oninput="OnDraftInput"
                       @onkeydown="OnKeyDown"
                       class="composer-textarea"
@@ -191,6 +199,7 @@
                                Size="Size.Medium"
                                Disabled="@Disabled"
                                OnClick="@(() => OnCancel.InvokeAsync())"
+                               Class="composer-action-button"
                                aria-label="Stop current turn" />
             }
             <MudIconButton Icon="@(Busy ? Icons.Material.Filled.PlaylistAdd : Icons.Material.Filled.Send)"
@@ -199,6 +208,7 @@
                            Size="Size.Medium"
                            Disabled="@(Disabled || string.IsNullOrWhiteSpace(_draft))"
                            OnClick="@Send"
+                           Class="composer-action-button"
                            aria-label="@(Busy ? "Queue message" : "Send message")" />
         </MudStack>
     </MudPaper>
