@@ -259,11 +259,29 @@
                                        inline-block tooltip wrapper that
                                        picks up the surrounding line-height
                                        and pushes the icon ~2px above the
-                                       title text's vertical centre. *@
+                                       title text's vertical centre.
+
+                                       Owned (active) sessions render the
+                                       magpie brand mark instead of the
+                                       generic green dot -- the dot is now
+                                       reserved for "system online" status
+                                       in the AppBar, so reusing it here
+                                       was conflating two unrelated states.
+                                       Locked + Dormant keep their
+                                       Material glyphs since they convey
+                                       generic states the brand mark
+                                       wouldn't read as. *@
                                     <span class="d-inline-flex align-center justify-center"
                                           style="width: 1.25rem; height: 1.25rem; flex-shrink: 0;"
                                           title="@stateTooltip">
-                                        <MudIcon Icon="@stateIcon" Color="@stateColor" Size="Size.Small" />
+                                        @if (s.State == SessionState.Owned)
+                                        {
+                                            <MagpieMark Size="18" />
+                                        }
+                                        else
+                                        {
+                                            <MudIcon Icon="@stateIcon" Color="@stateColor" Size="Size.Small" />
+                                        }
                                     </span>
                                     <MudText Typo="Typo.body1" Class="text-truncate"
                                              Style="font-weight: 500; min-width: 0; flex: 1;"
