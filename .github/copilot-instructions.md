@@ -121,12 +121,22 @@ src/
                                       mark (params: Size, Glow, Class).
                                       Asset served via RCL at
                                       _content/Magpilot.UI/favicon-mark.svg.
+    Components/HostName.razor      <- single source of truth for "host name +
+                                      status indicator". AppBar variant is an
+                                      outlined transparent pill that tracks
+                                      the live SSE stream state (Connected /
+                                      Reconnecting / Offline) via Color +
+                                      Indeterminate; drawer-header variant is
+                                      plain inline.
     Pages/Home.razor               <- main chat (per-session cache, SSE consumer,
                                       three-way Owned routing, auto-reconnect on
                                       backgrounded-tab disconnects -- see SPA section).
                                       HandleSend catches HostStillOwnedException
                                       and surfaces a "Take over from terminal"
-                                      MudAlert (see "Cooperative handoff").
+                                      MudAlert; Apply() handles ReleaseRequested
+                                      to surface the "host has taken over" alert
+                                      with HandleTakeBackFromHost wired to its
+                                      "Take back" button (see "Cooperative handoff").
     Pages/Logs.razor               <- /admin/logs viewer. Routes through
                                       HubClient -- NOT bare HttpClient
                                       (see SPA pitfalls).
@@ -1291,11 +1301,16 @@ Wire contract this code base now exposes:
   `SessionStateInfo { info, owner: "None"|"Agent"|"Host"|"External",
   hostPid?, activity: "Idle"|"InFlight"|"JustFinished",
   inFlight?: { driver, startedAtMs, preview }, lastEvent?: { type,
-  id, timestamp } }`. Cheap. Wrapper calls on every startup.
+  id, timestamp } }`. Cheap. Wrapper calls on every startup; SPA
+  also calls it from `Home.razor.OnParametersSetAsync` to detect a
+  pre-existing host-owned session before deciding to stream.
 - **`POST /api/sessions/{id}/release-request`** -- body
   `ReleaseRequestBody { Requester, Force }`. Broadcasts a
   `ReleaseRequested` SSE event on the session's stream so any
   subscribed wrapper can begin its graceful shutdown. Idempotent.
+  Both the launcher (before acquiring) and the SPA (before a
+  forceful take-back from the host) fire this so the OTHER side
+  has a chance to react before ownership flips.
 - **`POST /api/sessions/{id}/acquire-for-host`** -- body
   `AcquireForHostBody { HostPid, Force }`. Atomic combined op:
   if we own the session and a turn's in flight, polite waits via
@@ -1324,6 +1339,49 @@ pass-through helper. The 409 propagates with the right shape because
 When you add a new caller of `/messages` (or anything that drives
 ACP), wrap it with the same retry-on-409 pattern. Don't re-implement
 ad hoc.
+
+**Pre-acquire release-request** (launcher side, `Magpilot.Host/Program.cs`):
+both spawn paths -- known-sid (`--resume=<UUID>`) and post-spawn
+detection (no sid, picker, --continue) -- fire
+`agent.FireReleaseRequestAsync` + a 500ms grace BEFORE
+`AcquireForHostAsync`. Without this courtesy the SPA only learns
+ownership flipped when its NEXT `/messages` POST returns 409 (i.e.
+the user has to send before the UI updates). Failure of the broadcast
+is non-fatal; the existing 409 path still catches uncoordinated cases.
+
+**SPA-side reactivity** (`Magpilot.UI/Pages/Home.razor`):
+- `Apply()` handles the `ReleaseRequested` SSE case: sets
+  `_hostHasTakenOver`, drops the in-progress streaming bubble +
+  thinking debounce, and stops the SSE pump. The chat-pane render
+  branch shows a MudAlert "A terminal session is now driving this
+  conversation -- composer paused" with a "Take back" button. The
+  composer's `Disabled` binding folds in the flag so input is locked
+  while host-owned.
+- `OnParametersSetAsync` calls `Hub.GetStateAsync` after the
+  session-list fetch and BEFORE deciding what to stream. If
+  `state.Owner == SessionOwner.Host`, the same takeover state is
+  set and the stream is skipped entirely -- the SPA never opens an
+  SSE pump for a session it's not allowed to drive.
+- `HandleTakeBackFromHost` is the symmetric counter-flow:
+  `FireReleaseRequestAsync(force=true)` + 1s grace +
+  `AcquireForHostAsync(0, force=true)` + `ReleaseAsync(0)` + restart
+  stream from cache (or `/history` if no cache). The polite knock
+  gives a cooperative launcher time to tear down its PTY cleanly;
+  the forceful flip catches stuck cases.
+
+**Agent-side stale-lock cleanup** (`Magpilot.Agent/Acp/AcpSessionManager.cs`):
+`CloseAsync` takes a `string? sessionsRoot` parameter and, after
+the `session/close` call (which copilot --acp rejects with -32601
+today), deletes the agent's
+`<sessionsRoot>/<sid>/inuse.<acp-pid>.lock` file. The on-disk lock
+is what OTHER copilot processes (a launcher's interactive child,
+terminal-driven `copilot --resume`, etc.) consult to decide
+whether the session is "in use". Without this cleanup, every
+launcher startup against a session the agent loaded printed
+"session is already in use by another process" and the new copilot
+piled its own lock on top (multi-lock state). `AcpClient.ProcessId`
+exposes `_proc?.Id` so the cleanup code knows which lock filename
+to target.
 
 ### The "input never re-enables" pitfall
 
@@ -1437,10 +1495,28 @@ config; do NOT enable Caching in the NPM UI.
   circle SVG.
 - **Two-pane drawer in `Home.razor`**: the host-list and session-list
   are mutually exclusive panes within the drawer (not stacked
-  sections). Pick a host -> sessions pane with a back-arrow header
-  + the agent's status bullet + the New chat button. Back arrow
-  flips `_showHostsPane` without touching the URL or the open chat.
-  Don't merge them back into one tall list.
+  sections). Pick a host -> sessions pane with a back-arrow header +
+  the host's name + the New chat button. Back arrow flips
+  `_showHostsPane` without touching the URL or the open chat. Don't
+  merge them back into one tall list. Re-clicking the active host in
+  the host pane closes the pane (handled via `OnAgentClicked` instead
+  of MudList's `SelectedValueChanged`, which would no-op a same-host
+  click) -- so users who bounced into the hosts pane just to glance
+  around aren't trapped behind it.
+- **HostName component** (`Magpilot.UI/Components/HostName.razor`):
+  single source of truth for "host name + status indicator" pairs.
+  Two render modes:
+  * AppBar: `Outlined=true`, `TextTypo=Typo.h6`, with `Color` +
+    `StatusText` parameters bound to the SSE stream state
+    (`StreamStatus.Connected/Reconnecting/Offline`) so the pill's
+    border tracks live connection state. Always visible (not
+    breakpoint-gated -- the pill IS the live status surface). Spinner
+    swaps in for the dot when `Indeterminate=true` (reconnecting);
+    a CloudOff glyph swaps in when the colour is `Color.Error`.
+  * Drawer / inline: plain inline `<div>` -- no border, no live
+    status (the AppBar pill already covers that). Used in the
+    sessions-pane back-arrow header for orientation only.
+  Don't double-encode status: drawer header doesn't render a dot.
 - **Clipping a MudChip's text** (or any MudBlazor component that
   renders content into an inner slot) needs three things together
   -- any one missing and the chip stays wider than the parent
@@ -1461,9 +1537,12 @@ config; do NOT enable Caching in the NPM UI.
   3. `overflow: hidden` + `text-overflow: ellipsis` +
      `white-space: nowrap` + `display: block` on `.mud-chip-content`
      so the truncated text gets the ellipsis treatment.
-  See the `.repo-chip` rule in `Magpilot.Web/wwwroot/css/app.css` for
-  the canonical pattern. The wrapping `MudTooltip` is the matching
-  recovery affordance -- hover restores the full text.
+  Wrap the chip in a `MudTooltip` so hover restores the full text.
+  The session-list rendered in `Home.razor` deliberately AVOIDS chips
+  for repo + branch -- it uses plain `MudText` rows with native
+  `title=` tooltips because the alignment + truncation contract is
+  cleaner without MudChip's intrinsic-width fight. If you re-add a
+  chip somewhere, re-derive the three rules above.
 - **Owner-prefix stripping** for `SessionInfo.Repository`: the
   Copilot CLI writes the repo name as `owner/repo` in
   `workspace.yaml`. If every session you ever open is your own
@@ -1670,16 +1749,21 @@ future "what's left?" sweep doesn't accidentally re-pick them):
 - ~~2026-06-09: magpilot: add an explicit 'release session' button in the SPA that calls the agent's existing /detach endpoint~~ -> shipped: Logout icon on the chat toolbar wires HubClient.DetachAsync; ergonomic placement + tooltip wrapping tracked as a v2 task under projects/magpilot-ui-controls.md.
 - ~~2026-06-09: SPA gets stuck in an SSE reconnect storm when navigating to an unknown agent / offline agent / non-existent session id~~ -> shipped: OnParametersSetAsync pre-flights the route against _agents + _sessions and renders a NotFound state (with a Try again button) instead of falling through to the 8x retry cycle. LoadFailed also flips into session-not-found rather than appending a stray chat bubble.
 - ~~2026-05-18: refresh button for the session list so you can see newer sessions without refreshing the whole page~~ -> shipped: MudIconButton in the sessions-pane header (Home.razor:171) wires to RefreshSessions; auto-refresh also fires on TurnComplete + tab-visibility events.
-- ~~2026-06-08: fix overflow on repo box~~ -> shipped: MudTooltip-wrapped MudChip with `repo-chip` class. Uses `::deep .repo-chip .mud-chip-content` to apply `min-width: 0` + `overflow: hidden` + `text-overflow: ellipsis` inside MudChip (the chip's intrinsic content otherwise refuses to shrink below text width). Capped at 180px; full label is one hover away.
-- ~~2026-06-08: make 'talking' icon be the magpie~~ -> shipped: assistant + thinking-bubble avatars now render MagpieMark inside a bare `.magpie-avatar` div (instead of MudAvatar wrapping MudIcon SmartToy). MudAvatar's circle background was fighting the transparent magpie SVG; the bare-div approach preserves layout while letting the bird breathe.
+- ~~2026-06-08: fix overflow on repo box~~ -> shipped via MudChip + `min-width: 0` + ellipsis cap-at-180px (chip later removed when the session list moved to a 3-line title/folder/branch layout that doesn't need a chip at all -- see "drop 'past' sessions list" below). The MudChip-clipping recipe survives in the SPA / brand section of these instructions for any future caller.
+- ~~2026-06-08: make 'talking' icon be the magpie~~ -> shipped: assistant + thinking-bubble avatars render `MagpieMark` inside a MudAvatar `Variant.Outlined`. Outlined keeps the chrome transparent so the multi-colour SVG isn't fighting a solid fill, while sharing the same 32x32 circle as Person/Lightbulb/Terminal avatars (so all assistant rows share a left column). The bird drops to `Size=22` so its visible content fits inside the circle's clip without losing its tail.
 - ~~2026-06-09: repo names dominated by repeated `owner/` prefixes when every session is the signed-in user's own repo~~ -> shipped: SPA fetches `/api/me` on init and `DisplayRepo()` strips `{identity}/` from the chip text when it matches the signed-in user. Generic -- repos owned by anyone else still render with their full `owner/repo`. Tooltip always shows the full path so the owner is one hover away.
 
 Open items:
 
 - ~~2026-05-18: agent/hub connect handshake -- either a single condensed token bundling all connection info, or a UDP discovery mode (think WPS but for agents and the hub) so users don't have to copy a bunch of random strings~~ -> shipped V1 + V2a + V2b + V3 (2026-06-09, all in one day): V1 paste-bundle morning; V2a per-agent tokens + voucher TTL/single-use afternoon; V2b revocation UI + installer Pairing page late afternoon; V3 interactive UDP discovery + admin-Adopt-in-SPA + Pairing-page-removed evening. Full WPS-style pairing flow is live; install becomes "irm | iex -> browser opens -> click Adopt".
-- 2026-06-08: cleanup status bar at top to be less confusing
+- ~~2026-06-08: cleanup status bar at top to be less confusing~~ -> shipped: extracted `Magpilot.UI/Components/HostName.razor` as the single source of truth for "host name + status indicator". AppBar variant is an outlined transparent pill whose border + dot/spinner/CloudOff colour tracks the live SSE stream state (Connected/Reconnecting/Offline); always visible. Drawer-header variant is plain inline. The redundant cloud icon + the host pill that hid behind a breakpoint are gone.
 - ~~2026-06-08: powershell one-liner that downloads, verifies and runs the installer as an easy bootstrap~~ -> shipped: `scripts/install.ps1` -- fetches version.json from /releases/latest/download/, downloads the installer + .sha256, verifies, runs with UAC elevation. README has the canonical `irm ... | iex` one-liner; instructions have the parameter-passing scriptblock form for `-Silent` / `-Version` / `-Repo` / `-DryRun`. Documented draft + private-repo failure modes alongside the hub-autoupdate ones.
-- 2026-06-08: drop 'past' sessions list, replace with 'resume previous' button that opens a filterable/searchable list
+- ~~2026-06-08: drop 'past' sessions list, replace with 'resume previous' button that opens a filterable/searchable list~~ -> shipped: Past sessions moved out of the always-on session list into an inline "Resume previous" panel toggled by a History icon in the sessions-pane header. Searchable text filter + relative-time labels; renders inline like the new-chat panel (not as a floating dialog) so the UX matches the rest of the SPA.
+- ~~2026-05-26: magpilot: handle disconnects better~~ -> shipped: SPA reacts to `release_requested` (stops stream, shows takeover banner, take-back button); on-open `/state` probe detects pre-existing host ownership; launcher fires release-request before acquire (both spawn paths) so the SPA reacts BEFORE the 409; agent's `CloseAsync` removes its `inuse.<acp-pid>.lock` so launcher's interactive copilot starts cleanly. See "Cooperative single-owner handoff" above.
+- ~~2026-05-26: magpilot: session switching is broken~~ -> shipped: stale-response race fix at every `ListSessionsAsync` call site (capture agent before await, drop response if Agent changed mid-flight); session-switch instant-clear + indeterminate progress bar; on-failure error UI in the drawer instead of misleading "no sessions yet".
 - 2026-06-08: combine heartbeat indicator with a 're-sync' option to recover when UI drifts from agent
 - 2026-06-08: more obvious / interactive 'agent is thinking' indicator beyond the stop button and queue notification
 - 2026-06-09: magpilot: new-session in a non-existent cwd returns 500 from POST /api/sessions -- should be a friendly "this directory doesn't exist; create it?" dialog (Yes -> mkdir + retry, No -> back to dialog with field highlighted). Likely folds into the richer pre-flight checks of the magpilot-ui-controls redesign.
+- 2026-06-15: chat-pane hierarchy refactor -- thinking should not dominate, tool calls should attach to assistant turns. Three independent design critiques (Claude Opus / GPT-5.4 / Gemini 3.1 Pro) all flagged the same root issue: thinking blocks (italic walls), assistant turns, and tool-call chips use near-identical containers, so the eye can't infer "what happened" vs "what was thinking" vs "what tools ran" at a glance. Punch list with concrete fixes saved as a session-state artifact.
+- 2026-06-15: AppBar duplicates the host name (pill + breadcrumb + drawer header). HENDRIK appears in three places; pick one source of truth (likely keep the pill as the live-status surface and drop the breadcrumb prefix).
+- 2026-06-15: vertical alignment of the chat-toolbar toggles vs the release icon -- "Show thinking" + "YOLO" toggles on the left don't share a baseline with the Logout / release icon on the right.

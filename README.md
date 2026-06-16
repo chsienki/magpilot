@@ -120,7 +120,7 @@ magpilot/
                                 MagpilotTheme, MagpieMark, ChatView,
                                 HubClient, HubLogClient, JsErrorBridge)
       Magpilot.Web/         <- Blazor WASM shell for the browser
-   deploy/                   <- docker-compose + ship-image notes for the hub
+   deploy/                   <- docker-compose + GHCR + watchtower notes for the hub
 ```
 
 ## Build & run locally

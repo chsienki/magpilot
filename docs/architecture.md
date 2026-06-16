@@ -181,6 +181,11 @@ binary stays as it is. The launcher:
    (3s grace, 1s on Force, then `PTY.Kill`), prints a banner, calls
    `POST /release`, and either exits (with `--magpilot-exit-on-handoff`)
    or sits on a "Press <enter> to take it back" prompt.
+6. Before step 4's `acquire-for-host`, the launcher fires
+   `release-request` itself (with a 500ms grace) so any SPA tab
+   currently subscribed sees the SSE event and stops driving BEFORE
+   ownership flips. Without this courtesy the SPA only learns about
+   the takeover when its NEXT `/messages` POST returns 409.
 
 All launcher-side diagnostics that fire while copilot is rendering
 its TUI (SSE-subscribe failures, post-spawn detection timeouts,
@@ -514,6 +519,23 @@ one re-reads the file before writing).
 5. The wrapper either exits (with `--magpilot-exit-on-handoff`) or
    sits on a "Press <enter> to take it back" prompt with a 10-min
    timeout.
+6. The agent's `DetachAsync` (called from `acquire-for-host` step 2
+   above) deletes the agent's `inuse.<acp-pid>.lock` from the
+   session directory so the wrapper's interactive copilot child
+   starts cleanly. Without this cleanup, the new copilot prints a
+   "session is already in use by another process" warning and the
+   on-disk state ends up in the multi-lock advisory mode documented
+   in the SessionScanner gotchas.
+
+**SPA-side reactivity** (the inverse direction -- something else
+takes the session, the SPA notices): the SPA's `Apply()` reacts to
+`release_requested` by stopping its stream + raising a "host took
+over" MudAlert with a "Take back" button. Even before any takeover,
+`OnParametersSetAsync` calls `GetStateAsync` after the session-list
+fetch and skips streaming entirely if `Owner=Host`. The "Take back"
+flow is the symmetric counter-pattern: `release-request(force=true)`
++ 1s grace + `acquire-for-host(0, force=true)` + `release(0)` +
+restart stream.
 
 **End-to-end timing**: a measured-typical 409 -> release-request ->
 SSE -> wrapper exit -> retry -> 202 dance completes in ~3.4s.
