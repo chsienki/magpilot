@@ -45,6 +45,17 @@ public sealed class AcpClient : IAsyncDisposable
     /// </summary>
     public bool IsAlive => _proc is { HasExited: false };
 
+    /// <summary>
+    /// PID of the running <c>copilot --acp</c> child, or <c>null</c> if
+    /// not yet started or already exited. Used by the agent's session-
+    /// detach path to identify the on-disk
+    /// <c>inuse.&lt;pid&gt;.lock</c> file this child wrote when it
+    /// loaded a session, so the agent can clean it up before another
+    /// process (e.g. a magpilot launcher's interactive copilot child)
+    /// tries to take over.
+    /// </summary>
+    public int? ProcessId => _proc?.Id;
+
     public async Task StartAsync(CancellationToken ct)
     {
         // Resolve the executable to a full path before spawning. .NET's

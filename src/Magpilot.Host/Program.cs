@@ -192,6 +192,27 @@ if (state.Owner == SessionOwner.Agent || state.Owner == SessionOwner.Host || sta
     var force = choice == TakeOverPrompt.Choice.Force;
     var hostPid = Environment.ProcessId;
     Console.WriteLine($"magpilot: {(force ? "force-acquiring" : "waiting for current turn to finish")}...");
+    // Politely tell any SSE subscribers (typically a SPA tab open
+    // against this session) that the session is being taken over,
+    // BEFORE we flip ownership on the agent. The SPA's Apply()
+    // reacts to release_requested by stopping its stream and
+    // showing a "Take back" affordance. Without this, the SPA only
+    // discovers the takeover when its NEXT /messages POST returns
+    // 409 -- i.e. the user has to send before the UI updates,
+    // which feels broken from their side. Best-effort: a failed
+    // broadcast doesn't block the acquire (the 409 path still
+    // catches things eventually).
+    try
+    {
+        await agent.FireReleaseRequestAsync(sid, $"magpilot/{hostPid}", force);
+        // Brief grace so the SSE event has time to land + the SPA's
+        // Apply() to run before the actual acquire flips ownership.
+        await Task.Delay(500);
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"magpilot: release-request before acquire failed (non-fatal): {ex.GetType().Name}: {ex.Message}");
+    }
     try
     {
         state = await agent.AcquireForHostAsync(sid, hostPid, force);
@@ -453,6 +474,23 @@ static async Task<int> RunSessionLoopWithDetectionAsync(AgentClient agent, Wrapp
                         "magpilot: post-spawn detection timed out. " +
                         "Session not registered for cooperative handoff; SPA may show it as Locked.");
                     return;
+                }
+
+                // Same release-request-before-acquire pattern as the
+                // known-sid path: tell any SSE subscribers (typically a
+                // SPA tab) that we're claiming the session, so they
+                // shut down their stream cleanly instead of finding
+                // out via 409 on the next send. Best-effort: failure
+                // doesn't block the acquire.
+                try
+                {
+                    await agent.FireReleaseRequestAsync(detectedSid, $"magpilot/{copilotHost.Pid}", force: false, sseCts.Token);
+                    await Task.Delay(500, sseCts.Token);
+                }
+                catch (OperationCanceledException) { return; }
+                catch (Exception ex)
+                {
+                    deferredErrors.Enqueue($"magpilot: release-request before acquire failed (non-fatal): {ex.Message}");
                 }
 
                 try

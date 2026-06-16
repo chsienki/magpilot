@@ -149,7 +149,7 @@ public sealed class SessionRegistry
     public async Task DetachAsync(string sessionId, CancellationToken ct)
     {
         if (_owned.TryRemove(sessionId, out _))
-            await _acp.CloseAsync(sessionId, ct);
+            await _acp.CloseAsync(sessionId, _scanner.Root, ct);
     }
 
     /// <summary>

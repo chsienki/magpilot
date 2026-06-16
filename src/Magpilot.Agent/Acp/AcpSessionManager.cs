@@ -182,16 +182,62 @@ public sealed class AcpSessionManager
         await Task.CompletedTask;
     }
 
-    public async Task CloseAsync(string sessionId, CancellationToken ct)
+    /// <summary>
+    /// Detach a session from this agent's ACP child. Calls
+    /// <c>session/close</c> over JSON-RPC (which copilot --acp
+    /// actually rejects with -32601 today, but we issue it anyway in
+    /// case a future copilot adds support) and then sweeps the
+    /// session directory to remove the agent's
+    /// <c>inuse.&lt;acp-pid&gt;.lock</c> file. The lock removal is
+    /// the load-bearing step for cooperative handoff: even though
+    /// the ACP child still has the session in memory, the on-disk
+    /// lock is what other copilot processes (a launcher's
+    /// interactive child, terminal-driven <c>copilot --resume</c>,
+    /// etc.) consult to decide whether the session is "in use".
+    /// Without this cleanup, every launcher startup against a
+    /// session the agent loaded prints a "session is locked by
+    /// another process" warning and the new copilot child appends
+    /// its own lock alongside (multi-lock advisory state).
+    /// </summary>
+    /// <param name="sessionId">The session being detached.</param>
+    /// <param name="sessionsRoot">
+    /// The Copilot CLI's session-state root directory (typically
+    /// <c>~/.copilot/session-state</c>). Pass null to skip the lock
+    /// cleanup -- only meaningful for the in-process unit tests.
+    /// </param>
+    public async Task CloseAsync(string sessionId, string? sessionsRoot, CancellationToken ct)
     {
+        // Capture the client's PID BEFORE the CloseAsync call, since
+        // we need it to identify which lock file to delete and the
+        // call might null-out our cache mapping on success.
+        AcpClient? client = null;
+        _sessionClient.TryGetValue(sessionId, out client);
+        var clientPid = client?.ProcessId;
+
         try
         {
-            var client = await ClientForAsync(sessionId, ct);
-            await client.CallAsync("session/close", new JsonObject { ["sessionId"] = sessionId }, ct, timeoutSec: 30);
+            if (client is not null)
+                await client.CallAsync("session/close", new JsonObject { ["sessionId"] = sessionId }, ct, timeoutSec: 30);
         }
         catch (Exception ex) { _logger.LogWarning(ex, "session/close failed for {Sid}", sessionId); }
         finally
         {
+            if (sessionsRoot is not null && clientPid is int pid)
+            {
+                try
+                {
+                    var lockFile = Path.Combine(sessionsRoot, sessionId, $"inuse.{pid}.lock");
+                    if (File.Exists(lockFile))
+                    {
+                        File.Delete(lockFile);
+                        _logger.LogInformation("Removed lock {File} after detach (pid={Pid})", lockFile, pid);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to remove lock for session {Sid}", sessionId);
+                }
+            }
             _sessionClient.TryRemove(sessionId, out _);
         }
     }
