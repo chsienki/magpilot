@@ -98,10 +98,10 @@
             }
             else
             {
-                <MudList T="string" Dense="true" SelectedValue="@Agent" SelectedValueChanged="@OnAgentSelected">
+                <MudList T="string" Dense="true" SelectedValue="@Agent">
                     @foreach (var a in _agents)
                     {
-                        <MudListItem T="string" Value="@a.Name">
+                        <MudListItem T="string" Value="@a.Name" OnClick="@(() => OnAgentClicked(a.Name))">
                             <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
                                 <MudIcon Icon="@(a.Online ? Icons.Material.Filled.RadioButtonChecked : Icons.Material.Filled.RadioButtonUnchecked)"
                                          Color="@(a.Online ? Color.Success : Color.Default)"
@@ -121,22 +121,12 @@
                 </MudList>
             }
 
-            @if (Agent is not null && _showHostsPane)
-            {
-                @* Reassurance affordance: an explicit way back to the active   *@
-                @* host's sessions, so the user isn't trapped if they bounced  *@
-                @* into the hosts pane just to glance at the host list.        *@
-                <MudDivider Class="my-2" />
-                <div class="px-3 pb-3">
-                    <MudButton Variant="Variant.Text"
-                               Size="Size.Small"
-                               Color="Color.Primary"
-                               StartIcon="@Icons.Material.Filled.ArrowForward"
-                               OnClick="@(() => _showHostsPane = false)">
-                        Back to @Agent
-                    </MudButton>
-                </div>
-            }
+            @* Re-clicking the active host in the list closes the
+               hosts pane (see OnAgentClicked), so no separate
+               "back to @Agent" button is needed -- the host row is
+               itself the back affordance. The previous explicit
+               button was redundant once the row click started
+               doing the right thing for the same-host case. *@
         }
         else
         {
@@ -1113,8 +1103,16 @@
 
     private void ToggleDrawer() => _drawerOpen = !_drawerOpen;
 
-    private void OnAgentSelected(string? name)
+    private void OnAgentClicked(string? name)
     {
+        // Close the hosts pane on every click, even if the user picks
+        // the host that's already active. A MudList's
+        // SelectedValueChanged would only fire on a true selection
+        // change, so re-clicking the active host was a no-op and the
+        // user was stranded behind the pane until they hit the (now
+        // removed) "Back to @Agent" button. Routing through OnClick
+        // instead lets re-clicking the active host close the pane the
+        // same way picking a different one does.
         _showHostsPane = false;
         if (string.IsNullOrEmpty(name) || name == Agent) return;
         Nav.NavigateTo($"/agents/{name}");
