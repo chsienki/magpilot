@@ -276,7 +276,20 @@
                                           title="@stateTooltip">
                                         @if (s.State == SessionState.Owned)
                                         {
-                                            <MagpieMark Size="18" />
+                                            @* Render the magpie larger than
+                                               the surrounding 1.25rem icon
+                                               slot so the visible bird (which
+                                               only fills ~70% of the SVG's
+                                               square canvas due to internal
+                                               padding) reads at roughly the
+                                               same size as the Locked padlock
+                                               and the folder/branch glyphs.
+                                               flex-shrink: 0 on the slot
+                                               keeps the row layout anchored
+                                               at 1.25rem; the img just
+                                               overflows visually into the
+                                               surrounding row whitespace. *@
+                                            <MagpieMark Size="28" />
                                         }
                                         else
                                         {
