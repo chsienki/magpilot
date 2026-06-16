@@ -31,11 +31,21 @@
                surface is the only place to identify the current host;
                show it there. The breadcrumb + stream status icon
                below stay visible at all sizes -- they're not
-               duplicated by the drawer at any breakpoint. *@
+               duplicated by the drawer at any breakpoint.
+
+               The pill renders as a transparent-fill outlined chip
+               whose border colour tracks the live SSE-stream state
+               (green = connected, amber = reconnecting, red =
+               offline) so the same visual cue is encoded twice: once
+               in the inline status dot and once in the surrounding
+               border. Use body2 inside the chip to match standard
+               MudBlazor chip typography. *@
             <MudHidden Breakpoint="Breakpoint.LgAndUp">
                 <HostName Agent="@Agent"
                           Online="@(_agents?.FirstOrDefault(a => a.Name == Agent)?.Online)"
-                          Class="mud-chip mud-chip-filled mud-chip-color-secondary mud-chip-size-small px-2" />
+                          Color="@AppBarHostColor()"
+                          StatusText="@AppBarHostStatusText()"
+                          Outlined="true" />
             </MudHidden>
             @if (_currentSessionTitle is not null)
             {
@@ -2335,6 +2345,42 @@
         StreamStatus.Offline => "Connection dropped. Click to retry.",
         _ => "",
     };
+
+    // Colour for the AppBar host pill outline + dot. Tracks the live
+    // SSE-stream state when a session is open (so the user sees the
+    // pill flip green->amber->red as the stream connects/recovers).
+    // When no session is selected there's no stream to watch -- fall
+    // back to the agent's static online flag.
+    private Color AppBarHostColor()
+    {
+        if (SessionId is not null)
+        {
+            return _streamStatus switch
+            {
+                StreamStatus.Connected    => Color.Success,
+                StreamStatus.Reconnecting => Color.Warning,
+                StreamStatus.Offline      => Color.Error,
+                _                         => Color.Default,
+            };
+        }
+        var online = _agents?.FirstOrDefault(a => a.Name == Agent)?.Online;
+        return online == true ? Color.Success : Color.Default;
+    }
+
+    // Tooltip on the host pill. Mirrors AppBarHostColor: stream-aware
+    // when a session is active, agent-online-flag-aware otherwise.
+    private string AppBarHostStatusText()
+    {
+        if (SessionId is not null)
+            return $"{Agent} - {StreamStatusTooltip()}";
+        var online = _agents?.FirstOrDefault(a => a.Name == Agent)?.Online;
+        return online switch
+        {
+            true  => $"{Agent} is online",
+            false => $"{Agent} is offline",
+            _     => $"{Agent} status unknown",
+        };
+    }
 
     /// <summary>
     /// Demand-load the next older page of history. Invoked by ChatView

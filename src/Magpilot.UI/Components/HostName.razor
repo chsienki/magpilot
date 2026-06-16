@@ -8,12 +8,18 @@
      collapsed -- i.e. below MudBlazor's Lg breakpoint -- so the
      active host is still identifiable when the drawer isn't there
      to show it).
-   The two callers wrap this in MudHidden / position differently;
-   the component itself is layout-agnostic. *@
 
-<MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center" Class="@Class" Style="min-width: 0; max-width: 100%;">
+   Callers can opt into a chip-style outlined look (Outlined=true)
+   that draws a transparent-fill rounded border in the same colour
+   as the status dot. The AppBar uses that look so the pill
+   visually traces the connection state (green = connected, amber =
+   reconnecting, red = offline, grey = unknown). The drawer header
+   uses the plain inline form. *@
+
+<MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center"
+          Class="@CombinedClass" Style="@CombinedStyle">
     <MudTooltip Text="@StatusTooltip" Placement="Placement.Bottom">
-        <MudIcon Icon="@StatusIcon" Color="@StatusColor" Size="@IconSize" />
+        <MudIcon Icon="@StatusIcon" Color="@EffectiveColor" Size="@IconSize" />
     </MudTooltip>
     <MudText Typo="@TextTypo" Class="text-truncate" Style="min-width: 0;" title="@Agent">@Agent</MudText>
 </MudStack>
@@ -24,9 +30,33 @@
     /// <summary>
     /// True = host is online (green checked dot), false = offline
     /// (grey unchecked dot), null = state unknown (grey unchecked
-    /// dot, "unknown" tooltip).
+    /// dot, "unknown" tooltip). Ignored when <see cref="Color"/> is
+    /// set explicitly.
     /// </summary>
     [Parameter] public bool? Online { get; set; }
+
+    /// <summary>
+    /// Explicit MudBlazor colour for the status dot (and the matching
+    /// border when <see cref="Outlined"/> is true). When not set, the
+    /// colour is derived from <see cref="Online"/>: Success when
+    /// online, Default otherwise. Use this to surface a richer state
+    /// like SSE-stream Reconnecting (Color.Warning) or Offline
+    /// (Color.Error) where a plain bool isn't expressive enough.
+    /// </summary>
+    [Parameter] public Color? Color { get; set; }
+
+    /// <summary>
+    /// Tooltip on the status dot. When unset, derived from Online.
+    /// </summary>
+    [Parameter] public string? StatusText { get; set; }
+
+    /// <summary>
+    /// When true, the wrapping stack draws a transparent-fill rounded
+    /// border in the same colour as the dot -- "outlined chip"
+    /// styling. When false, the component renders inline (just an
+    /// icon+text pair next to whatever surrounds it).
+    /// </summary>
+    [Parameter] public bool Outlined { get; set; }
 
     /// <summary>Forwarded to the inner MudIcon. Defaults to Small.</summary>
     [Parameter] public Size IconSize { get; set; } = Size.Small;
@@ -37,16 +67,58 @@
     /// <summary>Extra class names (e.g. spacing) for the wrapping MudStack.</summary>
     [Parameter] public string? Class { get; set; }
 
-    private string StatusIcon => Online == true
-        ? Icons.Material.Filled.RadioButtonChecked
-        : Icons.Material.Filled.RadioButtonUnchecked;
+    private MudBlazor.Color EffectiveColor =>
+        Color ?? (Online == true ? MudBlazor.Color.Success : MudBlazor.Color.Default);
 
-    private Color StatusColor => Online == true ? Color.Success : Color.Default;
+    private string StatusIcon =>
+        EffectiveColor == MudBlazor.Color.Default
+            ? Icons.Material.Filled.RadioButtonUnchecked
+            : Icons.Material.Filled.RadioButtonChecked;
 
-    private string StatusTooltip => Online switch
+    private string StatusTooltip => StatusText
+        ?? (Online switch
+        {
+            true  => $"{Agent} is online",
+            false => $"{Agent} is offline",
+            null  => $"{Agent} status unknown",
+        });
+
+    private string CombinedClass =>
+        string.IsNullOrEmpty(Class) ? "" : Class;
+
+    private string CombinedStyle
     {
-        true  => $"{Agent} is online",
-        false => $"{Agent} is offline",
-        null  => $"{Agent} status unknown",
-    };
+        get
+        {
+            // The base MudStack already collapses to its content; we
+            // just ensure the chrome doesn't overflow the parent flex
+            // row when the hostname is long.
+            var s = "min-width: 0; max-width: 100%;";
+            if (Outlined)
+            {
+                // mud-palette-* CSS variables are theme-aware (light/dark)
+                // and match the colour of the dot via MudIcon's
+                // Color="@EffectiveColor". 1px solid border + radius
+                // gives the standard MudBlazor "outlined chip" look but
+                // without the Mud-imposed default chip padding so the
+                // text typography doesn't drift away from neighbouring
+                // AppBar text baselines.
+                var palette = EffectiveColor switch
+                {
+                    MudBlazor.Color.Success  => "var(--mud-palette-success)",
+                    MudBlazor.Color.Warning  => "var(--mud-palette-warning)",
+                    MudBlazor.Color.Error    => "var(--mud-palette-error)",
+                    MudBlazor.Color.Info     => "var(--mud-palette-info)",
+                    MudBlazor.Color.Primary  => "var(--mud-palette-primary)",
+                    _                        => "var(--mud-palette-action-disabled)",
+                };
+                s += $" border: 1px solid {palette};"
+                   + " border-radius: 16px;"
+                   + " padding: 2px 10px;"
+                   + " background: transparent;";
+            }
+            return s;
+        }
+    }
 }
+
