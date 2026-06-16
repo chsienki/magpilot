@@ -236,55 +236,69 @@
                             SessionState.Locked => "Locked -- held by another process; opening will adopt it",
                             _                   => s.State.ToString(),
                         };
+                        var folderLabel = !string.IsNullOrWhiteSpace(s.Cwd)
+                            ? ShortPath(s.Cwd)
+                            : (!string.IsNullOrWhiteSpace(s.Repository) ? DisplayRepo(s.Repository) : null);
+                        var folderTooltip = !string.IsNullOrWhiteSpace(s.Cwd) ? s.Cwd : s.Repository;
 
-                        <MudListItem T="string" Value="@s.Id" Class="py-2">
-                            <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center" Style="min-width: 0;">
-                                <MudTooltip Text="@stateTooltip" Placement="Placement.Right">
-                                    <MudIcon Icon="@stateIcon" Color="@stateColor" Size="Size.Small" />
-                                </MudTooltip>
-                                <MudStack Spacing="0" Style="min-width: 0; flex: 1;">
-                                    <MudText Typo="Typo.body2" Class="text-truncate" Style="font-weight: 500;"
+                        <MudListItem T="string" Value="@s.Id" Class="py-1">
+                            <MudStack Spacing="0" Style="min-width: 0;">
+                                @* Title row owns the state icon so the icon
+                                   aligns with the title baseline rather than
+                                   being centred on the whole multi-line cell.
+                                   Folder + branch rows below indent past the
+                                   icon column so they read as nested under
+                                   the title. *@
+                                <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center" Style="min-width: 0;">
+                                    <MudTooltip Text="@stateTooltip" Placement="Placement.Right">
+                                        <MudIcon Icon="@stateIcon" Color="@stateColor" Size="Size.Small"
+                                                 Style="flex-shrink: 0;" />
+                                    </MudTooltip>
+                                    <MudText Typo="Typo.body2" Class="text-truncate"
+                                             Style="font-weight: 500; min-width: 0; flex: 1;"
                                              title="@(s.Summary ?? s.Id)">
                                         @(s.Summary ?? s.Id[..8])
                                     </MudText>
-                                    <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center" Class="mt-1">
-                                        @if (s.Yolo)
-                                        {
-                                            <MudChip T="string" Size="Size.Small" Variant="Variant.Filled"
-                                                     Color="Color.Warning" Icon="@Icons.Material.Filled.Bolt">
-                                                YOLO
-                                            </MudChip>
-                                        }
-                                        @if (!string.IsNullOrWhiteSpace(s.Repository))
-                                        {
-                                            var fullRepoLabel = string.IsNullOrWhiteSpace(s.Branch)
-                                                ? s.Repository!
-                                                : s.Repository + "@" + s.Branch;
-                                            var shortRepoLabel = string.IsNullOrWhiteSpace(s.Branch)
-                                                ? DisplayRepo(s.Repository)
-                                                : DisplayRepo(s.Repository) + "@" + s.Branch;
-                                            <MudTooltip Text="@fullRepoLabel" Placement="Placement.Bottom">
-                                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
-                                                         Color="Color.Default" Icon="@Icons.Material.Filled.FolderOpen"
-                                                         Class="repo-chip">
-                                                    @shortRepoLabel
-                                                </MudChip>
-                                            </MudTooltip>
-                                        }
-                                        else if (!string.IsNullOrWhiteSpace(s.Cwd))
-                                        {
-                                            <MudText Typo="Typo.caption" Color="Color.Default" Class="text-truncate" Style="max-width: 200px;" title="@s.Cwd">
-                                                @ShortPath(s.Cwd)
-                                            </MudText>
-                                        }
-                                        @if (s.UpdatedAt is { } ua)
-                                        {
-                                            <MudSpacer />
-                                            <MudText Typo="Typo.caption" Color="Color.Default"
-                                                     Style="white-space: nowrap; flex-shrink: 0;">@RelativeTime(ua)</MudText>
-                                        }
-                                    </MudStack>
+                                    @if (s.Yolo)
+                                    {
+                                        <MudChip T="string" Size="Size.Small" Variant="Variant.Filled"
+                                                 Color="Color.Warning" Icon="@Icons.Material.Filled.Bolt"
+                                                 Class="flex-shrink-0">
+                                            YOLO
+                                        </MudChip>
+                                    }
+                                    @if (s.UpdatedAt is { } ua)
+                                    {
+                                        <MudText Typo="Typo.caption" Color="Color.Default"
+                                                 Style="white-space: nowrap; flex-shrink: 0;">@RelativeTime(ua)</MudText>
+                                    }
                                 </MudStack>
+                                @if (!string.IsNullOrWhiteSpace(folderLabel))
+                                {
+                                    <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center"
+                                              Style="min-width: 0; padding-left: 28px;">
+                                        <MudIcon Icon="@Icons.Material.Filled.FolderOpen"
+                                                 Style="font-size: 1rem; flex-shrink: 0;"
+                                                 Color="Color.Default" />
+                                        <MudText Typo="Typo.caption" Color="Color.Default" Class="text-truncate"
+                                                 Style="min-width: 0;" title="@folderTooltip">
+                                            @folderLabel
+                                        </MudText>
+                                    </MudStack>
+                                }
+                                @if (!string.IsNullOrWhiteSpace(s.Branch))
+                                {
+                                    <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center"
+                                              Style="min-width: 0; padding-left: 28px;">
+                                        <MudIcon Icon="@Icons.Material.Filled.CallSplit"
+                                                 Style="font-size: 1rem; flex-shrink: 0;"
+                                                 Color="Color.Default" />
+                                        <MudText Typo="Typo.caption" Color="Color.Default" Class="text-truncate"
+                                                 Style="min-width: 0;" title="@s.Branch">
+                                            @s.Branch
+                                        </MudText>
+                                    </MudStack>
+                                }
                             </MudStack>
                         </MudListItem>
                     }
@@ -397,43 +411,50 @@
                             <MudList T="string" Dense="true">
                                 @foreach (var s in pastFiltered)
                                 {
-                                    <MudListItem T="string" Value="@s.Id" Class="py-2"
+                                    var folderLabel = !string.IsNullOrWhiteSpace(s.Cwd)
+                                        ? ShortPath(s.Cwd)
+                                        : (!string.IsNullOrWhiteSpace(s.Repository) ? DisplayRepo(s.Repository) : null);
+                                    var folderTooltip = !string.IsNullOrWhiteSpace(s.Cwd) ? s.Cwd : s.Repository;
+
+                                    <MudListItem T="string" Value="@s.Id" Class="py-1"
                                                  OnClick="@(() => OnResumePick(s.Id))">
-                                        <MudStack Spacing="0">
-                                            <MudText Typo="Typo.body2" Class="text-truncate" Style="font-weight: 500;"
-                                                     title="@(s.Summary ?? s.Id)">
-                                                @(s.Summary ?? s.Id[..8])
-                                            </MudText>
-                                            <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center" Class="mt-1">
-                                                @if (!string.IsNullOrWhiteSpace(s.Repository))
-                                                {
-                                                    var fullRepoLabel = string.IsNullOrWhiteSpace(s.Branch)
-                                                        ? s.Repository!
-                                                        : s.Repository + "@" + s.Branch;
-                                                    var shortRepoLabel = string.IsNullOrWhiteSpace(s.Branch)
-                                                        ? DisplayRepo(s.Repository)
-                                                        : DisplayRepo(s.Repository) + "@" + s.Branch;
-                                                    <MudTooltip Text="@fullRepoLabel" Placement="Placement.Bottom">
-                                                        <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
-                                                                 Color="Color.Default" Icon="@Icons.Material.Filled.FolderOpen"
-                                                                 Class="repo-chip">
-                                                            @shortRepoLabel
-                                                        </MudChip>
-                                                    </MudTooltip>
-                                                }
-                                                else if (!string.IsNullOrWhiteSpace(s.Cwd))
-                                                {
-                                                    <MudText Typo="Typo.caption" Color="Color.Default" Class="text-truncate" Style="max-width: 200px;" title="@s.Cwd">
-                                                        @ShortPath(s.Cwd)
-                                                    </MudText>
-                                                }
+                                        <MudStack Spacing="0" Style="min-width: 0;">
+                                            <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center" Style="min-width: 0;">
+                                                <MudText Typo="Typo.body2" Class="text-truncate"
+                                                         Style="font-weight: 500; min-width: 0; flex: 1;"
+                                                         title="@(s.Summary ?? s.Id)">
+                                                    @(s.Summary ?? s.Id[..8])
+                                                </MudText>
                                                 @if (s.UpdatedAt is { } ua)
                                                 {
-                                                    <MudSpacer />
                                                     <MudText Typo="Typo.caption" Color="Color.Default"
                                                              Style="white-space: nowrap; flex-shrink: 0;">@RelativeTime(ua)</MudText>
                                                 }
                                             </MudStack>
+                                            @if (!string.IsNullOrWhiteSpace(folderLabel))
+                                            {
+                                                <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center" Style="min-width: 0;">
+                                                    <MudIcon Icon="@Icons.Material.Filled.FolderOpen"
+                                                             Style="font-size: 1rem; flex-shrink: 0;"
+                                                             Color="Color.Default" />
+                                                    <MudText Typo="Typo.caption" Color="Color.Default" Class="text-truncate"
+                                                             Style="min-width: 0;" title="@folderTooltip">
+                                                        @folderLabel
+                                                    </MudText>
+                                                </MudStack>
+                                            }
+                                            @if (!string.IsNullOrWhiteSpace(s.Branch))
+                                            {
+                                                <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center" Style="min-width: 0;">
+                                                    <MudIcon Icon="@Icons.Material.Filled.CallSplit"
+                                                             Style="font-size: 1rem; flex-shrink: 0;"
+                                                             Color="Color.Default" />
+                                                    <MudText Typo="Typo.caption" Color="Color.Default" Class="text-truncate"
+                                                             Style="min-width: 0;" title="@s.Branch">
+                                                        @s.Branch
+                                                    </MudText>
+                                                </MudStack>
+                                            }
                                         </MudStack>
                                     </MudListItem>
                                 }
