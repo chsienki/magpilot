@@ -696,10 +696,52 @@
                     </MudStack>
                 </MudAlert>
             }
+            @if (_hostHasTakenOver)
+            {
+                @* Surfaced in two paths: (1) the SSE pump received a
+                   release_requested event mid-conversation; (2) the
+                   on-open /state probe found Owner=Host before we ever
+                   started streaming. Either way the chat is read-only
+                   from our side until the user clicks Take back. The
+                   button calls Hub.ForceTakeOverAndSendAsync's
+                   acquire-for-host(force=true) -> release(0) dance to
+                   flip ownership back, then restarts our SSE pump. *@
+                <MudAlert Severity="Severity.Info" Dense="true" Class="mx-3 my-2"
+                          ContentAlignment="HorizontalAlignment.Left">
+                    <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
+                        <MudText Typo="Typo.body2">
+                            @if (_hostTakeoverRequester is { Length: > 0 } req && _hostTakeoverPid is { } pid)
+                            {
+                                <text>A terminal session (@req, PID @pid) is now driving this conversation.</text>
+                            }
+                            else if (_hostTakeoverRequester is { Length: > 0 } req2)
+                            {
+                                <text>A terminal session (@req2) is now driving this conversation.</text>
+                            }
+                            else if (_hostTakeoverPid is { } pid2)
+                            {
+                                <text>A terminal session (PID @pid2) is now driving this conversation.</text>
+                            }
+                            else
+                            {
+                                <text>A terminal session is now driving this conversation.</text>
+                            }
+                            The composer is paused until you take it back.
+                        </MudText>
+                        <MudSpacer />
+                        <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary"
+                                   StartIcon="@Icons.Material.Filled.SwapHoriz"
+                                   Disabled="@_hostTakeBackBusy"
+                                   OnClick="HandleTakeBackFromHost">
+                            Take back
+                        </MudButton>
+                    </MudStack>
+                </MudAlert>
+            }
             <ChatView @ref="_chatView"
                       Messages="@_messages"
                       PendingApproval="@_pendingApproval"
-                      Disabled="@_loading"
+                      Disabled="@(_loading || _hostHasTakenOver)"
                       Busy="@_busy"
                       Thinking="@_thinking"
                       ShowThoughts="@_showThoughts"
@@ -839,6 +881,29 @@
     /// explicit cancel.
     /// </summary>
     private PendingForceTake? _pendingForceTake;
+
+    /// <summary>
+    /// True when the agent reports this session is currently held by a
+    /// host (a magpilot launcher / CLI take-over). Set in two ways:
+    /// (a) the SSE pump sees a <see cref="ReleaseRequested"/> event,
+    ///     so we proactively yield the session even before the host's
+    ///     acquire-for-host call lands;
+    /// (b) <see cref="OnParametersSetAsync"/> probes
+    ///     <see cref="HubClient.GetStateAsync"/> on session entry and
+    ///     finds <see cref="SessionOwner.Host"/> already.
+    /// While set: the SSE stream is stopped (we'd just see a flat
+    /// stream of nothing once the host detaches us anyway), the
+    /// composer is disabled, and a MudAlert offers a "Take back"
+    /// affordance that runs the same force-acquire-then-release
+    /// dance <see cref="HubClient.ForceTakeOverAndSendAsync"/> uses
+    /// for the prompt path. Cleared by the take-back handler on
+    /// success, by a session navigation, or when a fresh stream
+    /// connects without seeing any release_requested.
+    /// </summary>
+    private bool _hostHasTakenOver;
+    private string? _hostTakeoverRequester;
+    private int? _hostTakeoverPid;
+    private bool _hostTakeBackBusy;
     private string? _streamingFor;
     private int _streamGeneration;
     // Number of consecutive auto-reconnect attempts since the last successful
@@ -1356,6 +1421,13 @@
 
             await StopStreamingAsync();
             _pendingOrphan = null;
+            // Reset host-takeover state for the new session. The flag is
+            // session-scoped: a host might own session A while session B
+            // is freely available, and the takeover banner shouldn't
+            // bleed across the switch.
+            _hostHasTakenOver = false;
+            _hostTakeoverRequester = null;
+            _hostTakeoverPid = null;
 
             var info = _sessions?.FirstOrDefault(s => s.Id == SessionId);
             if (info?.State == SessionState.Locked)
@@ -1369,6 +1441,41 @@
                 _switchingSession = false;
                 StateHasChanged();
                 return;
+            }
+
+            // Probe ownership BEFORE deciding to stream. If a magpilot
+            // launcher already holds the session via acquire-for-host
+            // (a CLI is mid-conversation in a terminal), the agent
+            // returns SessionOwner.Host and any /messages we'd post
+            // would 409. Skip the stream altogether and surface the
+            // takeover alert immediately so the user sees the right
+            // affordance instead of a chat that silently rejects every
+            // send. Best-effort: a /state failure shouldn't block
+            // entering the session -- fall through to normal streaming
+            // and let the SSE pump observe a release_requested if one
+            // arrives later.
+            try
+            {
+                var probedAgent = Agent;
+                var probedSid = SessionId;
+                var state = await Hub.GetStateAsync(probedAgent, probedSid);
+                if (string.Equals(probedAgent, Agent, StringComparison.OrdinalIgnoreCase)
+                    && probedSid == SessionId
+                    && state is { Owner: SessionOwner.Host })
+                {
+                    _hostHasTakenOver = true;
+                    _hostTakeoverPid = state.HostPid;
+                    _hostTakeoverRequester = null; // /state has no requester label
+                    _streamingFor = $"{Agent}/{SessionId}";
+                    _switchingSession = false;
+                    StateHasChanged();
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.LogTrace("State probe for {Agent}/{Sid} failed: {Message}",
+                    Agent, SessionId, ex.Message);
             }
 
             // If we have a cached snapshot AND the session is still loaded
@@ -2327,6 +2434,28 @@
                 break;
             case HeartbeatEvent:
                 break;
+            case ReleaseRequested rr:
+                // An external client (typically a magpilot launcher
+                // running `copilot` in a terminal on the same host) is
+                // requesting we give up this session so it can drive
+                // it. Cooperative protocol: stop our stream, set the
+                // host-took-over flag so the chat-pane renders the
+                // takeover alert + disables the composer. The stream
+                // pump's foreach exits naturally when StopStreamingAsync
+                // cancels the CTS; the auto-reconnect won't fire because
+                // the cancellation is intentional from our side. The
+                // user sees a clear "Take back" affordance and can
+                // resume any time.
+                Log.LogTrace("[stream] release_requested by={Requester} force={Force}",
+                    rr.Requester, rr.Force);
+                _hostHasTakenOver = true;
+                _hostTakeoverRequester = string.IsNullOrWhiteSpace(rr.Requester) ? null : rr.Requester;
+                _streamingAssistant = null;
+                _streamingThought = null;
+                _thinking = false;
+                CancelThinkingDebounce();
+                _ = InvokeAsync(StopStreamingAsync);
+                break;
         }
         StateHasChanged();
     }
@@ -2508,6 +2637,85 @@
     }
 
     private void HandleCancelForceTake() { _pendingForceTake = null; StateHasChanged(); }
+
+    /// <summary>
+    /// Take a session back from a magpilot launcher (CLI) that's
+    /// currently driving it. Wired to the "Take back" button on the
+    /// host-takeover MudAlert. Reuses the same force-acquire-then-
+    /// release dance the prompt-send 409 path uses (acquire-for-host
+    /// with hostPid=0 + force=true, then release(0)) so the agent
+    /// re-adopts the session and our SSE stream / send path go back
+    /// to working. After the dance succeeds we restart streaming
+    /// from cache so the user lands back in the same conversation
+    /// without a load=true replay storm.
+    ///
+    /// The take-back is a forceful operation: any turn the host had
+    /// in flight is interrupted (the launcher's cooperative protocol
+    /// observes a release_requested on its own SSE subscription and
+    /// gracefully shuts down), so this should only run on user
+    /// click, never silently.
+    /// </summary>
+    private async Task HandleTakeBackFromHost()
+    {
+        if (Agent is null || SessionId is null || !_hostHasTakenOver) return;
+        _hostTakeBackBusy = true;
+        StateHasChanged();
+        try
+        {
+            // Polite knock first: broadcast release_requested so the
+            // launcher's SSE subscriber sees the takeover and can
+            // gracefully tear down its PTY (write /exit\r, flush events,
+            // detach). force=true on the request signals "we're going to
+            // take this whether you cooperate or not", which the
+            // wrapper's preemption handler reacts to with no extra
+            // confirmation prompt.
+            await Hub.FireReleaseRequestAsync(Agent, SessionId, requester: "spa", force: true);
+            // Brief grace window so a cooperative launcher's release()
+            // call can land (clears HostOwnership). 1s is comfortably
+            // shorter than a user's "did anything happen?" patience but
+            // long enough for the launcher's SSE foreach + PtyHost
+            // shutdown to fire on a healthy machine.
+            await Task.Delay(1000);
+            // Forceful path -- if the launcher cooperated, this just
+            // confirms ownership is back with the agent. If it didn't
+            // (process hung, no SSE listener, etc.) the force=true
+            // acquire-for-host flips ownership unilaterally and the
+            // immediate release(0) lets the agent re-adopt.
+            await Hub.AcquireForHostAsync(Agent, SessionId, hostPid: 0, force: true);
+            await Hub.ReleaseAsync(Agent, SessionId, hostPid: 0);
+
+            _hostHasTakenOver = false;
+            _hostTakeoverRequester = null;
+            _hostTakeoverPid = null;
+            // Restore from cache if we have one for this session, so
+            // the chat doesn't redraw from scratch. Cache may be empty
+            // if the user opened straight into a host-owned session
+            // (we never streamed it on this tab); in that case
+            // TryLoadTailHistoryAsync paints it from disk events.
+            var key = $"{Agent}/{SessionId}";
+            if (_msgCache.TryGetValue(key, out var cached))
+            {
+                await StartStreamingAsync(load: false, force: false, restoreFrom: cached);
+            }
+            else
+            {
+                var fromDisk = await TryLoadTailHistoryAsync(50);
+                await StartStreamingAsync(load: false, force: false, restoreFrom: fromDisk);
+            }
+        }
+        catch (Exception ex)
+        {
+            HubLog.LogError($"Take-back from host failed: {ex.Message}", ex.ToString(),
+                category: nameof(Home), sessionId: SessionId,
+                extra: new { agent = Agent });
+            Snackbar.Add($"Take back failed: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _hostTakeBackBusy = false;
+            StateHasChanged();
+        }
+    }
 
     /// <summary>
     /// User-driven reconnect from the AppBar pill or the Offline alert.
