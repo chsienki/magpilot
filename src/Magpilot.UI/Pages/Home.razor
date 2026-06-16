@@ -24,54 +24,30 @@
         <MudText Typo="Typo.h6" Class="ml-1 mr-4">Magpilot</MudText>
         @if (Agent is not null)
         {
-            @* The host pill is redundant when the drawer is open (the
-               sessions-pane header has its own HostName at the top
-               left). Below MudBlazor's Lg breakpoint the drawer is a
-               temporary overlay that's normally hidden, so the AppBar
-               surface is the only place to identify the current host;
-               show it there. The breadcrumb + stream status icon
-               below stay visible at all sizes -- they're not
-               duplicated by the drawer at any breakpoint.
+            @* The host pill always shows in the AppBar -- it's the
+               authoritative live-status indicator (green dot when
+               connected, amber spinner when reconnecting, red
+               CloudOff when offline). Even when the drawer is open
+               in wide view (which has its own host name in the
+               sessions header), the AppBar pill stays visible so the
+               status is always at-a-glance reachable from the top
+               chrome.
 
                The pill renders as a transparent-fill outlined chip
-               whose border colour tracks the live SSE-stream state
-               (green = connected, amber = reconnecting, red =
-               offline) so the same visual cue is encoded twice: once
-               in the inline status dot and once in the surrounding
-               border. Use body2 inside the chip to match standard
-               MudBlazor chip typography. *@
-            <MudHidden Breakpoint="Breakpoint.LgAndUp">
-                <HostName Agent="@Agent"
-                          Online="@(_agents?.FirstOrDefault(a => a.Name == Agent)?.Online)"
-                          Color="@AppBarHostColor()"
-                          StatusText="@AppBarHostStatusText()"
-                          Outlined="true" />
-            </MudHidden>
+               whose border colour matches the dot/spinner/icon, so
+               state transitions read both from the inline glyph and
+               from the surrounding border. *@
+            <HostName Agent="@Agent"
+                      Online="@(_agents?.FirstOrDefault(a => a.Name == Agent)?.Online)"
+                      Color="@AppBarHostColor()"
+                      StatusText="@AppBarHostStatusText()"
+                      Indeterminate="@(SessionId is not null && _streamStatus == StreamStatus.Reconnecting)"
+                      Outlined="true" />
             @if (_currentSessionTitle is not null)
             {
                 <MudIcon Icon="@Icons.Material.Filled.ChevronRight" Size="Size.Small" Class="mx-1" />
                 <MudText Typo="Typo.body2" Class="text-truncate" Style="max-width: 40vw;"
                          title="@_currentSessionTitle">@_currentSessionTitle</MudText>
-            }
-            @if (SessionId is not null)
-            {
-                <MudTooltip Text="@StreamStatusTooltip()">
-                    @switch (_streamStatus)
-                    {
-                        case StreamStatus.Connected:
-                            <MudIcon Icon="@Icons.Material.Filled.Circle" Color="Color.Success" Size="Size.Small" Class="ml-2" />
-                            break;
-                        case StreamStatus.Reconnecting:
-                            <MudProgressCircular Color="Color.Warning" Size="Size.Small" Indeterminate="true" Class="ml-2" />
-                            break;
-                        case StreamStatus.Offline:
-                            <MudIconButton Icon="@Icons.Material.Filled.CloudOff"
-                                           Color="Color.Error" Size="Size.Small" Class="ml-2"
-                                           OnClick="HandleReconnectClick"
-                                           aria-label="Reconnect" />
-                            break;
-                    }
-                </MudTooltip>
             }
         }
         <MudSpacer />
@@ -174,10 +150,12 @@
                                    OnClick="@GoBackToHosts"
                                    aria-label="Back to hosts" />
                 </MudTooltip>
-                <HostName Agent="@Agent"
-                          Online="@(_agents?.FirstOrDefault(a => a.Name == Agent)?.Online)"
-                          TextTypo="Typo.subtitle1"
-                          Class="ml-1" />
+                @* Drawer header just identifies the host by name; the
+                   AppBar pill (always visible above) is the live
+                   stream-status indicator, so we don't double up the
+                   dot/spinner/icon glyph here. *@
+                <MudText Typo="Typo.subtitle1" Class="ml-1 text-truncate"
+                         Style="min-width: 0;" title="@Agent">@Agent</MudText>
                 <MudSpacer />
                 <MudTooltip Text="Refresh session list">
                     <MudIconButton Icon="@Icons.Material.Filled.Refresh"

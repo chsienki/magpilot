@@ -18,9 +18,30 @@
 
 <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center"
           Class="@CombinedClass" Style="@CombinedStyle">
-    <MudTooltip Text="@StatusTooltip" Placement="Placement.Bottom">
-        <MudIcon Icon="@StatusIcon" Color="@EffectiveColor" Size="@IconSize" />
-    </MudTooltip>
+    @* Fixed-size flex slot so the static dot, the indeterminate
+       spinner, and the CloudOff offline glyph all occupy the same
+       visual footprint, all sharing the same vertical baseline as
+       the host name. font-size + width/height use !important
+       because Mud's mud-icon-size-* and mud-progress-circular-*
+       classes have higher specificity than a plain inline style.
+       Native title attribute (rather than MudTooltip) avoids the
+       extra inline-block wrapper Mud's tooltip injects, which adds
+       ~3px of vertical space and breaks slot-vs-text centering. *@
+    <span class="d-inline-flex align-center justify-center"
+          style="width: 1rem; height: 1rem; flex-shrink: 0; line-height: 1;"
+          title="@StatusTooltip">
+        @if (Indeterminate)
+        {
+            <MudProgressCircular Color="@EffectiveColor" Indeterminate="true"
+                                 Style="width: 1rem !important; height: 1rem !important;"
+                                 StrokeWidth="4" />
+        }
+        else
+        {
+            <MudIcon Icon="@StatusIcon" Color="@EffectiveColor"
+                     Style="font-size: 1rem !important; width: 1rem !important; height: 1rem !important; line-height: 1;" />
+        }
+    </span>
     <MudText Typo="@TextTypo" Class="text-truncate" Style="min-width: 0;" title="@Agent">@Agent</MudText>
 </MudStack>
 
@@ -58,6 +79,16 @@
     /// </summary>
     [Parameter] public bool Outlined { get; set; }
 
+    /// <summary>
+    /// When true, the status dot is replaced with an indeterminate
+    /// MudProgressCircular in the same colour. Use this to convey
+    /// "the state is in flux and actively converging" -- e.g. an SSE
+    /// stream that is reconnecting -- so the visual encodes both the
+    /// colour (which state we're heading to) and the motion (we're
+    /// not stuck, we're trying).
+    /// </summary>
+    [Parameter] public bool Indeterminate { get; set; }
+
     /// <summary>Forwarded to the inner MudIcon. Defaults to Small.</summary>
     [Parameter] public Size IconSize { get; set; } = Size.Small;
 
@@ -70,10 +101,23 @@
     private MudBlazor.Color EffectiveColor =>
         Color ?? (Online == true ? MudBlazor.Color.Success : MudBlazor.Color.Default);
 
-    private string StatusIcon =>
-        EffectiveColor == MudBlazor.Color.Default
-            ? Icons.Material.Filled.RadioButtonUnchecked
-            : Icons.Material.Filled.RadioButtonChecked;
+    private string StatusIcon
+    {
+        get
+        {
+            // Error state gets a distinctive "no connection" glyph so
+            // offline reads at a glance without relying on colour
+            // alone (and to mirror the previous standalone indicator
+            // we removed from the AppBar). All other states share
+            // the radio-button dot so the spinner-vs-dot transition
+            // is the only motion: dot -> spinner -> CloudOff.
+            if (EffectiveColor == MudBlazor.Color.Error)
+                return Icons.Material.Filled.CloudOff;
+            return EffectiveColor == MudBlazor.Color.Default
+                ? Icons.Material.Filled.RadioButtonUnchecked
+                : Icons.Material.Filled.RadioButtonChecked;
+        }
+    }
 
     private string StatusTooltip => StatusText
         ?? (Online switch
