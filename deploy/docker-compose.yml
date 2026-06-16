@@ -80,6 +80,13 @@ services:
       WATCHTOWER_POLL_INTERVAL: "300"   # 5 minutes
       WATCHTOWER_CLEANUP: "true"        # gc the previous image after a successful pull
       WATCHTOWER_INCLUDE_RESTARTING: "true"
+      # Pin the docker client API version watchtower advertises. The
+      # default in containrrr/watchtower:latest's bundled docker SDK
+      # is 1.25 (very old), but recent dockerd builds (e.g. the LXC's
+      # 1.54) have dropped support for clients below 1.40. Without
+      # this pin watchtower's polling loop logs "client version 1.25
+      # is too old" every ~2s and never actually checks for updates.
+      DOCKER_API_VERSION: "1.41"
       # Restart-policy nicety: if the hub is mid-restart for an unrelated
       # reason when we poll, treat it as if it were running -- otherwise
       # we'd skip the update on this cycle and the user has to wait
