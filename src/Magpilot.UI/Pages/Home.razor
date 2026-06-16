@@ -207,6 +207,27 @@
                     }
                 </MudList>
             }
+            else if (_sessionsListFailed)
+            {
+                @* Reachability error: the most recent ListSessionsAsync
+                   call to this host failed. Don't show the "No sessions
+                   yet -- Start one" empty state because we don't actually
+                   know whether the host has sessions; it's just
+                   unreachable. The button retries via the same path as
+                   the drawer header refresh icon. *@
+                <MudPaper Class="mx-3 my-3 pa-3 d-flex flex-column align-center" Elevation="0">
+                    <MudIcon Icon="@Icons.Material.Filled.CloudOff" Size="Size.Large" Color="Color.Error" />
+                    <MudText Typo="Typo.body2" Class="my-2" Color="Color.Default" Align="Align.Center">
+                        Couldn't reach @Agent.<br />Sessions can't be loaded right now.
+                    </MudText>
+                    <MudButton Variant="Variant.Filled" Color="Color.Primary"
+                               StartIcon="@Icons.Material.Filled.Refresh"
+                               Disabled="@_sessionsRefreshing"
+                               OnClick="@RefreshSessions">
+                        Try again
+                    </MudButton>
+                </MudPaper>
+            }
             else if (_sessions.Count == 0)
             {
                 <MudPaper Class="mx-3 my-3 pa-3 d-flex flex-column align-center" Elevation="0">
@@ -1060,8 +1081,14 @@
             // Refresh the session list so the row immediately reflects the
             // new Dormant state -- otherwise an immediate re-entry would
             // route through the "Owned + cache present" branch and skip
-            // the necessary session/load.
-            try { _sessions = await Hub.ListSessionsAsync(agent); }
+            // the necessary session/load. Guard against a host switch
+            // landing between the detach and the refresh response.
+            try
+            {
+                var fresh = await Hub.ListSessionsAsync(agent);
+                if (string.Equals(agent, Agent, StringComparison.OrdinalIgnoreCase))
+                    _sessions = fresh;
+            }
             catch (Exception listEx)
             {
                 HubLog.LogWarning($"ListSessionsAsync after detach failed: {listEx.Message}",
@@ -1172,12 +1199,25 @@
             }
             else
             {
+                // Capture Agent before the await. If the user switches
+                // hosts mid-flight, by the time the call resolves
+                // `Agent` may already point at a different host -- we
+                // must not store a stale response under the wrong key.
+                var agentBeforeAwait = Agent;
                 try
                 {
-                    _sessions = await Hub.ListSessionsAsync(Agent);
-                    _lastLoadedAgent = Agent;
+                    var fresh = await Hub.ListSessionsAsync(agentBeforeAwait);
+                    if (string.Equals(agentBeforeAwait, Agent, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _sessions = fresh;
+                        _lastLoadedAgent = Agent;
+                        _sessionsListFailed = false;
+                    }
+                    // else: dropped on the floor; the newer
+                    // OnParametersSetAsync invocation will own the
+                    // _sessions assignment.
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (string.Equals(agentBeforeAwait, Agent, StringComparison.OrdinalIgnoreCase))
                 {
                     HubLog.LogError($"ListSessionsAsync failed for {Agent}: {ex.Message}", ex.ToString(),
                         category: nameof(Home), sessionId: SessionId,
@@ -1189,6 +1229,13 @@
                     // now. Surface a single clear error instead of letting
                     // the SSE pump retry 8x.
                     _routeError = "agent-offline";
+                }
+                catch (Exception ex)
+                {
+                    // Agent changed mid-flight; just log and drop.
+                    HubLog.LogWarning(
+                        $"ListSessionsAsync for {agentBeforeAwait} failed after switch to {Agent}: {ex.Message}",
+                        category: nameof(Home));
                 }
             }
         }
@@ -1484,25 +1531,49 @@
     /// spinner flicker). Used by the auto-refresh triggers --
     /// TurnComplete + tab-visibility -- to pick up name changes
     /// from `/rename` and other CLI-side mutations without the user
-    /// having to click anything. Silent on failure: a transient
-    /// /api/sessions blip during background refresh shouldn't pop
-    /// a snackbar.
+    /// having to click anything.
+    ///
+    /// On success: clears <see cref="_sessionsListFailed"/> and any
+    /// previous "agent-offline" route error so a drawer-side recovery
+    /// also drops the main-content error page.
+    ///
+    /// On failure: flags <see cref="_sessionsListFailed"/> + sets
+    /// "agent-offline" route error so all surfaces (drawer + main
+    /// content + AppBar pill) reflect the same reachability state.
+    /// Doesn't pop a snackbar -- callers that want explicit user
+    /// feedback (the manual refresh button) handle that themselves.
     /// </summary>
     private async Task RefreshSessionsSilentAsync()
     {
         if (Agent is null) return;
+        // Same agent-mismatch guard as OnParametersSetAsync: a refresh
+        // can outlive a host switch, and we must not let a stale
+        // response overwrite the new host's session list.
+        var agentBeforeAwait = Agent;
         try
         {
-            var fresh = await Hub.ListSessionsAsync(Agent);
+            var fresh = await Hub.ListSessionsAsync(agentBeforeAwait);
+            if (!string.Equals(agentBeforeAwait, Agent, StringComparison.OrdinalIgnoreCase))
+                return;
             _sessions = fresh;
+            _sessionsListFailed = false;
+            if (_routeError == "agent-offline") _routeError = null;
+            StateHasChanged();
+        }
+        catch (Exception ex) when (string.Equals(agentBeforeAwait, Agent, StringComparison.OrdinalIgnoreCase))
+        {
+            HubLog.LogWarning(
+                $"Auto-refresh of sessions failed for {Agent}: {ex.Message}",
+                category: nameof(Home), extra: new { agent = Agent });
+            _sessionsListFailed = true;
+            _routeError ??= "agent-offline";
             StateHasChanged();
         }
         catch (Exception ex)
         {
             HubLog.LogWarning(
-                $"Auto-refresh of sessions failed for {Agent}: {ex.Message}",
-                category: nameof(Home), extra: new { agent = Agent });
-            // No snackbar -- the user didn't trigger this.
+                $"Auto-refresh of sessions for {agentBeforeAwait} failed after switch to {Agent}: {ex.Message}",
+                category: nameof(Home));
         }
     }
 
@@ -1662,12 +1733,23 @@
             _newSessionOpen = false;
             Nav.NavigateTo($"/agents/{Agent}/sessions/{s.Id}");
             // Reconcile in the background to pick up server-filled fields.
+            // Capture Agent before the await so a host switch mid-fetch
+            // doesn't cause us to land the new agent's data under the
+            // wrong host.
+            var agentForReconcile = Agent;
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    var fresh = await Hub.ListSessionsAsync(Agent);
-                    await InvokeAsync(() => { _sessions = fresh; StateHasChanged(); });
+                    var fresh = await Hub.ListSessionsAsync(agentForReconcile);
+                    await InvokeAsync(() =>
+                    {
+                        if (string.Equals(agentForReconcile, Agent, StringComparison.OrdinalIgnoreCase))
+                        {
+                            _sessions = fresh;
+                            StateHasChanged();
+                        }
+                    });
                 }
                 catch { }
             });
@@ -1682,19 +1764,22 @@
     private async Task NewSession()
     {
         if (Agent is null) return;
+        var agentBeforeAwait = Agent;
         try
         {
-            var s = await Hub.NewSessionAsync(Agent, null);
+            var s = await Hub.NewSessionAsync(agentBeforeAwait, null);
             if (s is not null)
             {
-                _sessions = await Hub.ListSessionsAsync(Agent);
-                Nav.NavigateTo($"/agents/{Agent}/sessions/{s.Id}");
+                var fresh = await Hub.ListSessionsAsync(agentBeforeAwait);
+                if (string.Equals(agentBeforeAwait, Agent, StringComparison.OrdinalIgnoreCase))
+                    _sessions = fresh;
+                Nav.NavigateTo($"/agents/{agentBeforeAwait}/sessions/{s.Id}");
             }
         }
         catch (Exception ex)
         {
             HubLog.LogError($"NewSession failed: {ex.Message}", ex.ToString(),
-                category: nameof(Home), extra: new { agent = Agent });
+                category: nameof(Home), extra: new { agent = agentBeforeAwait });
         }
     }
 
@@ -1947,6 +2032,10 @@
         if (load)
         {
             // After load completes, refresh the session list so the badge updates.
+            // The local `agent` variable is the one captured at the start of
+            // StartStreamingAsync; check it still matches the current Agent
+            // before assigning so a host switch mid-load doesn't poison the
+            // list with the previous host's data.
             _ = Task.Run(async () =>
             {
                 while (!ct.IsCancellationRequested && _loading)
@@ -1954,7 +2043,14 @@
                 try
                 {
                     var fresh = await Hub.ListSessionsAsync(agent, ct);
-                    await InvokeAsync(() => { _sessions = fresh; StateHasChanged(); });
+                    await InvokeAsync(() =>
+                    {
+                        if (string.Equals(agent, Agent, StringComparison.OrdinalIgnoreCase))
+                        {
+                            _sessions = fresh;
+                            StateHasChanged();
+                        }
+                    });
                 }
                 catch { }
             }, ct);
@@ -2434,6 +2530,12 @@
                 _                         => Color.Default,
             };
         }
+        // No active session -- reflect the most recent reachability
+        // signal. The hub's discovery probe (registry.Online flag) can
+        // lag real state by a probe interval, so when our last direct
+        // ListSessionsAsync attempt failed we trust that more recent
+        // signal over the registry.
+        if (_sessionsListFailed) return Color.Error;
         var online = _agents?.FirstOrDefault(a => a.Name == Agent)?.Online;
         return online == true ? Color.Success : Color.Default;
     }
@@ -2444,6 +2546,8 @@
     {
         if (SessionId is not null)
             return $"{Agent} - {StreamStatusTooltip()}";
+        if (_sessionsListFailed)
+            return $"{Agent} is unreachable";
         var online = _agents?.FirstOrDefault(a => a.Name == Agent)?.Online;
         return online switch
         {
