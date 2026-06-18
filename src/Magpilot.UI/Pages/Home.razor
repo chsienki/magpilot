@@ -1430,30 +1430,19 @@
             _hostTakeoverPid = null;
 
             var info = _sessions?.FirstOrDefault(s => s.Id == SessionId);
-            if (info?.State == SessionState.Locked)
-            {
-                // Show confirmation; user must click "Adopt" to proceed.
-                // Drop the switch-loading bar -- we're done switching;
-                // the user is now mid-decision in the Adopt dialog and
-                // an Indeterminate bar would imply work is in flight.
-                _pendingOrphan = info;
-                _streamingFor = $"{Agent}/{SessionId}";
-                _switchingSession = false;
-                StateHasChanged();
-                return;
-            }
 
-            // Probe ownership BEFORE deciding to stream. If a magpilot
-            // launcher already holds the session via acquire-for-host
-            // (a CLI is mid-conversation in a terminal), the agent
-            // returns SessionOwner.Host and any /messages we'd post
-            // would 409. Skip the stream altogether and surface the
-            // takeover alert immediately so the user sees the right
-            // affordance instead of a chat that silently rejects every
-            // send. Best-effort: a /state failure shouldn't block
-            // entering the session -- fall through to normal streaming
-            // and let the SSE pump observe a release_requested if one
-            // arrives later.
+            // Probe ownership BEFORE the SessionInfo.State branching. If a
+            // magpilot launcher already holds the session via acquire-for-host,
+            // /api/sessions sees the launcher's interactive copilot lock
+            // and reports SessionState.Locked (foreign PID alive, not in
+            // _owned) -- but the agent's HostOwnership map reports
+            // Owner=Host. Without this ordering the Locked branch below
+            // would fire first and surface a "Kill PID and adopt" dialog
+            // for the user's OWN terminal copilot, when the cooperative
+            // "Take back" affordance is the correct UX. /state is cheap;
+            // a failure shouldn't block entering the session -- fall
+            // through to the normal Locked / streaming paths and let the
+            // SSE pump observe a release_requested if one arrives later.
             try
             {
                 var probedAgent = Agent;
@@ -1476,6 +1465,19 @@
             {
                 Log.LogTrace("State probe for {Agent}/{Sid} failed: {Message}",
                     Agent, SessionId, ex.Message);
+            }
+
+            if (info?.State == SessionState.Locked)
+            {
+                // Show confirmation; user must click "Adopt" to proceed.
+                // Drop the switch-loading bar -- we're done switching;
+                // the user is now mid-decision in the Adopt dialog and
+                // an Indeterminate bar would imply work is in flight.
+                _pendingOrphan = info;
+                _streamingFor = $"{Agent}/{SessionId}";
+                _switchingSession = false;
+                StateHasChanged();
+                return;
             }
 
             // If we have a cached snapshot AND the session is still loaded
