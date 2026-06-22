@@ -55,6 +55,17 @@ public sealed class PtyHost : IAsyncDisposable
             Environment = new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["TERM"] = Environment.GetEnvironmentVariable("TERM") ?? "xterm-256color",
+                // Hint truecolor support so the child uses themed 24-bit RGB
+                // sequences instead of falling back to ANSI 16-color bright
+                // variants. Most modern terminals (Windows Terminal, alacritty,
+                // iTerm, WezTerm, ...) support truecolor, but few set
+                // COLORTERM explicitly -- so an app that checks env (chalk,
+                // ansicolors, supports-color, etc.) sees an empty COLORTERM
+                // under ConPTY and downgrades to bright-16, which the user's
+                // theme then renders saturated/wrong. If the parent process
+                // already has COLORTERM set we honour it; otherwise force
+                // truecolor as the safe default.
+                ["COLORTERM"] = Environment.GetEnvironmentVariable("COLORTERM") ?? "truecolor",
                 // Pass through everything else from our process.
             },
         };
