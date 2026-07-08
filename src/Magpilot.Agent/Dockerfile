@@ -31,10 +31,12 @@ FROM mcr.microsoft.com/dotnet/aspnet:${DOTNET_RUNTIME} AS runtime
 
 # Install Node.js 22 (Copilot CLI prerequisite) + git/curl/openssh-client/ca-certs
 # + ffmpeg (audio transcoding for voice tools / Wyoming pipeline)
+# + poppler-utils (pdftotext -- lets any agent extract text from PDF
+#   attachments the user drops on disk; ~5 MB layer, no runtime cost)
 # + pwsh (PowerShell 7, required by plugins that ship .ps1 scripts -- e.g.
 #   the task-context plugin's list-contexts.ps1).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg git openssh-client tini procps ffmpeg \
+        ca-certificates curl gnupg git openssh-client tini procps ffmpeg poppler-utils \
  && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && curl -fsSL https://packages.microsoft.com/config/debian/12/packages-microsoft-prod.deb \
