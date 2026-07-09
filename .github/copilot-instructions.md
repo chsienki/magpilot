@@ -392,6 +392,9 @@ with the installed agent" above.
 | `MAGPILOT_AGENT_URL` | magpilot launcher | Default `http://127.0.0.1:5099`. Where the wrapper reaches its local agent. |
 | `MAGPILOT_REAL_COPILOT` | magpilot launcher (optional) | Explicit path to the real `copilot` binary. Useful when the wrapper is on PATH and you want to override the autodetect of the real copilot binary. |
 | `MAGPILOT_ENV_FILE` | agent + launcher (optional) | Explicit path to `magpilot.env` instead of the installer-layout default (`<install>\config\magpilot.env`). The agent reads it on startup; the launcher's `--magpilot-pair=<bundle>` writes to it. When set, `--magpilot-pair` skips the scheduled-task bounce so dev / test runs don't accidentally kill an unrelated installed agent. |
+| `MAGPILOT_TERM_BACKGROUND` | magpilot launcher (optional) | `auto` (default), `dark`, or `light`. Controls the `COLORFGBG` hint the launcher passes to copilot so its TUI themes for the right background. See "Terminal theming" below. |
+| `MAGPILOT_TERM_ENABLE_GITHUB_THEME` | magpilot launcher (optional) | `1` (default) / `0`. When on, sets `COPILOT_GITHUB_THEME=1` for the child so copilot's GitHub colour mode is selectable in its own `/theme` picker. |
+| `MAGPILOT_TERM_THEME` / `MAGPILOT_TERM_THEME_FILE` | magpilot launcher (optional) | Name of a palette file at `<install>\config\themes\<name>.json`, or an explicit path. Enables ANSI-palette colour overrides. See "Terminal theming" below. |
 
 ## Windows packaging + autoupdate
 
@@ -456,6 +459,53 @@ the launcher can show its banner without `MAGPILOT_AGENT_TOKEN` set.
 
 The banner check fires on **every** non-help, non-skip-check invocation
 with a 500ms timeout. Failures are silent. See `Magpilot.Host/UpdateBanner.cs`.
+
+### Terminal theming (local client)
+
+The launcher wraps copilot in a ConPTY (`Magpilot.Host/PtyHost.cs`). copilot
+renders its own TUI, so the launcher can only influence colours two ways:
+**environment hints** it passes to the child, and **OSC sequences** it
+injects into the real terminal around copilot's output. It never writes
+copilot's own config -- env + the byte stream is the clean ring boundary.
+
+Theming applies on **both** launch paths (`TerminalTheming.cs` is the shared
+applier): the ConPTY host, and the transparent direct-exec passthrough
+(`--magpilot-skip-check` and the agent-unreachable fallback, in
+`Program.ExecRealCopilotAsync`). The only difference is background detection
+(point 1 below).
+
+Three things happen at spawn (helpers in `TerminalColor.cs` /
+`TerminalThemeConfig.cs` / `TerminalBackgroundProbe.cs`):
+
+1. **Background detection -> `COLORFGBG`.** copilot's default colour mode is
+   `auto`, which emits `OSC 11` (`ESC]11;?`) to ask the terminal for its
+   background and adapt dark/light. **Under the ConPTY** that query never
+   reaches the outer terminal, so copilot times out and mis-themes; the host
+   runs the OSC 11 probe itself, computes dark/light from the reply's
+   luminance, and passes copilot the answer via `COLORFGBG` (copilot's
+   documented fallback). **In direct-exec** copilot inherits the real
+   terminal and its own probe works, so we do NOT probe and only pin
+   `COLORFGBG` when the user forced `MAGPILOT_TERM_BACKGROUND=dark|light` --
+   and note copilot's live OSC 11 wins over `COLORFGBG` there, so to force a
+   background in passthrough use the theme file's `background` (which actually
+   recolours the terminal) rather than the pin.
+2. **Palette overrides (`OSC 4`/`10`/`11`).** A theme JSON at
+   `<install>\config\themes\<name>.json` (selected by `MAGPILOT_TERM_THEME`,
+   or an explicit `MAGPILOT_TERM_THEME_FILE`) remaps ANSI-16 palette entries +
+   fg/bg on the real terminal at startup and resets them (`OSC 104/110/111`)
+   on exit. This recolours copilot's base-16 (`default`) theme output;
+   truecolor themes emit fixed RGB and are unaffected. Shape:
+   `{ "palette": { "0": "#1e1e1e", "4": "#3b8eea" }, "foreground": "#d4d4d4", "background": "#1e1e1e" }`.
+3. **GitHub theme flag.** `COPILOT_GITHUB_THEME=1` is set by default so the
+   GitHub colour mode is a pickable option in copilot's own `/theme`.
+
+`COLORTERM=truecolor` is also forced (has been) so the child emits 24-bit RGB
+instead of downgrading to bright-16 under an empty ConPTY `COLORTERM`.
+
+Pure logic (OSC parsing, luminance, sequence generation, theme-file parsing)
+is unit-tested in `tests/Magpilot.Host.Tests` (not in `Magpilot.slnx`; run
+`dotnet test tests/Magpilot.Host.Tests`). An integration test drives a stub
+through a real ConPTY to confirm `COLORFGBG` actually reaches the child.
 
 ### Installer
 

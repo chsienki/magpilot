@@ -256,11 +256,27 @@ static async Task<int> ExecRealCopilotAsync(IReadOnlyList<string> forwardArgs, A
     };
     foreach (var a in forwardArgs) psi.ArgumentList.Add(a);
 
-    using var p = Process.Start(psi)
-        ?? throw new InvalidOperationException($"Failed to start {copilotPath}");
-    await p.WaitForExitAsync();
-    agentClient?.Dispose();
-    return p.ExitCode;
+    // Apply terminal theming here too, so the agentless passthrough
+    // (--magpilot-skip-check, or the agent-unreachable fallback) still gets
+    // palette overrides + the GitHub theme flag. copilot inherits the real
+    // terminal here, so its own OSC 11 background probe works -- we only pin
+    // COLORFGBG when the user forced dark/light, and never run our own probe.
+    var theme = TerminalThemeConfig.Load();
+    TerminalTheming.PopulateChildEnv(psi.Environment!, theme, TerminalTheming.PinnedBackground(theme));
+    var resetColors = TerminalTheming.ApplyPalette(theme);
+
+    try
+    {
+        using var p = Process.Start(psi)
+            ?? throw new InvalidOperationException($"Failed to start {copilotPath}");
+        await p.WaitForExitAsync();
+        agentClient?.Dispose();
+        return p.ExitCode;
+    }
+    finally
+    {
+        if (resetColors) TerminalTheming.ResetPalette();
+    }
 }
 
 static async Task<int> RunSessionLoopAsync(AgentClient agent, string sid, WrapperOptions opts)
