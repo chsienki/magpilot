@@ -463,19 +463,25 @@ with a 500ms timeout. Failures are silent. See `Magpilot.Host/UpdateBanner.cs`.
 ### Terminal theming (local client)
 
 The launcher wraps copilot in a ConPTY (`Magpilot.Host/PtyHost.cs`). copilot
-renders its own TUI, so the launcher can only influence colours two ways:
-**environment hints** it passes to the child, and **OSC sequences** it
-injects into the real terminal around copilot's output. It never writes
-copilot's own config -- env + the byte stream is the clean ring boundary.
+renders its own TUI, so the launcher only influences colours three ways:
+**environment hints** it passes to the child, **OSC sequences** it injects
+into the real terminal around copilot's output, and **byte-stream rewrites**
+of copilot's output as it flows through the PTY. It never writes copilot's
+own config -- env + the byte stream is the clean ring boundary.
 
-Theming applies on **both** launch paths (`TerminalTheming.cs` is the shared
-applier): the ConPTY host, and the transparent direct-exec passthrough
-(`--magpilot-skip-check` and the agent-unreachable fallback, in
-`Program.ExecRealCopilotAsync`). The only difference is background detection
-(point 1 below).
+Three launch paths, with different reach:
 
-Three things happen at spawn (helpers in `TerminalColor.cs` /
-`TerminalThemeConfig.cs` / `TerminalBackgroundProbe.cs`):
+- **ConPTY host** (agent coordination) and **PTY passthrough**
+  (`Program.RunPassthroughAsync`, used when there's no agent token or the
+  agent is unreachable, so plain `magpilot` works standalone): full theming
+  including the byte-stream rewrites.
+- **direct-exec** (`--magpilot-skip-check`, or any redirected-stdio case):
+  env + OSC theming only -- copilot owns the TTY directly, so there's no
+  stream for the launcher to rewrite. (`TerminalTheming.cs` is the shared
+  env+OSC applier for all paths.)
+
+What happens at spawn (helpers: `TerminalColor.cs` / `TerminalThemeConfig.cs`
+/ `TerminalBackgroundProbe.cs` / `AnsiColorRewriter.cs`):
 
 1. **Background detection -> `COLORFGBG`.** copilot's default colour mode is
    `auto`, which emits `OSC 11` (`ESC]11;?`) to ask the terminal for its
@@ -495,17 +501,41 @@ Three things happen at spawn (helpers in `TerminalColor.cs` /
    fg/bg on the real terminal at startup and resets them (`OSC 104/110/111`)
    on exit. This recolours copilot's base-16 (`default`) theme output;
    truecolor themes emit fixed RGB and are unaffected. Shape:
-   `{ "palette": { "0": "#1e1e1e", "4": "#3b8eea" }, "foreground": "#d4d4d4", "background": "#1e1e1e" }`.
+   `{ "palette": { "0": "#1e1e1e", "4": "#3b8eea" }, "foreground": "#d4d4d4", "background": "#1e1e1e", "thinking": "#7c8a8a", "inputBand": "#073642" }`.
 3. **GitHub theme flag.** `COPILOT_GITHUB_THEME=1` is set by default so the
    GitHub colour mode is a pickable option in copilot's own `/theme`.
+4. **Byte-stream rewrites (`AnsiColorRewriter`, PTY paths only).** Two things
+   copilot renders that the palette can't reach, each opt-in via a theme-file
+   key:
+   - `"thinking"`: copilot draws reasoning text with the terminal's **faint**
+     attribute (SGR 2, ~half the foreground brightness -- unreadable on dark
+     backgrounds, and not a palette colour). The rewriter turns SGR `2` into
+     `38;2;R;G;B` (the thinking colour at full intensity) and SGR `22` into
+     `22;39`. This decouples the reasoning colour from the foreground.
+   - `"inputBand"`: copilot's composer surface (`backgroundSecondary`) is a
+     fixed grey `#202020` from copilot's own ramp, not the terminal palette.
+     It appears as a background (the fill) and as a foreground (the halfblock
+     box edges), so the rewriter retargets **both** `48;2;32;32;32` and
+     `38;2;32;32;32` to the input-band colour. Only `#202020` is matched, so
+     diff / selection / link colours are untouched (`#202020` is too dark to
+     ever be real text). The rewriter is an incremental SGR parser that
+     survives escapes split across read buffers; it's careful to skip the
+     literal `2`/`5` inside `38;2;...` / `38;5;...` selectors.
 
 `COLORTERM=truecolor` is also forced (has been) so the child emits 24-bit RGB
 instead of downgrading to bright-16 under an empty ConPTY `COLORTERM`.
 
-Pure logic (OSC parsing, luminance, sequence generation, theme-file parsing)
-is unit-tested in `tests/Magpilot.Host.Tests` (not in `Magpilot.slnx`; run
-`dotnet test tests/Magpilot.Host.Tests`). An integration test drives a stub
-through a real ConPTY to confirm `COLORFGBG` actually reaches the child.
+**Diagnostics for tuning a theme against copilot's real output:**
+`MAGPILOT_TERM_DUMP=<path>` tees copilot's raw (pre-rewrite) output to a file;
+`MAGPILOT_TERM_DUMP_POST=<path>` tees what actually reaches the terminal
+(post-rewrite). Both are in the PtyHost output pump. Parse them for `48;2;` /
+`38;2;` sequences to find the exact colours copilot emits for an element.
+
+Pure logic (OSC parsing, luminance, sequence generation, theme-file parsing,
+the SGR rewriter) is unit-tested in `tests/Magpilot.Host.Tests` (not in
+`Magpilot.slnx`; run `dotnet test tests/Magpilot.Host.Tests`). An integration
+test drives a stub through a real ConPTY to confirm `COLORFGBG` reaches the
+child.
 
 ### Installer
 

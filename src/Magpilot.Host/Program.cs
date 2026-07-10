@@ -67,11 +67,12 @@ try
 {
     agent = new AgentClient();
 }
-catch (InvalidOperationException ex)
+catch (InvalidOperationException)
 {
-    // Missing token etc. -- this is user error, not agent down.
-    Console.Error.WriteLine($"magpilot: {ex.Message}");
-    return 2;
+    // No agent token configured. Rather than erroring, run standalone: the
+    // user still gets the enhanced PTY experience (terminal theming +
+    // thinking-colour rewrite), just without agent session coordination.
+    return await RunPassthroughAsync(opts);
 }
 
 try
@@ -85,9 +86,9 @@ catch (Exception firstPingEx)
     if (!started)
     {
         Console.Error.WriteLine($"magpilot: agent unreachable ({agent.BaseUrl}: {firstPingEx.GetType().Name}: {firstPingEx.Message}).");
-        Console.Error.WriteLine("magpilot: falling through. Use --magpilot-skip-check to silence.");
+        Console.Error.WriteLine("magpilot: running without agent coordination. Use --magpilot-skip-check to silence.");
         agent.Dispose();
-        return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null);
+        return await RunPassthroughAsync(opts);
     }
 
     // Agent came up; verify the bearer still works (rare second failure).
@@ -100,7 +101,7 @@ catch (Exception firstPingEx)
     {
         Console.Error.WriteLine($"magpilot: agent answered /healthz but auth ping failed: {secondPingEx.Message}");
         agent.Dispose();
-        return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null);
+        return await RunPassthroughAsync(opts);
     }
 }
 
@@ -234,6 +235,29 @@ return await RunSessionLoopAsync(agent, sid, opts);
 // ----------------------------------------------------------------------
 // Helpers
 // ----------------------------------------------------------------------
+
+static async Task<int> RunPassthroughAsync(WrapperOptions opts)
+{
+    // Run copilot without agent coordination, but still through the PTY when
+    // we own a real terminal -- that's what gives the enhanced experience
+    // (terminal theming + the thinking-colour rewrite, both in PtyHost).
+    // Redirected stdio can't be hosted in a PTY, so fall back to a
+    // transparent direct exec there (e.g. `echo /help | magpilot`).
+    var canPty = !Console.IsInputRedirected && !Console.IsOutputRedirected;
+    if (!canPty)
+        return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null);
+
+    string copilotPath;
+    try { copilotPath = CopilotLocator.Find(); }
+    catch (FileNotFoundException ex)
+    {
+        Console.Error.WriteLine($"magpilot: {ex.Message}");
+        return 127;
+    }
+
+    await using var host = await PtyHost.SpawnAsync(copilotPath, opts.ForwardArgs, Environment.CurrentDirectory);
+    return await host.ExitTask;
+}
 
 static async Task<int> ExecRealCopilotAsync(IReadOnlyList<string> forwardArgs, AgentClient? agentClient)
 {

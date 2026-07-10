@@ -19,15 +19,17 @@ public sealed class PtyHost : IAsyncDisposable
     private readonly IPtyConnection _conn;
     private readonly RawConsoleMode _raw;
     private readonly bool _resetColorsOnDispose;
+    private readonly AnsiColorRewriter? _rewriter;
     private readonly CancellationTokenSource _cts = new();
     private readonly TaskCompletionSource _exited = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<int> _exitCode = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    private PtyHost(IPtyConnection conn, RawConsoleMode raw, bool resetColorsOnDispose)
+    private PtyHost(IPtyConnection conn, RawConsoleMode raw, bool resetColorsOnDispose, AnsiColorRewriter? rewriter)
     {
         _conn = conn;
         _raw  = raw;
         _resetColorsOnDispose = resetColorsOnDispose;
+        _rewriter = rewriter;
         _conn.ProcessExited += (_, e) =>
         {
             _exitCode.TrySetResult(e.ExitCode);
@@ -96,6 +98,16 @@ public sealed class PtyHost : IAsyncDisposable
         // copilot's GitHub colour mode in its own /theme picker.
         TerminalTheming.PopulateChildEnv(env, theme, isDark);
 
+        // If the theme configures a "thinking" colour or an "inputBand"
+        // colour, rewrite copilot's output byte stream to honour them:
+        // faint (SGR 2) -> the thinking colour (copilot renders reasoning
+        // faint, unreadable on dark backgrounds and not palette-fixable),
+        // and copilot's fixed composer-band background -> the input-band
+        // colour (it's baked into copilot's theme, not the terminal palette).
+        var rewriter = theme.Thinking is not null || theme.InputBand is not null
+            ? new AnsiColorRewriter(theme.Thinking, theme.InputBand)
+            : null;
+
         var options = new PtyOptions
         {
             Name = "magpilot-pty",
@@ -109,7 +121,7 @@ public sealed class PtyHost : IAsyncDisposable
 
         var conn = await PtyProvider.SpawnAsync(options, ct);
 
-        var host = new PtyHost(conn, raw, resetColorsOnDispose);
+        var host = new PtyHost(conn, raw, resetColorsOnDispose, rewriter);
         host.StartPumps();
         host.StartResizeWatcher();
         return host;
@@ -122,18 +134,47 @@ public sealed class PtyHost : IAsyncDisposable
         {
             var stdout = Console.OpenStandardOutput();
             var buf = new byte[4096];
+            // Diagnostics: MAGPILOT_TERM_DUMP tees copilot's RAW output
+            // (pre-rewrite); MAGPILOT_TERM_DUMP_POST tees what actually
+            // reaches the terminal (post-rewrite). For inspecting escape
+            // sequences when tuning the theme.
+            Stream? dump = null, dumpPost = null;
+            var dumpPath = Environment.GetEnvironmentVariable("MAGPILOT_TERM_DUMP");
+            if (!string.IsNullOrEmpty(dumpPath))
+                try { dump = File.Create(dumpPath); } catch { /* diagnostics are best-effort */ }
+            var dumpPostPath = Environment.GetEnvironmentVariable("MAGPILOT_TERM_DUMP_POST");
+            if (!string.IsNullOrEmpty(dumpPostPath))
+                try { dumpPost = File.Create(dumpPostPath); } catch { /* diagnostics are best-effort */ }
             try
             {
                 while (!_cts.IsCancellationRequested)
                 {
                     var n = await _conn.ReaderStream.ReadAsync(buf.AsMemory(), _cts.Token);
                     if (n <= 0) break;
-                    await stdout.WriteAsync(buf.AsMemory(0, n), _cts.Token);
+                    if (dump is not null)
+                    {
+                        await dump.WriteAsync(buf.AsMemory(0, n), _cts.Token);
+                        await dump.FlushAsync(_cts.Token);
+                    }
+                    ReadOnlyMemory<byte> outMem = _rewriter is not null
+                        ? _rewriter.Transform(buf.AsSpan(0, n))
+                        : buf.AsMemory(0, n);
+                    if (dumpPost is not null)
+                    {
+                        await dumpPost.WriteAsync(outMem, _cts.Token);
+                        await dumpPost.FlushAsync(_cts.Token);
+                    }
+                    await stdout.WriteAsync(outMem, _cts.Token);
                     await stdout.FlushAsync(_cts.Token);
                 }
             }
             catch (OperationCanceledException) { }
             catch (Exception) { /* pty closed */ }
+            finally
+            {
+                if (dump is not null) await dump.DisposeAsync();
+                if (dumpPost is not null) await dumpPost.DisposeAsync();
+            }
         });
 
         // Input pump: stdin -> PTY
