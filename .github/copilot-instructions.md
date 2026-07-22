@@ -1847,3 +1847,5 @@ Open items:
 - 2026-06-15: chat-pane hierarchy refactor -- thinking should not dominate, tool calls should attach to assistant turns. Three independent design critiques (Claude Opus / GPT-5.4 / Gemini 3.1 Pro) all flagged the same root issue: thinking blocks (italic walls), assistant turns, and tool-call chips use near-identical containers, so the eye can't infer "what happened" vs "what was thinking" vs "what tools ran" at a glance. Punch list with concrete fixes saved as a session-state artifact.
 - 2026-06-15: AppBar duplicates the host name (pill + breadcrumb + drawer header). HENDRIK appears in three places; pick one source of truth (likely keep the pill as the live-status surface and drop the breadcrumb prefix).
 - 2026-06-15: vertical alignment of the chat-toolbar toggles vs the release icon -- "Show thinking" + "YOLO" toggles on the left don't share a baseline with the Logout / release icon on the right.
+- 2026-06-13: ability to upload screenshots
+- 2026-06-13: oauth callbacks -- a local extra server the PC instance runs so the SPA can intercept and forward the callback back to the agent
