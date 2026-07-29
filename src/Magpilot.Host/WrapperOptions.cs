@@ -31,6 +31,8 @@ public sealed record WrapperOptions(
     bool PairDiscover,
     /// <summary>One-shot: register an already-running copilot session as host-owned (no spawn).</summary>
     string? Claim,
+    /// <summary>Wrap copilot in Microsoft's <c>agency</c> CLI (<c>agency copilot</c>) so the interactive session runs with agency's curated MCP servers + tooling.</summary>
+    bool Agency,
     /// <summary>Argv with all <c>--magpilot-*</c> flags stripped, ready to forward to the real copilot binary.</summary>
     IReadOnlyList<string> ForwardArgs)
 {
@@ -43,6 +45,7 @@ public sealed record WrapperOptions(
         string? pair = null;
         var pairDiscover = false;
         string? claim = null;
+        var agency = false;
         var forward = new List<string>(argv.Length);
 
         foreach (var a in argv)
@@ -62,6 +65,7 @@ public sealed record WrapperOptions(
                 case "--magpilot-version":         version = true; break;
                 case "--magpilot-update":          update = true; break;
                 case "--magpilot-pair":            pairDiscover = true; break;
+                case "--magpilot-agency":          agency = true; break;
                 default:
                     if (a.StartsWith("--magpilot-claim=", StringComparison.Ordinal))
                     {
@@ -84,7 +88,7 @@ public sealed record WrapperOptions(
         if (take && noTake)
             throw new ArgumentException("Contradictory flags: --magpilot-take (or --magpilot-force) and --magpilot-no-take both set.");
 
-        return new WrapperOptions(take, force, noTake, skipCheck, exitOnHandoff, status, help, version, update, pair, pairDiscover, claim, forward);
+        return new WrapperOptions(take, force, noTake, skipCheck, exitOnHandoff, status, help, version, update, pair, pairDiscover, claim, agency, forward);
     }
 
     /// <summary>
@@ -167,12 +171,21 @@ public sealed record WrapperOptions(
           --magpilot-claim=<sid>       one-shot: register a stranded already-running copilot session
                                        as host-owned in the agent (no spawn). The agent's PID-liveness
                                        sweep handles cleanup when the copilot child eventually exits.
+          --magpilot-agency            wrap copilot in Microsoft's agency CLI (agency copilot) so the
+                                       session runs with agency's curated MCP servers + tooling. Extra
+                                       args are handed to agency, which routes its own flags (-a,
+                                       --profile, --no-default-mcps, ...) and passes the rest through to
+                                       copilot (--resume, --add-dir, ...). Full coordination when
+                                       resuming a known session id; a fresh agency session may register
+                                       late (agency spawns copilot as a child, so post-spawn PID
+                                       detection can fall back) and briefly show as Locked in the SPA.
           --magpilot-help              print this help and exit
 
         Env:
           MAGPILOT_AGENT_URL           default http://127.0.0.1:5099
           MAGPILOT_AGENT_TOKEN         required for state/acquire/release ops (the bearer shared with the agent)
           MAGPILOT_REAL_COPILOT        explicit path to the real copilot binary (optional)
+          MAGPILOT_AGENCY              explicit path to the agency binary (optional; used by --magpilot-agency)
 
         Combinations:
           --magpilot-skip-check        wins over everything else

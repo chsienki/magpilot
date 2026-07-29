@@ -50,7 +50,7 @@ if (opts.Claim is not null)
 // --magpilot-skip-check wins over everything: degrade to a transparent
 // pass-through that just exec's the real copilot.
 if (opts.SkipCheck)
-    return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null);
+    return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null, opts.Agency);
 
 // Best-effort: ask the local agent if a newer release is out and surface
 // it as a one-line banner. Fast (~500ms cap), silent on every error path,
@@ -133,7 +133,7 @@ if (string.IsNullOrEmpty(sid))
         // Non-interactive: just exec copilot. No coordination, but the
         // user didn't ask for it.
         agent.Dispose();
-        return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null);
+        return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null, opts.Agency);
     }
     // No specific session known up front. Spawn copilot in a PTY and
     // post-spawn-detect whichever session it ends up holding (fresh,
@@ -149,7 +149,7 @@ catch (Exception ex)
 {
     Console.Error.WriteLine($"magpilot: GET /state failed ({ex.GetType().Name}: {ex.Message}). Falling through.");
     agent.Dispose();
-    return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null);
+    return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null, opts.Agency);
 }
 
 if (state is null)
@@ -245,24 +245,24 @@ static async Task<int> RunPassthroughAsync(WrapperOptions opts)
     // transparent direct exec there (e.g. `echo /help | magpilot`).
     var canPty = !Console.IsInputRedirected && !Console.IsOutputRedirected;
     if (!canPty)
-        return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null);
+        return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null, opts.Agency);
 
-    string copilotPath;
-    try { copilotPath = CopilotLocator.Find(); }
+    string exe; IReadOnlyList<string> argv;
+    try { (exe, argv) = CopilotLaunch.Resolve(opts.Agency, opts.ForwardArgs); }
     catch (FileNotFoundException ex)
     {
         Console.Error.WriteLine($"magpilot: {ex.Message}");
         return 127;
     }
 
-    await using var host = await PtyHost.SpawnAsync(copilotPath, opts.ForwardArgs, Environment.CurrentDirectory);
+    await using var host = await PtyHost.SpawnAsync(exe, argv, Environment.CurrentDirectory);
     return await host.ExitTask;
 }
 
-static async Task<int> ExecRealCopilotAsync(IReadOnlyList<string> forwardArgs, AgentClient? agentClient)
+static async Task<int> ExecRealCopilotAsync(IReadOnlyList<string> forwardArgs, AgentClient? agentClient, bool agency)
 {
-    string copilotPath;
-    try { copilotPath = CopilotLocator.Find(); }
+    string exe; IReadOnlyList<string> argv;
+    try { (exe, argv) = CopilotLaunch.Resolve(agency, forwardArgs); }
     catch (FileNotFoundException ex)
     {
         Console.Error.WriteLine($"magpilot: {ex.Message}");
@@ -271,14 +271,14 @@ static async Task<int> ExecRealCopilotAsync(IReadOnlyList<string> forwardArgs, A
 
     var psi = new ProcessStartInfo
     {
-        FileName = copilotPath,
+        FileName = exe,
         UseShellExecute = false,
         // Inherit our stdin/stdout/stderr so copilot owns the TTY directly.
         RedirectStandardInput  = false,
         RedirectStandardOutput = false,
         RedirectStandardError  = false,
     };
-    foreach (var a in forwardArgs) psi.ArgumentList.Add(a);
+    foreach (var a in argv) psi.ArgumentList.Add(a);
 
     // Apply terminal theming here too, so the agentless passthrough
     // (--magpilot-skip-check, or the agent-unreachable fallback) still gets
@@ -292,7 +292,7 @@ static async Task<int> ExecRealCopilotAsync(IReadOnlyList<string> forwardArgs, A
     try
     {
         using var p = Process.Start(psi)
-            ?? throw new InvalidOperationException($"Failed to start {copilotPath}");
+            ?? throw new InvalidOperationException($"Failed to start {exe}");
         await p.WaitForExitAsync();
         agentClient?.Dispose();
         return p.ExitCode;
@@ -305,8 +305,9 @@ static async Task<int> ExecRealCopilotAsync(IReadOnlyList<string> forwardArgs, A
 
 static async Task<int> RunSessionLoopAsync(AgentClient agent, string sid, WrapperOptions opts)
 {
-    string copilotPath;
-    try { copilotPath = CopilotLocator.Find(); }
+    IReadOnlyList<string> copilotArgs = WithResumeFlag(opts.ForwardArgs, sid);
+    string exe; IReadOnlyList<string> argv;
+    try { (exe, argv) = CopilotLaunch.Resolve(opts.Agency, copilotArgs); }
     catch (FileNotFoundException ex)
     {
         Console.Error.WriteLine($"magpilot: {ex.Message}");
@@ -318,10 +319,6 @@ static async Task<int> RunSessionLoopAsync(AgentClient agent, string sid, Wrappe
 
     while (true)
     {
-        // Build copilot argv: forward whatever the user passed, ensuring
-        // --resume=<sid> is in there exactly once.
-        var argv = WithResumeFlag(opts.ForwardArgs, sid);
-
         // Spawn copilot inside a PTY. PtyHost wires up stdin/stdout
         // pumping and puts our terminal in raw mode so copilot's TUI
         // sees keystrokes verbatim. Disposing the PtyHost restores the
@@ -329,7 +326,7 @@ static async Task<int> RunSessionLoopAsync(AgentClient agent, string sid, Wrappe
         PtyHost copilotHost;
         try
         {
-            copilotHost = await PtyHost.SpawnAsync(copilotPath, argv, Environment.CurrentDirectory);
+            copilotHost = await PtyHost.SpawnAsync(exe, argv, Environment.CurrentDirectory);
         }
         catch (Exception ex)
         {
@@ -460,8 +457,8 @@ static IReadOnlyList<string> WithResumeFlag(IReadOnlyList<string> forwardArgs, s
 /// </summary>
 static async Task<int> RunSessionLoopWithDetectionAsync(AgentClient agent, WrapperOptions opts)
 {
-    string copilotPath;
-    try { copilotPath = CopilotLocator.Find(); }
+    string exe; IReadOnlyList<string> argv;
+    try { (exe, argv) = CopilotLaunch.Resolve(opts.Agency, opts.ForwardArgs); }
     catch (FileNotFoundException ex)
     {
         Console.Error.WriteLine($"magpilot: {ex.Message}");
@@ -474,7 +471,7 @@ static async Task<int> RunSessionLoopWithDetectionAsync(AgentClient agent, Wrapp
     PtyHost copilotHost;
     try
     {
-        copilotHost = await PtyHost.SpawnAsync(copilotPath, opts.ForwardArgs, Environment.CurrentDirectory);
+        copilotHost = await PtyHost.SpawnAsync(exe, argv, Environment.CurrentDirectory);
     }
     catch (Exception ex)
     {
@@ -494,6 +491,11 @@ static async Task<int> RunSessionLoopWithDetectionAsync(AgentClient agent, Wrapp
         // from the agent's POV, the sweep only cares that *something*
         // alive owns the session). Once registration completes, we
         // start listening for release_requested SSE events.
+        //
+        // Under --magpilot-agency the PTY child is agency, not copilot, so
+        // copilotHost.Pid won't match copilot's inuse.<pid>.lock; detection
+        // then leans on the mtime fallback and may miss a brand-new agency
+        // session (it stays Locked until adopted from the SPA).
         //
         // The detection task runs concurrently with copilot's TUI, so any
         // diagnostics it produces must be deferred -- writing to stderr

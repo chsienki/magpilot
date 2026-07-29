@@ -618,7 +618,11 @@ with other sidecars. Magpilot doesn't need to know you exist.
   process and the Copilot CLI child. One ACP child can host many sessions.
 - **Flavor** -- which kind of Copilot child to spawn. `default` is plain
   `copilot --acp`. `agency` is `agency.exe copilot ... --acp` (Windows
-  only, Microsoft-internal MCPs).
+  only, Microsoft-internal MCPs). The agent picks a flavor per session via
+  the `useAgency` field on `POST /api/sessions`; the **launcher** offers the
+  same wrapping for interactive terminal sessions via `--magpilot-agency`
+  (`agency copilot <args>` -- agency routes its own flags and passes the
+  rest through to copilot; default MCPs on, no `--acp`).
 - **Pinned session** -- a long-lived session that survives many
   conversations and many restarts. Created once, adopted on each restart.
 - **Adopt** -- bring a dormant session back online by respawning ACP wiring

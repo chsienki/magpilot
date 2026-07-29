@@ -456,6 +456,7 @@ the launcher can show its banner without `MAGPILOT_AGENT_TOKEN` set.
 | `magpilot --magpilot-version` | Print local + agent-reported version info |
 | `magpilot --magpilot-update` | Download + run the latest installer silently (validates SHA256 against the GitHub release asset) |
 | `magpilot --magpilot-pair=<bundle>` | Pair the agent with a hub. `<bundle>` is copied from the hub's `/admin/enroll` page; the launcher decodes it, upserts the three keys into `magpilot.env`, and bounces the installed scheduled task. |
+| `magpilot --magpilot-agency` | Wrap the interactive session in Microsoft's `agency` CLI (`agency copilot`) so it runs with agency's curated MCP servers + tooling. Copilot still runs underneath, so the session is agent-coordinated + hub-visible; a fresh (no-sid) agency session may register late because the PTY child is `agency`, not `copilot` (see `CopilotLaunch` / `AgencyLocator`). |
 | `magpilot --magpilot-help` | Wrapper-only flag help |
 
 The banner check fires on **every** non-help, non-skip-check invocation
