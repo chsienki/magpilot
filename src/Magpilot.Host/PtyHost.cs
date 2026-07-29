@@ -1,3 +1,4 @@
+using Magpilot.Shared;
 using Pty.Net;
 
 namespace Magpilot.Host;
@@ -20,16 +21,18 @@ public sealed class PtyHost : IAsyncDisposable
     private readonly RawConsoleMode _raw;
     private readonly bool _resetColorsOnDispose;
     private readonly AnsiColorRewriter? _rewriter;
+    private readonly BannerTagInjector? _banner;
     private readonly CancellationTokenSource _cts = new();
     private readonly TaskCompletionSource _exited = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<int> _exitCode = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    private PtyHost(IPtyConnection conn, RawConsoleMode raw, bool resetColorsOnDispose, AnsiColorRewriter? rewriter)
+    private PtyHost(IPtyConnection conn, RawConsoleMode raw, bool resetColorsOnDispose, AnsiColorRewriter? rewriter, BannerTagInjector? banner)
     {
         _conn = conn;
         _raw  = raw;
         _resetColorsOnDispose = resetColorsOnDispose;
         _rewriter = rewriter;
+        _banner = banner;
         _conn.ProcessExited += (_, e) =>
         {
             _exitCode.TrySetResult(e.ExitCode);
@@ -108,6 +111,10 @@ public sealed class PtyHost : IAsyncDisposable
             ? new AnsiColorRewriter(theme.Thinking, theme.InputBand)
             : null;
 
+        // Brand copilot's startup banner with the magpilot version. On by
+        // default; MAGPILOT_TERM_BANNER_TAG overrides the text or suppresses it.
+        var banner = ResolveBannerTag() is { } tag ? new BannerTagInjector(tag) : null;
+
         var options = new PtyOptions
         {
             Name = "magpilot-pty",
@@ -121,10 +128,25 @@ public sealed class PtyHost : IAsyncDisposable
 
         var conn = await PtyProvider.SpawnAsync(options, ct);
 
-        var host = new PtyHost(conn, raw, resetColorsOnDispose, rewriter);
+        var host = new PtyHost(conn, raw, resetColorsOnDispose, rewriter, banner);
         host.StartPumps();
         host.StartResizeWatcher();
         return host;
+    }
+
+    // Resolves the tag appended to copilot's startup banner ("... uses AI.").
+    // Default (unset env) brands the session with the magpilot version. A
+    // custom MAGPILOT_TERM_BANNER_TAG value is inserted verbatim (so the caller
+    // controls spacing); "0"/"off"/"false"/"none"/"no" or empty suppresses it.
+    private static string? ResolveBannerTag()
+    {
+        var raw = Environment.GetEnvironmentVariable("MAGPILOT_TERM_BANNER_TAG");
+        if (raw is null)
+            return $" (Magpilot v{Versioning.AssemblyVersion})";
+        var t = raw.Trim().ToLowerInvariant();
+        if (t.Length == 0 || t is "0" or "off" or "false" or "none" or "no")
+            return null;
+        return raw;
     }
 
     private void StartPumps()
@@ -156,9 +178,14 @@ public sealed class PtyHost : IAsyncDisposable
                         await dump.WriteAsync(buf.AsMemory(0, n), _cts.Token);
                         await dump.FlushAsync(_cts.Token);
                     }
-                    ReadOnlyMemory<byte> outMem = _rewriter is not null
-                        ? _rewriter.Transform(buf.AsSpan(0, n))
-                        : buf.AsMemory(0, n);
+                    // Banner tag first (matches copilot's raw "uses AI."),
+                    // then colour rewrites. The injected tag is plain text,
+                    // so the SGR rewriter passes it through untouched.
+                    ReadOnlyMemory<byte> outMem = buf.AsMemory(0, n);
+                    if (_banner is not null)
+                        outMem = _banner.Transform(outMem.Span);
+                    if (_rewriter is not null)
+                        outMem = _rewriter.Transform(outMem.Span);
                     if (dumpPost is not null)
                     {
                         await dumpPost.WriteAsync(outMem, _cts.Token);

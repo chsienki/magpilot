@@ -395,6 +395,7 @@ with the installed agent" above.
 | `MAGPILOT_TERM_BACKGROUND` | magpilot launcher (optional) | `auto` (default), `dark`, or `light`. Controls the `COLORFGBG` hint the launcher passes to copilot so its TUI themes for the right background. See "Terminal theming" below. |
 | `MAGPILOT_TERM_ENABLE_GITHUB_THEME` | magpilot launcher (optional) | `1` (default) / `0`. When on, sets `COPILOT_GITHUB_THEME=1` for the child so copilot's GitHub colour mode is selectable in its own `/theme` picker. |
 | `MAGPILOT_TERM_THEME` / `MAGPILOT_TERM_THEME_FILE` | magpilot launcher (optional) | Name of a palette file at `<install>\config\themes\<name>.json`, or an explicit path. Enables ANSI-palette colour overrides. See "Terminal theming" below. |
+| `MAGPILOT_TERM_BANNER_TAG` | magpilot launcher (optional) | Text appended after copilot's `uses AI.` startup banner. Default `(Magpilot v<version>)`; set a custom string (inserted verbatim, so include your own leading space) or `0`/`off`/`false`/`none`/empty to suppress. PTY paths only. See "Terminal theming" below. |
 
 ## Windows packaging + autoupdate
 
@@ -521,6 +522,17 @@ What happens at spawn (helpers: `TerminalColor.cs` / `TerminalThemeConfig.cs`
      ever be real text). The rewriter is an incremental SGR parser that
      survives escapes split across read buffers; it's careful to skip the
      literal `2`/`5` inside `38;2;...` / `38;5;...` selectors.
+5. **Banner tag (`BannerTagInjector`, PTY paths only).** copilot opens a
+   session with `Copilot v<ver> uses AI.` drawn in a fixed grey; the injector
+   watches for the stable `uses AI.` phrase and appends the magpilot version
+   right after it (e.g. `... uses AI. (Magpilot v0.1.13)`), so a wrapped
+   session is visibly branded. Incremental (survives the anchor split across
+   reads) and latches after the first hit, so conversation text that later
+   says "uses AI." is untouched. The tag carries no colour of its own, so it
+   inherits the banner grey. On by default; `MAGPILOT_TERM_BANNER_TAG`
+   overrides the text (inserted verbatim) or suppresses it
+   (`0`/`off`/`false`/`none`/empty). Unlike the colour rewrites it is **not**
+   theme-file-gated -- it's branding, not theming.
 
 `COLORTERM=truecolor` is also forced (has been) so the child emits 24-bit RGB
 instead of downgrading to bright-16 under an empty ConPTY `COLORTERM`.
