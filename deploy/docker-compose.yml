@@ -20,6 +20,11 @@
 #   MAGPILOT_HUB_BEARER=<secret used by agents+sidecars to POST /api/log>
 #
 # Optional env:
+#   MAGPILOT_HUB_PUBLIC_URL=https://magpilot.example -- externally-reachable
+#     hub URL embedded in enrollment bundles so paired agents call back on
+#     the NPM/TLS address (reachable over WireGuard on 443) instead of the
+#     raw http://<lan-ip>:7088 fallback, which a WireGuard-only agent can't
+#     reach outbound. Recommended for any NPM-fronted deployment.
 #   MAGPILOT_HUB_COOKIE_DOMAIN=<e.g. .your-domain.example> -- widens the
 #     auth cookie's Domain attribute to share sign-in across satellite SPAs
 #     on sibling subdomains. Leave unset for plain single-host setups.
@@ -53,6 +58,7 @@ services:
       MAGPILOT_HUB_BEARER: ${MAGPILOT_HUB_BEARER:?set MAGPILOT_HUB_BEARER in .env}
       MAGPILOT_HUB_COOKIE_DOMAIN: ${MAGPILOT_HUB_COOKIE_DOMAIN:-}
       MAGPILOT_HUB_TRUSTED_PROXIES: ${MAGPILOT_HUB_TRUSTED_PROXIES:-127.0.0.1,::1}
+      MAGPILOT_HUB_PUBLIC_URL: ${MAGPILOT_HUB_PUBLIC_URL:-}
       OAUTH_CLIENT_ID: ${OAUTH_CLIENT_ID:-}
       OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET:-}
       OAUTH_ALLOWED_GITHUB_USERS: ${OAUTH_ALLOWED_GITHUB_USERS:-}
