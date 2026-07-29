@@ -71,13 +71,16 @@ Responsibilities:
 
 - Serves the **Blazor WebAssembly SPA** (the wwwroot is built into the hub
   image at compile time -- no separate static-host needed).
-- Holds the **agent registry**: a list of online agents with their URL,
-  bearer token, capability flavors, and last-heartbeat timestamp. Lives
-  in-memory; rebuilt from UDP discovery + manual `/api/agents` POSTs.
+- Holds the **agent registry**: known per-host agents with their URL,
+  bearer token, capability flavors, enrollment lineage, and
+  last-heartbeat timestamp. SQLite-backed (`hub.db`) so it survives a
+  hub restart; the UDP discovery sweep refreshes URL + flavors for
+  reachable LAN agents on each pass.
 - Performs **agent discovery** every N seconds: broadcasts a UDP probe on
-  port 47823. Online agents reply with `{name, url, flavors}`. Cross-subnet
-  hosts (Sandbox VM on a WireGuard /32) don't get the broadcast and are
-  registered manually.
+  port 47823. Online agents reply with `{name, url, flavors}`. A
+  WireGuard-only host (e.g. Sandbox on a `/32`) never receives the
+  broadcast, so its URL and flavors are seeded once in `hub.db` and
+  persist across restarts + re-pairs.
 - **Proxies** SPA-initiated calls to the right agent: browser hits
   `https://magpilot.../api/agents/magnus/sessions`, hub looks up `magnus`
   in the registry, forwards the call with the agent bearer token.

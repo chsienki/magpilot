@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Magpilot.Shared.Models;
 
@@ -108,6 +109,23 @@ public sealed class AgentRegistry
         AddColumnIfMissing(c, "agents", "enrolled_at", "INTEGER");
         AddColumnIfMissing(c, "agents", "enrolled_via", "INTEGER");
         AddColumnIfMissing(c, "agents", "revoked_at", "INTEGER");
+        // Advertised ACP flavors as a JSON array. The UDP discovery
+        // sweep keeps this fresh for LAN agents, but a WireGuard-only
+        // agent is never discovered, so persisting the column lets its
+        // capabilities (e.g. "agency") be seeded once and survive
+        // restarts + re-pairs instead of being lost with the in-memory
+        // registry.
+        AddColumnIfMissing(c, "agents", "flavors", "TEXT");
+    }
+
+    private static string? SerializeFlavors(IReadOnlyList<string>? flavors) =>
+        flavors is null ? null : JsonSerializer.Serialize(flavors);
+
+    private static IReadOnlyList<string>? ParseFlavors(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try { return JsonSerializer.Deserialize<List<string>>(json); }
+        catch (JsonException) { return null; }
     }
 
     /// <summary>
@@ -138,7 +156,7 @@ public sealed class AgentRegistry
         using var c = new SqliteConnection(ConnString);
         c.Open();
         using var cmd = c.CreateCommand();
-        cmd.CommandText = "SELECT name, url, token, last_seen, enrolled_at, revoked_at FROM agents";
+        cmd.CommandText = "SELECT name, url, token, last_seen, enrolled_at, revoked_at, flavors FROM agents";
         using var r = cmd.ExecuteReader();
         while (r.Read())
         {
@@ -151,7 +169,8 @@ public sealed class AgentRegistry
                 : DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(4));
             var revokedAt = r.IsDBNull(5) ? (DateTimeOffset?)null
                 : DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(5));
-            _agents[name] = new AgentInfo(name, url, false, null, lastSeen, null, enrolledAt, revokedAt);
+            var flavors = r.IsDBNull(6) ? null : ParseFlavors(r.GetString(6));
+            _agents[name] = new AgentInfo(name, url, false, null, lastSeen, flavors, enrolledAt, revokedAt);
             if (token is not null) _tokens[name] = token;
         }
         _logger.LogInformation("Loaded {N} agents from {Db}", _agents.Count, _dbPath);
@@ -253,16 +272,18 @@ public sealed class AgentRegistry
         c.Open();
         using var cmd = c.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO agents (name, url, token, last_seen)
-            VALUES ($name, $url, $token, $ts)
+            INSERT INTO agents (name, url, token, last_seen, flavors)
+            VALUES ($name, $url, $token, $ts, $flavors)
             ON CONFLICT(name) DO UPDATE SET url=excluded.url,
               token = COALESCE(excluded.token, agents.token),
-              last_seen = excluded.last_seen
+              last_seen = excluded.last_seen,
+              flavors = COALESCE(excluded.flavors, agents.flavors)
         """;
         cmd.Parameters.AddWithValue("$name", name);
         cmd.Parameters.AddWithValue("$url", url);
         cmd.Parameters.AddWithValue("$token", (object?)token ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$ts", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        cmd.Parameters.AddWithValue("$flavors", (object?)SerializeFlavors(resolvedFlavors) ?? DBNull.Value);
         cmd.ExecuteNonQuery();
     }
 
@@ -331,7 +352,7 @@ public sealed class AgentRegistry
         c.Open();
         using var cmd = c.CreateCommand();
         cmd.CommandText = """
-            SELECT url, token, last_seen, enrolled_at, revoked_at
+            SELECT url, token, last_seen, enrolled_at, revoked_at, flavors
             FROM agents WHERE name = $n
         """;
         cmd.Parameters.AddWithValue("$n", name);
@@ -345,10 +366,11 @@ public sealed class AgentRegistry
             : DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(3));
         var revokedAt = r.IsDBNull(4) ? (DateTimeOffset?)null
             : DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(4));
+        var dbFlavors = r.IsDBNull(5) ? null : ParseFlavors(r.GetString(5));
         lock (_lock)
         {
             var prevFlavors = _agents.TryGetValue(name, out var prev) ? prev.Flavors : null;
-            _agents[name] = new AgentInfo(name, url, false, null, lastSeen, prevFlavors, enrolledAt, revokedAt);
+            _agents[name] = new AgentInfo(name, url, false, null, lastSeen, dbFlavors ?? prevFlavors, enrolledAt, revokedAt);
             if (token is not null) _tokens[name] = token;
             else _tokens.Remove(name);
         }

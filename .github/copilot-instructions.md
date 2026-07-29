@@ -920,12 +920,25 @@ rather than spawn parallel implementations.
 * **`AgentRegistry.AddColumnIfMissing(conn, table, column, type)`** --
   the idempotent schema-migration helper. Probes `PRAGMA
   table_info`, only runs the `ALTER TABLE` when the column is
-  genuinely absent. Used three times in `InitDb` today
-  (`enrolled_at`, `enrolled_via`, `revoked_at`); any new
+  genuinely absent. Used four times in `InitDb` today
+  (`enrolled_at`, `enrolled_via`, `revoked_at`, `flavors`); any new
   agents / vouchers / claims column goes through here. Default-NULL
   semantics mean pre-migration rows stay valid, so you can ship
   the column without a downtime. Don't write bare `ALTER TABLE`
   in `InitDb` -- it'll throw on the second startup.
+
+  > **WireGuard agents can't be discovered, so seed their registry
+  > columns by hand.** UDP discovery (`DiscoveryProber` broadcast) is
+  > the only thing that refreshes an agent's `url` + `flavors`, and it
+  > can't cross a WG point-to-point tunnel. Both columns are persisted
+  > in `agents` so a WG-only agent (Sandbox, a Dev Box) is a one-time
+  > `UPDATE agents SET url=..., flavors='["default","agency"]' WHERE
+  > name=...` + hub restart (the registry reads these only in `Load()`
+  > / `Reload()`). Voucher redeem preserves a non-empty `url`
+  > (`CASE WHEN excluded.url=''...`) and never writes `flavors`, so a
+  > re-pair won't clobber either seed. `flavors` is a JSON array
+  > (`SerializeFlavors` / `ParseFlavors`); the SPA gates the "Wrap with
+  > agency" checkbox on `Flavors.Contains("agency")`.
 
 * **`Proxy(name, reg, ...)` in `HubEndpoints`** -- the single
   choke point for every per-agent-name HTTP route on the hub.
