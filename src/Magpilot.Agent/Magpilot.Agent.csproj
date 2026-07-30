@@ -4,6 +4,10 @@
     <ProjectReference Include="..\Magpilot.Shared\Magpilot.Shared.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Magpilot.Agent.Tests" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
     <Nullable>enable</Nullable>

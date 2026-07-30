@@ -80,6 +80,12 @@ src/
                                       filesystem inuse.lock files are
                                       advisory (see "lock files are NOT
                                       a mutex" gotcha below).
+    Sessions/HostOwnershipReconciler.cs <- BackgroundService: rebuilds the
+                                      map from live process ancestry so an
+                                      agent restart doesn't strand launcher
+                                      sessions as "kill to unlock".
+    Sessions/ProcessAncestry.cs    <- Toolhelp process-tree walk backing the
+                                      reconciler (find a `magpilot` ancestor).
     Sessions/HistoryReader.cs      <- reads events.jsonl directly so the
                                       SPA can rehydrate Owned-without-cache
     Logging/HubLoggerProvider.cs   <- mirrors Warning+ to hub /api/log/batch
@@ -1305,9 +1311,25 @@ Owned=0, Locked=1, Dormant=2.)
 > launcher was still driving it. On load each entry is revalidated:
 > the holder PID must be alive AND its process start time must match
 > the one captured at acquire (a PID-reuse guard); mismatches are
-> dropped. Sessions started under an agent that predates this
-> persistence, or while the agent was down, still aren't recovered --
-> nothing persisted them -- but every subsequent restart is safe.
+> dropped.
+>
+> **`HostOwnershipReconciler` (agent `BackgroundService`) closes the
+> remaining gap: sessions the persisted map never recorded** -- ones
+> started by a launcher that predates persistence, or while the agent
+> was down. On startup (after `HostOwnership.Load`) and on a ~60s
+> sweep it enumerates `SessionScanner.Root`, and for every live
+> foreign `inuse.<pid>.lock` not already Host-owned it walks the
+> process tree up from the lock PID (`ProcessAncestry`, a Toolhelp
+> snapshot). If a process named `magpilot` (the launcher;
+> `AssemblyName=magpilot`) is an ancestor, it `HostOwnership.Set`s the
+> session to that launcher PID. This is safe because the agent's own
+> `copilot --acp` child is parented under `Magpilot.Agent` (not
+> `magpilot`) and a bare terminal copilot under a shell, so neither
+> false-matches. Under `--magpilot-agency` the chain is
+> `magpilot -> agency -> copilot`, still a walkable descendant. No
+> SPA/`SessionInfo`/`GetState` change is needed: once the map is
+> populated, `GET /state` reports `owner: "Host"` and the SPA's
+> existing `/state`-on-open path stops showing "kill to unlock".
 
 `UpdatedAt` is derived from the latest mtime between `events.jsonl`
 and `workspace.yaml`. **Do NOT** trust the `updated_at` field inside
@@ -1351,7 +1373,8 @@ is connected, so the cache is safe as last-word for `Owned`.
 When the agent restarts, sessions the agent itself drove become
 Dormant/Locked and get a fresh `session/load` on next visit;
 sessions a `magpilot` launcher is driving stay Host-owned because
-`HostOwnership` is reloaded from disk on startup (see "Session
+`HostOwnership` is reloaded from disk on startup AND rebuilt from live
+process ancestry by `HostOwnershipReconciler` (see "Session
 classification and ownership").
 
 ### SPA pitfall: there is NO bare `HttpClient` in the WASM container
@@ -1470,6 +1493,22 @@ detection (no sid, picker, --continue) -- fire
 ownership flipped when its NEXT `/messages` POST returns 409 (i.e.
 the user has to send before the UI updates). Failure of the broadcast
 is non-fatal; the existing 409 path still catches uncoordinated cases.
+
+**Launcher SSE reconnect** (`Magpilot.Host/Program.cs`,
+`SubscribeWithReconnectAsync`): the launcher listens for
+`release_requested` on the session's SSE stream so a web take-over
+can preempt it cooperatively. That subscription reconnects with
+backoff (1s -> 15s cap) until copilot exits or a release arrives.
+Without reconnect, an agent restart (re-pair, update) dropped the
+single `await foreach`, leaving the still-alive launcher permanently
+deaf to `release_requested`: a later SPA take-over would knock, time
+out, and fall back to a force kill. This is the launcher-side twin of
+the agent's `HostOwnership` persistence + `HostOwnershipReconciler` --
+both keep a long-lived interactive session cooperatively preemptible
+across agent restarts. **Sessions whose launcher predates this
+reconnect (< 0.1.18) still can't hear a post-restart release; they
+reclaim to Host via ancestry but only get force handoff. Re-launch
+them (`magpilot --resume=<sid>`) to get full graceful handoff.**
 
 **SPA-side reactivity** (`Magpilot.UI/Pages/Home.razor`):
 - `Apply()` handles the `ReleaseRequested` SSE case: sets

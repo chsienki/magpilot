@@ -498,6 +498,14 @@ one re-reads the file before writing).
    `~/.copilot/magpilot/hostownership.json` and reloaded (with a
    live-holder + start-time revalidation) on startup so an agent
    restart doesn't orphan the sessions a launcher is still driving.
+   `Sessions/HostOwnershipReconciler.cs` additionally rebuilds the
+   map from live process ancestry (`ProcessAncestry`, a Toolhelp
+   snapshot): any live foreign lock whose holder is a descendant of
+   a `magpilot` launcher is re-marked Host-owned, recovering sessions
+   the persisted map never recorded. The launcher's own
+   `release_requested` subscription reconnects with backoff across
+   agent restarts (`SubscribeWithReconnectAsync`) so the handoff stays
+   cooperative rather than degrading to a force kill.
    The on-disk `inuse.<PID>.lock` files are advisory only -- two
    PIDs can claim the same session simultaneously and the file
    system does nothing to prevent it. (Verified empirically

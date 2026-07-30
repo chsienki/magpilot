@@ -41,6 +41,10 @@ builder.Services.AddSingleton<AcpSessionManager>();
 builder.Services.AddSingleton<SessionScanner>();
 builder.Services.AddSingleton<HostOwnership>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<HostOwnership>());
+// Runs after HostOwnership (registered above, so its Load runs first):
+// rebuilds ownership for launcher-driven sessions from live process
+// ancestry so an agent restart doesn't strand them as "kill to unlock".
+builder.Services.AddHostedService<HostOwnershipReconciler>();
 builder.Services.AddSingleton<YoloRegistry>();
 builder.Services.AddSingleton<SessionRegistry>();
 builder.Services.AddSingleton<HistoryReader>();
