@@ -1283,18 +1283,31 @@ Owned=0, Locked=1, Dormant=2.)
 > `RunSessionLoopAsync` with that sid instead of falling into
 > post-spawn detection.
 >
-> **Authoritative ownership lives in agent memory, NOT in the
-> filesystem.** `Sessions/HostOwnership.cs` keeps the canonical map
-> of `sessionId -> hostPid` for sessions a `magpilot` wrapper
-> currently drives. All ACP-driving endpoints (`/messages`,
-> `/interrupt`, `/approvals/{id}`) consult it and return 409
-> Conflict + `HostOwnedResponse { needsRelease, hostPid }` when
-> host-owned. The wire view (`GET /state`) reports
-> `owner: "Host"` from this map, NOT from the lock files.
+> **Authoritative ownership lives in agent memory, mirrored to disk.**
+> `Sessions/HostOwnership.cs` keeps the canonical map of
+> `sessionId -> hostPid` for sessions a `magpilot` wrapper currently
+> drives. All ACP-driving endpoints (`/messages`, `/interrupt`,
+> `/approvals/{id}`) consult it and return 409 Conflict +
+> `HostOwnedResponse { needsRelease, hostPid }` when host-owned. The
+> wire view (`GET /state`) reports `owner: "Host"` from this map, NOT
+> from the lock files.
 >
 > A 10s background sweep prunes `HostOwnership` entries whose holder
 > PID is no longer alive, so a wrapper that crashed or was kill -9'd
 > doesn't leave the session permanently stuck.
+>
+> **The map is persisted to `~/.copilot/magpilot/hostownership.json`
+> and reloaded on startup**, so an agent restart -- which happens on
+> every re-pair and every update -- does NOT orphan the sessions a
+> launcher is still driving. Without this, a restart wiped the
+> in-memory map and every in-flight interactive session fell to
+> `External` ("kill to unlock") in the SPA even though a `magpilot`
+> launcher was still driving it. On load each entry is revalidated:
+> the holder PID must be alive AND its process start time must match
+> the one captured at acquire (a PID-reuse guard); mismatches are
+> dropped. Sessions started under an agent that predates this
+> persistence, or while the agent was down, still aren't recovered --
+> nothing persisted them -- but every subsequent restart is safe.
 
 `UpdatedAt` is derived from the latest mtime between `events.jsonl`
 and `workspace.yaml`. **Do NOT** trust the `updated_at` field inside
@@ -1335,8 +1348,11 @@ Dictionary<sessionKey, List<ChatMessage>>`). On switch, three branches:
 
 The SPA is the only producer of new visible messages while the user
 is connected, so the cache is safe as last-word for `Owned`.
-When the agent restarts, *all* sessions become Dormant/Locked and
-get a fresh `session/load` on next visit.
+When the agent restarts, sessions the agent itself drove become
+Dormant/Locked and get a fresh `session/load` on next visit;
+sessions a `magpilot` launcher is driving stay Host-owned because
+`HostOwnership` is reloaded from disk on startup (see "Session
+classification and ownership").
 
 ### SPA pitfall: there is NO bare `HttpClient` in the WASM container
 

@@ -494,10 +494,14 @@ one re-reads the file before writing).
 **Fix in place** (the cooperative single-owner handoff):
 
 1. Agent's `Sessions/HostOwnership.cs` keeps an in-memory
-   authoritative map of `sessionId -> hostPid`. The on-disk
-   `inuse.<PID>.lock` files are advisory only -- two PIDs can claim
-   the same session simultaneously and the file system does nothing
-   to prevent it. (Verified empirically 2026-05-13.)
+   authoritative map of `sessionId -> hostPid`, mirrored to
+   `~/.copilot/magpilot/hostownership.json` and reloaded (with a
+   live-holder + start-time revalidation) on startup so an agent
+   restart doesn't orphan the sessions a launcher is still driving.
+   The on-disk `inuse.<PID>.lock` files are advisory only -- two
+   PIDs can claim the same session simultaneously and the file
+   system does nothing to prevent it. (Verified empirically
+   2026-05-13.)
 2. `POST /api/sessions/{id}/acquire-for-host { HostPid, Force }`
    atomically waits for any in-flight ACP turn to reach a clean
    boundary (or aborts it if `force=true`), drops the agent's
