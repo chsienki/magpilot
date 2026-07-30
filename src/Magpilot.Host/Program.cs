@@ -344,25 +344,7 @@ static async Task<int> RunSessionLoopAsync(AgentClient agent, string sid, Wrappe
             using var sseCts = new CancellationTokenSource();
             var preempted = new TaskCompletionSource<ReleaseRequested>(TaskCreationOptions.RunContinuationsAsynchronously);
             var deferredErrors = new System.Collections.Concurrent.ConcurrentQueue<string>();
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await foreach (var evt in agent.SubscribeAsync(sid, sseCts.Token))
-                    {
-                        if (evt is ReleaseRequested rr)
-                        {
-                            preempted.TrySetResult(rr);
-                            break;
-                        }
-                    }
-                }
-                catch (OperationCanceledException) { }
-                catch (Exception ex)
-                {
-                    deferredErrors.Enqueue($"magpilot: SSE subscribe failed: {ex.Message}");
-                }
-            });
+            _ = Task.Run(() => SubscribeWithReconnectAsync(agent, sid, preempted, deferredErrors, sseCts.Token));
 
             var done = await Task.WhenAny(copilotHost.ExitTask, preempted.Task);
             sseCts.Cancel();
@@ -546,23 +528,9 @@ static async Task<int> RunSessionLoopWithDetectionAsync(AgentClient agent, Wrapp
                 }
 
                 // Now that we know the sid, subscribe to its SSE so we
-                // can react to release_requested events.
-                try
-                {
-                    await foreach (var evt in agent.SubscribeAsync(detectedSid, sseCts.Token))
-                    {
-                        if (evt is ReleaseRequested rr)
-                        {
-                            preempted.TrySetResult(rr);
-                            break;
-                        }
-                    }
-                }
-                catch (OperationCanceledException) { }
-                catch (Exception ex)
-                {
-                    deferredErrors.Enqueue($"magpilot: SSE subscribe failed: {ex.Message}");
-                }
+                // can react to release_requested events -- reconnecting
+                // across agent restarts (see SubscribeWithReconnectAsync).
+                await SubscribeWithReconnectAsync(agent, detectedSid, preempted, deferredErrors, sseCts.Token);
             }
             catch (OperationCanceledException) { }
         });
@@ -611,4 +579,63 @@ static void FlushDeferredErrors(System.Collections.Concurrent.ConcurrentQueue<st
 {
     while (queue.TryDequeue(out var msg))
         Console.Error.WriteLine(msg);
+}
+
+/// <summary>
+/// Subscribe to a session's release_requested SSE stream, reconnecting
+/// with backoff until copilot exits (<paramref name="ct"/>) or a
+/// <see cref="ReleaseRequested"/> arrives (completing
+/// <paramref name="preempted"/>).
+///
+/// The launcher registers host ownership once, at spawn, and never
+/// re-asserts it. When the agent restarts -- which happens on every
+/// re-pair and every update -- the SSE stream drops. A single
+/// await-foreach would end there, leaving the launcher deaf to any later
+/// web take-over: the SPA's cooperative release_requested would go
+/// unheard, its handoff would time out, and it would fall back to a force
+/// kill. Reconnecting keeps a long-lived interactive session cooperatively
+/// preemptible across agent restarts. Diagnostics are deferred (copilot
+/// owns the screen) and the drop is logged once to avoid spamming.
+/// </summary>
+static async Task SubscribeWithReconnectAsync(
+    AgentClient agent,
+    string sid,
+    TaskCompletionSource<ReleaseRequested> preempted,
+    System.Collections.Concurrent.ConcurrentQueue<string> deferredErrors,
+    CancellationToken ct)
+{
+    var backoff = TimeSpan.FromSeconds(1);
+    var maxBackoff = TimeSpan.FromSeconds(15);
+    var loggedDrop = false;
+
+    while (!ct.IsCancellationRequested)
+    {
+        try
+        {
+            await foreach (var evt in agent.SubscribeAsync(sid, ct))
+            {
+                if (evt is ReleaseRequested rr)
+                {
+                    preempted.TrySetResult(rr);
+                    return;
+                }
+            }
+            // Stream ended without error (agent closed it, e.g. shutting
+            // down for a restart). Fall through to reconnect.
+        }
+        catch (OperationCanceledException) { return; }
+        catch (Exception ex)
+        {
+            if (!loggedDrop)
+            {
+                deferredErrors.Enqueue($"magpilot: SSE stream dropped ({ex.Message}); reconnecting in background...");
+                loggedDrop = true;
+            }
+        }
+
+        if (ct.IsCancellationRequested) return;
+        try { await Task.Delay(backoff, ct); }
+        catch (OperationCanceledException) { return; }
+        backoff = TimeSpan.FromMilliseconds(Math.Min(maxBackoff.TotalMilliseconds, backoff.TotalMilliseconds * 2));
+    }
 }
