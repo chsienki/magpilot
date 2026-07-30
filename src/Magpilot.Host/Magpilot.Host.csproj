@@ -8,6 +8,14 @@
     <RootNamespace>Magpilot.Host</RootNamespace>
     <AssemblyName>magpilot</AssemblyName>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Native AOT: the launcher runs on every `magpilot` invocation, so
+         its JIT warmup is pure per-invocation latency. AOT drops cold start
+         to roughly a third and ships a single native magpilot.exe (no
+         coreclr.dll / deps.json). All wire JSON goes through the
+         source-generated HostWebJsonContext / HostGeneralJsonContext so the
+         publish is reflection-free. Only engages on `dotnet publish`; plain
+         `dotnet build` just runs the AOT analyzers. -->
+    <PublishAot>true</PublishAot>
     <!-- sch.pty.net's targets only copies native ConPTY DLLs when
          PlatformTarget is explicit (i.e. NOT AnyCPU). x64 covers our
          Windows + Linux + macOS targets; arm64 builds would need a

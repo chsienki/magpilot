@@ -1021,9 +1021,26 @@ the smoke test.
 `.github/workflows/release.yml` triggers on `v*.*.*` tag push:
 
 1. `validate-version` (ubuntu) -- asserts tag matches `VERSION`.
-2. `build` (windows-latest) -- self-contained `dotnet publish` of agent
-   + launcher, install Inno Setup via `choco`, run `iscc.exe`, compute
-   SHA256, generate `version.json`.
+2. `build` (windows-latest) -- self-contained `dotnet publish` of the
+   agent + **Native AOT** `dotnet publish` of the launcher, install Inno
+   Setup via `choco`, run `iscc.exe`, compute SHA256, generate
+   `version.json`.
+
+   > The launcher (`Magpilot.Host`) is Native AOT (`<PublishAot>true</PublishAot>`
+   > in its csproj) -- it runs on every `magpilot` invocation, so JIT warmup
+   > is pure per-invocation latency; AOT ships a single native `magpilot.exe`
+   > (~7 MB, no `coreclr.dll`/`deps.json`) that cold-starts in roughly a
+   > third of the JIT time. **Constraint:** all of the launcher's JSON must
+   > go through the source-generated `HostWebJsonContext` /
+   > `HostGeneralJsonContext` (and `EnrollmentBundleJsonContext` in Shared).
+   > Do NOT add a reflection-based `JsonSerializer.Serialize/Deserialize<T>`
+   > or a `System.Net.Http.Json` call without passing a `JsonTypeInfo<T>` --
+   > it compiles fine but throws `NotSupportedException` at runtime under
+   > AOT. `HostWebJsonContext` mirrors `JsonSerializerDefaults.Web` (the
+   > agent's HTTP responses); `HostGeneralJsonContext` mirrors the General
+   > defaults (the agent's raw `JsonSerializer.Serialize<StreamEvent>(evt)`
+   > SSE writes + the UDP `DiscoveryReply`). `HostJsonContractTests` pins
+   > those wire shapes.
 3. `release` (ubuntu) -- generate changelog from `git log`, create a
    **draft** GitHub release with `magpilot-setup-X.Y.Z.exe`,
    `magpilot-setup-X.Y.Z.exe.sha256`, and `version.json` as assets.

@@ -63,7 +63,7 @@ Name: "firewall"; Description: "Open Windows Firewall for LAN (TCP 5099, UDP 478
 [Files]
 ; Self-contained net9.0 publish of Magpilot.Agent (includes runtime + Magpilot.Agent.exe).
 Source: "{#PublishDir}\agent\*"; DestDir: "{app}\agent"; Components: agent; Flags: ignoreversion recursesubdirs createallsubdirs
-; Self-contained net9.0 publish of Magpilot.Host (the magpilot.exe launcher + Pty.Net natives).
+; Native AOT publish of Magpilot.Host (the magpilot.exe launcher + Pty.Net natives).
 Source: "{#PublishDir}\bin\*"; DestDir: "{app}\bin"; Components: launcher; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Helper PowerShell scripts (always copied so uninstall can run them).
 Source: "install-task.ps1"; DestDir: "{app}"; Flags: ignoreversion

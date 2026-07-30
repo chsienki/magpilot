@@ -53,10 +53,9 @@ jobs:
         shell: bash
         run: echo "version=$(cat VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
 
-      # PublishSingleFile=false because Pty.Net needs os64\conpty.dll +
-      # OpenConsole.exe physically next to magpilot.exe (SingleFile would
-      # extract per-run and slow startup). Same for the agent (it has no
-      # native deps but we keep both publishes consistent).
+      # Agent: self-contained, framework-included, NOT single-file. It has no
+      # native deps, but PublishSingleFile would extract per-run and slow the
+      # daemon's cold start with no upside.
       - name: Publish Magpilot.Agent (win-x64)
         run: >
           dotnet publish src/Magpilot.Agent/Magpilot.Agent.csproj
@@ -64,11 +63,16 @@ jobs:
           -p:PublishSingleFile=false
           -o publish/agent
 
-      - name: Publish Magpilot.Host launcher (win-x64)
+      # Launcher: Native AOT (PublishAot=true lives in Magpilot.Host.csproj).
+      # ilc produces a single native magpilot.exe (no coreclr.dll / deps.json,
+      # no JIT warmup) which matters because the launcher runs on every
+      # `magpilot` invocation. Pty.Net's os64\conpty.dll + OpenConsole.exe are
+      # still copied physically beside the exe by the csproj's <None> items.
+      # windows-latest ships the VC++ build tools ilc's link step needs.
+      - name: Publish Magpilot.Host launcher (win-x64, Native AOT)
         run: >
           dotnet publish src/Magpilot.Host/Magpilot.Host.csproj
-          -c Release -r win-x64 --self-contained
-          -p:PublishSingleFile=false
+          -c Release -r win-x64
           -o publish/bin
 
       - name: Install Inno Setup

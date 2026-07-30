@@ -200,6 +200,24 @@ Single-owner invariant by construction: while the wrapper holds a
 session, the agent's `/messages`/`/interrupt`/`/approvals` endpoints
 return 409 to the SPA + WhatsApp + cron, so `events.jsonl` never forks.
 
+**Native AOT.** The launcher is published Native AOT
+(`<PublishAot>true</PublishAot>` in `Magpilot.Host.csproj`): a single
+native `magpilot.exe` (~7 MB, no `coreclr.dll`/`deps.json`) that
+cold-starts in roughly a third of the JIT time -- worthwhile because it
+runs on every `magpilot` invocation. Pty.Net's `os64\conpty.dll` +
+`OpenConsole.exe` are still copied physically beside the exe. The one
+constraint AOT imposes: **all launcher JSON goes through
+source-generated contexts**, never reflection. `HostWebJsonContext`
+(mirrors `JsonSerializerDefaults.Web`) covers the `System.Net.Http.Json`
+calls to the agent/hub; `HostGeneralJsonContext` (General defaults)
+covers the raw `StreamEvent` SSE reads and the UDP `DiscoveryReply`;
+`EnrollmentBundleJsonContext` (in `Magpilot.Shared`) covers the
+`magpilot2+` bundle codec. A reflection `JsonSerializer.Deserialize<T>`
+or a `System.Net.Http.Json` call without a `JsonTypeInfo<T>` compiles
+but throws `NotSupportedException` at runtime under AOT;
+`HostJsonContractTests` pins the wire shapes so a naming-policy slip is
+caught in CI rather than in the field.
+
 ## Auth model
 
 There are two unrelated auth boundaries:
