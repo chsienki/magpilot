@@ -112,7 +112,7 @@ internal static class MagpilotPair
         HttpResponseMessage resp;
         try
         {
-            resp = await http.PostAsJsonAsync(url, new EnrollmentRedeemRequest(voucher, agentName));
+            resp = await http.PostAsJsonAsync(url, new EnrollmentRedeemRequest(voucher, agentName), HostWebJsonContext.Default.EnrollmentRedeemRequest);
         }
         catch (Exception ex)
         {
@@ -121,7 +121,7 @@ internal static class MagpilotPair
 
         if (resp.StatusCode == System.Net.HttpStatusCode.OK)
         {
-            var body = await resp.Content.ReadFromJsonAsync<EnrollmentRedeemResponse>();
+            var body = await resp.Content.ReadFromJsonAsync(HostWebJsonContext.Default.EnrollmentRedeemResponse);
             if (body is null || string.IsNullOrWhiteSpace(body.AgentToken))
                 throw new PairingException("hub returned 200 but no agentToken in the body", exitCode: 5);
             return body.AgentToken;
@@ -133,7 +133,7 @@ internal static class MagpilotPair
         string detail = resp.ReasonPhrase ?? resp.StatusCode.ToString();
         try
         {
-            var err = await resp.Content.ReadFromJsonAsync<ErrorBody>();
+            var err = await resp.Content.ReadFromJsonAsync(HostWebJsonContext.Default.ErrorBody);
             if (err?.Error is { Length: > 0 } e) detail = e;
         }
         catch { /* malformed body -- keep the status reason */ }
@@ -151,7 +151,7 @@ internal static class MagpilotPair
         throw new PairingException(hint, exitCode: 6);
     }
 
-    private sealed record ErrorBody(string? Error);
+    internal sealed record ErrorBody(string? Error);
 
     private sealed class PairingException(string message, int exitCode) : Exception(message)
     {

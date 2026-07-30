@@ -20,7 +20,7 @@ internal static class UpdateBanner
             var baseUrl = (InstallConfig.ResolveValue("MAGPILOT_AGENT_URL")
                 ?? "http://127.0.0.1:5099").TrimEnd('/');
             using var http = new HttpClient { Timeout = TimeSpan.FromMilliseconds(500) };
-            var info = await http.GetFromJsonAsync<LatestVersionInfo>($"{baseUrl}/api/version/latest");
+            var info = await http.GetFromJsonAsync($"{baseUrl}/api/version/latest", HostWebJsonContext.Default.LatestVersionInfo);
             if (info is null) return;
             if (info.UpdateAvailable && !string.IsNullOrEmpty(info.LatestVersion))
             {

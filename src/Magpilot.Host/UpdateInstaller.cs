@@ -37,8 +37,9 @@ internal static class UpdateInstaller
         LatestVersionInfo? info;
         try
         {
-            info = await http.GetFromJsonAsync<LatestVersionInfo>(
-                $"{baseUrl}/api/version/latest?from={Versioning.AssemblyVersion}");
+            info = await http.GetFromJsonAsync(
+                $"{baseUrl}/api/version/latest?from={Versioning.AssemblyVersion}",
+                HostWebJsonContext.Default.LatestVersionInfo);
         }
         catch (Exception ex)
         {
@@ -159,8 +160,9 @@ internal static class VersionPrinter
             var baseUrl = (InstallConfig.ResolveValue("MAGPILOT_AGENT_URL")
                 ?? "http://127.0.0.1:5099").TrimEnd('/');
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
-            var info = await http.GetFromJsonAsync<LatestVersionInfo>(
-                $"{baseUrl}/api/version/latest?from={Versioning.AssemblyVersion}");
+            var info = await http.GetFromJsonAsync(
+                $"{baseUrl}/api/version/latest?from={Versioning.AssemblyVersion}",
+                HostWebJsonContext.Default.LatestVersionInfo);
             if (info is null)
             {
                 Console.WriteLine("  agent-reported latest: <unknown>");

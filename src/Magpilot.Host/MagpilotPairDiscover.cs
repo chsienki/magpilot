@@ -160,7 +160,7 @@ internal static class MagpilotPairDiscover
                     var result = await udp.ReceiveAsync(windowCts.Token);
                     try
                     {
-                        var reply = JsonSerializer.Deserialize<DiscoveryReply>(result.Buffer);
+                        var reply = JsonSerializer.Deserialize(result.Buffer, HostGeneralJsonContext.Default.DiscoveryReply);
                         if (reply?.Magic == DiscoveryMagic
                             && !string.IsNullOrEmpty(reply.HubUrl)
                             && !string.IsNullOrEmpty(reply.HubName))
@@ -192,7 +192,7 @@ internal static class MagpilotPairDiscover
         return hubs.Values.ToList();
     }
 
-    private sealed record DiscoveryReply(
+    internal sealed record DiscoveryReply(
         [property: JsonPropertyName("magic")] string Magic,
         [property: JsonPropertyName("hubUrl")] string HubUrl,
         [property: JsonPropertyName("hubName")] string HubName);
@@ -221,13 +221,13 @@ internal static class MagpilotPairDiscover
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
         var url = hubUrl.TrimEnd('/') + "/api/enroll/claim";
-        var resp = await http.PostAsJsonAsync(url, new PairingClaimRequest(secret, agentName));
+        var resp = await http.PostAsJsonAsync(url, new PairingClaimRequest(secret, agentName), HostWebJsonContext.Default.PairingClaimRequest);
         if (!resp.IsSuccessStatusCode)
         {
             var body = await resp.Content.ReadAsStringAsync();
             throw new InvalidOperationException($"{(int)resp.StatusCode} {resp.StatusCode}: {body}");
         }
-        var claim = await resp.Content.ReadFromJsonAsync<PairingClaimResponse>();
+        var claim = await resp.Content.ReadFromJsonAsync(HostWebJsonContext.Default.PairingClaimResponse);
         return claim ?? throw new InvalidOperationException("hub returned empty claim response");
     }
 
@@ -241,7 +241,7 @@ internal static class MagpilotPairDiscover
         {
             try
             {
-                var status = await http.GetFromJsonAsync<PairingClaimStatus>(url, deadlineCts.Token);
+                var status = await http.GetFromJsonAsync(url, HostWebJsonContext.Default.PairingClaimStatus, deadlineCts.Token);
                 if (status is null)
                 {
                     // Empty body -- treat as transient, re-poll after a tiny pause.

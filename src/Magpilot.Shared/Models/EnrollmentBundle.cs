@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Magpilot.Shared.Models;
 
@@ -31,7 +32,7 @@ public sealed record EnrollmentBundle(
     /// </summary>
     public string Encode()
     {
-        var json = JsonSerializer.Serialize(this, Json);
+        var json = JsonSerializer.Serialize(this, EnrollmentBundleJsonContext.Default.EnrollmentBundle);
         return Prefix + Base64Url.Encode(Encoding.UTF8.GetBytes(json));
     }
 
@@ -63,7 +64,7 @@ public sealed record EnrollmentBundle(
             var body = encoded[Prefix.Length..];
             var bytes = Base64Url.Decode(body);
             var json = Encoding.UTF8.GetString(bytes);
-            var parsed = JsonSerializer.Deserialize<EnrollmentBundle>(json, Json);
+            var parsed = JsonSerializer.Deserialize(json, EnrollmentBundleJsonContext.Default.EnrollmentBundle);
             if (parsed is null)
             {
                 error = "Bundle payload was empty.";
@@ -86,12 +87,17 @@ public sealed record EnrollmentBundle(
         }
     }
 
-    private static readonly JsonSerializerOptions Json = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        WriteIndented = false,
-    };
 }
+
+/// <summary>
+/// Source-generated metadata for <see cref="EnrollmentBundle"/>. camelCase
+/// naming matches the wire format the hub's <c>/admin/enroll</c> page and
+/// the launcher's <c>--magpilot-pair</c> path exchange, and lets the bundle
+/// (de)serialize under Native AOT without the reflection-based fallback.
+/// </summary>
+[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
+[JsonSerializable(typeof(EnrollmentBundle))]
+internal sealed partial class EnrollmentBundleJsonContext : JsonSerializerContext;
 
 /// <summary>
 /// Request body for <c>POST /api/enroll/redeem</c>. Sent by the

@@ -43,7 +43,7 @@ public sealed class AgentClient : IDisposable
         using var resp = await _http.GetAsync($"api/sessions/{sessionId}/state", ct);
         if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) return null;
         resp.EnsureSuccessStatusCode();
-        return await resp.Content.ReadFromJsonAsync<SessionStateInfo>(cancellationToken: ct);
+        return await resp.Content.ReadFromJsonAsync(HostWebJsonContext.Default.SessionStateInfo, ct);
     }
 
     public async Task<SessionStateInfo> AcquireForHostAsync(string sessionId, int hostPid, bool force, CancellationToken ct = default)
@@ -51,9 +51,10 @@ public sealed class AgentClient : IDisposable
         using var resp = await _http.PostAsJsonAsync(
             $"api/sessions/{sessionId}/acquire-for-host",
             new AcquireForHostBody(hostPid, force),
+            HostWebJsonContext.Default.AcquireForHostBody,
             ct);
         resp.EnsureSuccessStatusCode();
-        return (await resp.Content.ReadFromJsonAsync<SessionStateInfo>(cancellationToken: ct))!;
+        return (await resp.Content.ReadFromJsonAsync(HostWebJsonContext.Default.SessionStateInfo, ct))!;
     }
 
     public async Task<SessionStateInfo> ReleaseAsync(string sessionId, int hostPid, CancellationToken ct = default)
@@ -61,9 +62,10 @@ public sealed class AgentClient : IDisposable
         using var resp = await _http.PostAsJsonAsync(
             $"api/sessions/{sessionId}/release",
             new ReleaseFromHostBody(hostPid),
+            HostWebJsonContext.Default.ReleaseFromHostBody,
             ct);
         resp.EnsureSuccessStatusCode();
-        return (await resp.Content.ReadFromJsonAsync<SessionStateInfo>(cancellationToken: ct))!;
+        return (await resp.Content.ReadFromJsonAsync(HostWebJsonContext.Default.SessionStateInfo, ct))!;
     }
 
     public async Task FireReleaseRequestAsync(string sessionId, string requester, bool force, CancellationToken ct = default)
@@ -71,6 +73,7 @@ public sealed class AgentClient : IDisposable
         using var resp = await _http.PostAsJsonAsync(
             $"api/sessions/{sessionId}/release-request",
             new ReleaseRequestBody(requester, force),
+            HostWebJsonContext.Default.ReleaseRequestBody,
             ct);
         resp.EnsureSuccessStatusCode();
     }
@@ -98,7 +101,7 @@ public sealed class AgentClient : IDisposable
             var json = line[5..].Trim();
             if (string.IsNullOrEmpty(json)) continue;
             StreamEvent? evt = null;
-            try { evt = System.Text.Json.JsonSerializer.Deserialize<StreamEvent>(json); }
+            try { evt = System.Text.Json.JsonSerializer.Deserialize(json, HostGeneralJsonContext.Default.StreamEvent); }
             catch { /* unknown event types are tolerated */ }
             if (evt is not null) yield return evt;
         }
