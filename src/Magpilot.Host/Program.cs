@@ -493,9 +493,9 @@ static async Task<int> RunSessionLoopWithDetectionAsync(AgentClient agent, Wrapp
         // start listening for release_requested SSE events.
         //
         // Under --magpilot-agency the PTY child is agency, not copilot, so
-        // copilotHost.Pid won't match copilot's inuse.<pid>.lock; detection
-        // then leans on the mtime fallback and may miss a brand-new agency
-        // session (it stays Locked until adopted from the SPA).
+        // copilotHost.Pid won't equal copilot's inuse.<pid>.lock PID; the
+        // detector matches any live descendant of the spawned PID (see
+        // matchDescendants) so the agency grandchild is still found.
         //
         // The detection task runs concurrently with copilot's TUI, so any
         // diagnostics it produces must be deferred -- writing to stderr
@@ -509,7 +509,7 @@ static async Task<int> RunSessionLoopWithDetectionAsync(AgentClient agent, Wrapp
         {
             try
             {
-                detectedSid = await PostSpawnDetector.WaitForSessionAsync(copilotHost.Pid, sseCts.Token);
+                detectedSid = await PostSpawnDetector.WaitForSessionAsync(copilotHost.Pid, sseCts.Token, matchDescendants: opts.Agency);
                 if (detectedSid is null)
                 {
                     deferredErrors.Enqueue(

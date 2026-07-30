@@ -175,10 +175,7 @@ public sealed record WrapperOptions(
                                        session runs with agency's curated MCP servers + tooling. Extra
                                        args are handed to agency, which routes its own flags (-a,
                                        --profile, --no-default-mcps, ...) and passes the rest through to
-                                       copilot (--resume, --add-dir, ...). Full coordination when
-                                       resuming a known session id; a fresh agency session may register
-                                       late (agency spawns copilot as a child, so post-spawn PID
-                                       detection can fall back) and briefly show as Locked in the SPA.
+                                       copilot (--resume, --add-dir, ...).
           --magpilot-help              print this help and exit
 
         Env:

@@ -55,7 +55,7 @@ internal static class PostSpawnDetector
     /// don't refresh the lock). Returns the containing session id on
     /// either signal, or null on timeout.
     /// </summary>
-    public static async Task<string?> WaitForSessionAsync(int copilotPid, CancellationToken ct, TimeSpan? timeout = null)
+    public static async Task<string?> WaitForSessionAsync(int copilotPid, CancellationToken ct, TimeSpan? timeout = null, bool matchDescendants = false)
     {
         var deadline = DateTime.UtcNow + (timeout ?? DefaultTimeout);
         var root = SessionStateRoot;
@@ -87,13 +87,28 @@ internal static class PostSpawnDetector
         {
             try
             {
-                // Pass 1: exact PID match on inuse.<pid>.lock -- the canonical
-                // signal for fresh sessions and most resumes.
+                // When the spawned process wraps copilot in a child (e.g.
+                // agency: magpilot -> agency -> copilot), copilot's lock
+                // carries a PID we never saw. Snapshot the process tree once
+                // per tick so Pass 1 can match any live descendant of the
+                // spawned PID, not just an exact PID match.
+                var parents = matchDescendants
+                    ? ProcessTree.SnapshotParentMap()
+                    : null;
+
+                // Pass 1: match inuse.<pid>.lock -- either an exact PID match
+                // (the canonical signal for fresh sessions and most resumes)
+                // or, in descendant mode, a live descendant of the spawned PID.
                 foreach (var sessionDir in Directory.EnumerateDirectories(root))
                 {
                     foreach (var file in Directory.EnumerateFiles(sessionDir, "inuse.*.lock"))
                     {
                         if (Path.GetFileName(file).EndsWith(lockSuffix, StringComparison.Ordinal))
+                            return Path.GetFileName(sessionDir);
+
+                        if (parents is not null
+                            && TryParseLockPid(file, out var lockPid)
+                            && ProcessTree.IsSelfOrDescendant(lockPid, copilotPid, parents))
                             return Path.GetFileName(sessionDir);
                     }
                 }
@@ -141,6 +156,17 @@ internal static class PostSpawnDetector
     /// that is no longer alive. A directory with no locks at all
     /// returns false -- "dormant" is a different state from "stranded".
     /// </summary>
+    /// <summary>
+    /// Parse the PID out of an <c>inuse.&lt;pid&gt;.lock</c> path. Returns false
+    /// for any name that doesn't fit the <c>inuse.&lt;int&gt;.lock</c> shape.
+    /// </summary>
+    private static bool TryParseLockPid(string lockPath, out int pid)
+    {
+        pid = 0;
+        var parts = Path.GetFileName(lockPath).Split('.');
+        return parts.Length >= 3 && int.TryParse(parts[1], out pid);
+    }
+
     private static bool HasOnlyDeadLocks(string sessionDir)
     {
         var any = false;
