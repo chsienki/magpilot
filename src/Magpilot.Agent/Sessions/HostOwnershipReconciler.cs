@@ -53,6 +53,13 @@ public sealed class HostOwnershipReconciler(
         {
             var sid = Path.GetFileName(dir);
             if (string.IsNullOrEmpty(sid)) continue;
+
+            // Hygiene: drop advisory inuse.<pid>.lock files whose owner is gone,
+            // so dead holders don't accumulate or later masquerade as a live
+            // contention signal.
+            SessionLocks.ReapDead(dir, f =>
+                logger.LogInformation("Reaped stale session lock {File} (owner process gone)", f));
+
             // Already host-owned (persisted map, or a prior reconcile). TryGet
             // also prunes the entry if its holder has since died.
             if (hostOwnership.TryGet(sid, out _)) continue;

@@ -114,6 +114,21 @@ public sealed class SessionRegistry
         var info = _scanner.Get(sessionId, Owned)
             ?? throw new FileNotFoundException($"Session {sessionId} not on disk");
 
+        // Contention guard. Advisory inuse.<pid>.lock files let two live
+        // processes attach to the same session; a resume can then be served
+        // from one process's frozen in-memory snapshot while another advances
+        // the session on disk. copilot cannot be forced to reload an
+        // already-loaded session, so the least we can do is make the divergence
+        // loud.
+        var liveHolders = SessionLocks.Live(SessionLocks.Inspect(Path.Combine(_scanner.Root, sessionId)));
+        if (liveHolders.Count > 1)
+        {
+            _logger.LogWarning(
+                "Session {Sid} has {Count} live lock holders (pids: {Pids}) at adopt -- concurrent " +
+                "writers; served context may be stale relative to disk",
+                sessionId, liveHolders.Count, string.Join(", ", liveHolders.Select(h => h.Pid)));
+        }
+
         if (info.State == SessionState.Owned)
             return WithYolo(info)!;
 
