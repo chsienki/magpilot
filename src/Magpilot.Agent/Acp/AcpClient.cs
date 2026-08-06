@@ -17,6 +17,7 @@ public sealed class AcpClient : IAsyncDisposable
     private readonly string _exe;
     private readonly string _args;
     private Process? _proc;
+    private AcpBinaryWatch? _binaryWatch;
     private int _nextId;
     private readonly Dictionary<int, TaskCompletionSource<JsonNode?>> _pending = new();
     private readonly object _pendingLock = new();
@@ -56,6 +57,16 @@ public sealed class AcpClient : IAsyncDisposable
     /// </summary>
     public int? ProcessId => _proc?.Id;
 
+    /// <summary>
+    /// True if the copilot executable this child launched from has since been
+    /// replaced on disk (e.g. an in-place WinGet upgrade). A long-lived child
+    /// keeps serving its original image, drifting from the on-disk world.
+    /// </summary>
+    public bool IsBinaryStale => _binaryWatch?.IsStale() ?? false;
+
+    /// <summary>The resolved executable path this child launched from, if known.</summary>
+    public string? LaunchedExe => _binaryWatch?.ExePath;
+
     public async Task StartAsync(CancellationToken ct)
     {
         // Resolve the executable to a full path before spawning. .NET's
@@ -66,6 +77,10 @@ public sealed class AcpClient : IAsyncDisposable
         // launches that exact binary -- the same one the user gets at the
         // command line.
         var resolvedExe = ResolveOnPath(_exe) ?? _exe;
+
+        // Snapshot the binary's write-time now so we can later detect an
+        // in-place upgrade that would leave this child serving a stale image.
+        _binaryWatch = AcpBinaryWatch.Capture(resolvedExe);
 
         // The Copilot CLI's --acp mode does NOT auto-load enabled plugins
         // from settings.json the way the interactive CLI does. Discover the

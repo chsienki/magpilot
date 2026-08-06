@@ -14,6 +14,7 @@ public sealed class AcpFlavorPool(ILoggerFactory loggerFactory, ILogger<AcpFlavo
 {
     private readonly Dictionary<string, AcpClient> _clients = new();
     private readonly SemaphoreSlim _lock = new(1, 1);
+    private readonly HashSet<int> _driftWarned = new();
 
     public event Action<string, System.Text.Json.Nodes.JsonNode?>? OnSessionUpdate;
     public event Func<string, System.Text.Json.Nodes.JsonNode?, Task<System.Text.Json.Nodes.JsonNode>>? OnRequest;
@@ -63,7 +64,11 @@ public sealed class AcpFlavorPool(ILoggerFactory loggerFactory, ILogger<AcpFlavo
         {
             if (_clients.TryGetValue(flavor.Key, out var existing))
             {
-                if (existing.IsAlive) return existing;
+                if (existing.IsAlive)
+                {
+                    WarnIfBinaryDrifted(existing);
+                    return existing;
+                }
 
                 log.LogWarning(
                     "Cached ACP client for flavor {Flavor} is dead -- respawning",
@@ -90,6 +95,25 @@ public sealed class AcpFlavorPool(ILoggerFactory loggerFactory, ILogger<AcpFlavo
     /// </summary>
     public Task<AcpClient> StartDedicatedAsync(AcpFlavor flavor, CancellationToken ct) =>
         StartFreshAsync(flavor, ct);
+
+    // Warn once per drifted child: a long-lived ACP child that launched from a
+    // copilot binary since replaced on disk (an in-place upgrade) keeps serving
+    // the old image. Restarting the agent is the fix; surfacing it turns a
+    // silent multi-week drift into a visible signal in the central log.
+    private void WarnIfBinaryDrifted(AcpClient client)
+    {
+        if (!client.IsBinaryStale) return;
+        var pid = client.ProcessId ?? -1;
+        lock (_driftWarned)
+        {
+            if (!_driftWarned.Add(pid)) return;
+        }
+        log.LogWarning(
+            "ACP child pid={Pid} is serving a replaced binary ({Exe}) -- copilot was upgraded on disk since " +
+            "this child launched. Restart the agent to pick up the new build; a long-lived child otherwise " +
+            "drifts from the on-disk world (this is how a session ended up served by copilot.exe.old).",
+            pid, client.LaunchedExe);
+    }
 
     private async Task<AcpClient> StartFreshAsync(AcpFlavor flavor, CancellationToken ct)
     {
