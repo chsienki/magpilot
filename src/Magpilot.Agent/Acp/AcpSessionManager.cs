@@ -373,13 +373,16 @@ public sealed class AcpSessionManager
             // /admin/logs (instead of waiting for a user-visible symptom
             // like "the SPA stopped reflecting some new event type").
             // Kinds we knowingly ignore (available_commands_update,
-            // config_option_update, plan, current_mode_update) are common
-            // enough to be noisy -- whitelist them. Anything else is news.
+            // config_option_update, plan, current_mode_update, usage_update)
+            // are common enough to be noisy -- whitelist them. usage_update is
+            // per-turn context telemetry ({used, size}); mapping it to a SPA
+            // context meter is a possible future enhancement. Anything else is news.
             if (kind is not null
                 && kind is not "available_commands_update"
                 && kind is not "config_option_update"
                 && kind is not "plan"
-                && kind is not "current_mode_update")
+                && kind is not "current_mode_update"
+                && kind is not "usage_update")
             {
                 var raw = update.ToJsonString();
                 if (raw.Length > 400) raw = raw[..400] + "...";
@@ -390,26 +393,15 @@ public sealed class AcpSessionManager
             return;
         }
 
-        // Diagnostic: when an agent_message_chunk delivers text that
-        // looks like an inline "Info: <path>" tool-notice (drive letter
-        // or unix root immediately after the prefix), log the chunk +
-        // the surrounding raw update at Warning. Copilot CLI shouldn't
-        // be folding those into the agent message stream, but if it
-        // does we want to see the wire shape so we can route them to
-        // a tool chip instead of letting them bleed into the assistant
-        // bubble. Heuristic only; remove once root cause is known.
-        if (evt is AssistantDelta ad
-            && ad.Text.Length > 7
-            && ad.Text.StartsWith("Info: ", StringComparison.Ordinal)
-            && IsInfoPathBleed(ad.Text))
+        // Copilot CLI leaks file-operation notices ("Info: <abs-path>") into the
+        // agent message stream as standalone agent_message_chunks; forwarded as
+        // assistant text they garble the reply bubble. Drop them as a client-side
+        // guard -- the root cause is the CLI's ACP output, not the model.
+        if (evt is AssistantDelta ad && IsInfoPathBleed(ad.Text))
         {
-            var raw = update.ToJsonString();
-            if (raw.Length > 600) raw = raw[..600] + "...";
-            _logger.LogWarning(
-                "HandleUpdate Info: bleed in agent_message_chunk sid={Sid} text={Text} raw={Raw}",
-                sessionId,
-                ad.Text.Length > 200 ? ad.Text[..200] + "..." : ad.Text,
-                raw);
+            _logger.LogDebug("Dropped Info: path notice bled into agent_message_chunk sid={Sid} text={Text}",
+                sessionId, ad.Text);
+            return;
         }
 
         List<Channel<StreamEvent>>? list;
@@ -419,10 +411,12 @@ public sealed class AcpSessionManager
             ch.Writer.TryWrite(evt);
     }
 
-    private static bool IsInfoPathBleed(string text)
+    internal static bool IsInfoPathBleed(string text)
     {
-        // "Info: <drive-letter>:\..." (Windows) or "Info: /..." (Unix).
-        // Don't fire on plain prose that happens to start with "Info: ".
+        // Fires only on a standalone "Info: <path>" notice, never on prose that
+        // merely contains the word "Info". Path shapes: "Info: <drive>:\..." or
+        // "Info: <drive>:/..." (Windows) and "Info: /..." (Unix).
+        if (!text.StartsWith("Info: ", StringComparison.Ordinal)) return false;
         if (text.Length < 8) return false;
         var rest = text.AsSpan(6); // skip "Info: "
         if (rest.Length >= 3 && char.IsLetter(rest[0]) && rest[1] == ':' && (rest[2] == '\\' || rest[2] == '/')) return true;
