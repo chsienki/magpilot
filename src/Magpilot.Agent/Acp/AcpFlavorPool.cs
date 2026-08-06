@@ -84,18 +84,6 @@ public sealed class AcpFlavorPool(ILoggerFactory loggerFactory, ILogger<AcpFlavo
         finally { _lock.Release(); }
     }
 
-    /// <summary>
-    /// Spawn a fresh, uncached child dedicated to one session. Used to reload a
-    /// session another process advanced on disk: copilot won't re-read disk for
-    /// a session its current child already holds, so the only way to serve
-    /// current state is a brand-new child. The caller owns routing to it (the
-    /// session manager's <c>_sessionClient</c> map); it is deliberately not put
-    /// in the flavor cache, so the shared multiplexing child keeps serving every
-    /// other session untouched.
-    /// </summary>
-    public Task<AcpClient> StartDedicatedAsync(AcpFlavor flavor, CancellationToken ct) =>
-        StartFreshAsync(flavor, ct);
-
     // Warn once per drifted child: a long-lived ACP child that launched from a
     // copilot binary since replaced on disk (an in-place upgrade) keeps serving
     // the old image. Restarting the agent is the fix; surfacing it turns a

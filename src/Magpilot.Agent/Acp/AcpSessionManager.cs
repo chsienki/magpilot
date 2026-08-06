@@ -36,6 +36,13 @@ public sealed class AcpSessionManager
     // our in-memory ACP child has seen (the stale-resume condition).
     private readonly Magpilot.Agent.Sessions.SessionFreshness _freshness = new();
 
+    // Per-session set of PIDs of ACP children WE loaded the session into
+    // (current + any retired by a reload). A live inuse lock held by a PID not
+    // in this set is a genuinely foreign writer -- the signal that a resume may
+    // be stale. Without it, our own child's lock (and its post-turn disk flush)
+    // would read as staleness and trigger needless reloads.
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<int, byte>> _ourSessionPids = new();
+
     private static readonly string SessionStateRoot = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".copilot", "session-state");
 
@@ -117,6 +124,7 @@ public sealed class AcpSessionManager
             ?? throw new InvalidOperationException("session/new returned no sessionId");
         _sessionClient[sid] = client;
         _freshness.RecordServed(sid, EventsPath(sid));
+        MarkOurPid(sid, client.ProcessId);
         _logger.LogInformation("New ACP session {SessionId} cwd={Cwd} flavor={Flavor}", sid, cwd, flavor.Key);
         return sid;
     }
@@ -132,39 +140,40 @@ public sealed class AcpSessionManager
         }, ct, timeoutSec: 300);
         _sessionClient[sessionId] = client;
         _freshness.RecordServed(sessionId, EventsPath(sessionId));
+        MarkOurPid(sessionId, client.ProcessId);
     }
 
     /// <summary>
-    /// True if another process advanced this session's on-disk events past what
-    /// our serving child last synced -- so a resume would otherwise be served a
-    /// stale in-memory snapshot. False for sessions we have never served.
+    /// True if a resume would be served a stale in-memory snapshot: the session's
+    /// on-disk events have grown past what our child last synced AND a live lock
+    /// is held by a process that is not one of our children for this session (a
+    /// genuinely foreign writer). Requiring a foreign holder is what stops our
+    /// own child's async post-turn disk flush from reading as staleness.
     /// </summary>
     public bool MayBeStale(string sessionId) =>
-        _freshness.MayBeStale(sessionId, EventsPath(sessionId));
+        _freshness.MayBeStale(sessionId, EventsPath(sessionId)) && HasForeignLiveHolder(sessionId);
 
     /// <summary>
-    /// Reload a session that was advanced on disk into a fresh, dedicated
-    /// copilot --acp child. copilot won't re-read disk for a session its current
-    /// child already holds, so a brand-new child is the only way to serve
-    /// current state. Future prompts/streams for the session route to the fresh
-    /// child; the previously-serving child keeps its now-inert in-memory copy
-    /// (we simply stop routing to it -- it processes no further turns, so it
-    /// writes nothing).
+    /// Resync the freshness watermark to the current on-disk size. Called after a
+    /// resume that did not reload, to absorb our own child's async post-turn flush
+    /// so it isn't mistaken for a foreign advance next time.
     /// </summary>
-    public async Task ReloadFreshAsync(string sessionId, string cwd, CancellationToken ct)
-    {
-        _logger.LogWarning(
-            "Reloading session {Sid} into a fresh ACP child -- on-disk state advanced past the serving child",
-            sessionId);
-        var fresh = await _pool.StartDedicatedAsync(AcpFlavor.Default, ct);
-        await fresh.CallAsync("session/load", new JsonObject
-        {
-            ["sessionId"] = sessionId,
-            ["cwd"] = cwd,
-            ["mcpServers"] = new JsonArray(),
-        }, ct, timeoutSec: 300);
-        _sessionClient[sessionId] = fresh;
+    public void ResyncWatermark(string sessionId) =>
         _freshness.RecordServed(sessionId, EventsPath(sessionId));
+
+    private bool HasForeignLiveHolder(string sessionId)
+    {
+        var dir = Path.Combine(SessionStateRoot, sessionId);
+        var ours = _ourSessionPids.TryGetValue(sessionId, out var set) ? set : null;
+        var live = Magpilot.Agent.Sessions.SessionLocks.Live(
+            Magpilot.Agent.Sessions.SessionLocks.Inspect(dir));
+        return live.Any(h => ours is null || !ours.ContainsKey(h.Pid));
+    }
+
+    private void MarkOurPid(string sessionId, int? pid)
+    {
+        if (pid is int p)
+            _ourSessionPids.GetOrAdd(sessionId, _ => new()).TryAdd(p, 0);
     }
 
     public async Task PromptAsync(string sessionId, string text, CancellationToken ct, string? requester = null)
@@ -290,6 +299,7 @@ public sealed class AcpSessionManager
             }
             _sessionClient.TryRemove(sessionId, out _);
             _freshness.Forget(sessionId);
+            _ourSessionPids.TryRemove(sessionId, out _);
         }
     }
 

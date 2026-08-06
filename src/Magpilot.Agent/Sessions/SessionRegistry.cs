@@ -131,13 +131,19 @@ public sealed class SessionRegistry
 
         if (info.State == SessionState.Owned)
         {
-            // Another process may have advanced this session on disk since our
-            // child last synced it. copilot can't re-read disk in place, so
-            // reload into a fresh child before serving the otherwise-stale
-            // resume. When nothing advanced disk this is a no-op and the served
-            // child is reused as before.
+            // Detect (but don't try to auto-fix) a stale resume: another process
+            // advanced this session on disk past what our child loaded. copilot
+            // cannot reload a session in place, and a second child that loads it
+            // cannot prompt while the first still holds it -- so current state
+            // cannot be served from here. Surface it loudly; the resolution is to
+            // restart the agent or drive the session from its owning process.
             if (_acp.MayBeStale(sessionId))
-                await _acp.ReloadFreshAsync(sessionId, info.Cwd ?? Environment.CurrentDirectory, ct);
+                _logger.LogWarning(
+                    "Session {Sid} resume is stale: another process advanced it on disk past our loaded copy, " +
+                    "so served context is behind. Restart the agent or use the owning process for current context.",
+                    sessionId);
+            else
+                _acp.ResyncWatermark(sessionId); // absorb our child's async post-turn flush
             return WithYolo(info)!;
         }
 
