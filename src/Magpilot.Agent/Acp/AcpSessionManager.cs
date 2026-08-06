@@ -31,6 +31,17 @@ public sealed class AcpSessionManager
     /// </summary>
     private readonly ConcurrentDictionary<string, AcpClient> _sessionClient = new();
 
+    // Tracks the on-disk events.jsonl size we last synced per session, so a
+    // resume can tell whether another process advanced the session past what
+    // our in-memory ACP child has seen (the stale-resume condition).
+    private readonly Magpilot.Agent.Sessions.SessionFreshness _freshness = new();
+
+    private static readonly string SessionStateRoot = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".copilot", "session-state");
+
+    private static string EventsPath(string sessionId) =>
+        Path.Combine(SessionStateRoot, sessionId, "events.jsonl");
+
     /// <summary>
     /// Per-session "is a turn currently running?" tracking. Set when
     /// <see cref="PromptAsync"/> enters; cleared when it returns. Used by
@@ -105,6 +116,7 @@ public sealed class AcpSessionManager
         var sid = res?["sessionId"]?.GetValue<string>()
             ?? throw new InvalidOperationException("session/new returned no sessionId");
         _sessionClient[sid] = client;
+        _freshness.RecordServed(sid, EventsPath(sid));
         _logger.LogInformation("New ACP session {SessionId} cwd={Cwd} flavor={Flavor}", sid, cwd, flavor.Key);
         return sid;
     }
@@ -119,6 +131,40 @@ public sealed class AcpSessionManager
             ["mcpServers"] = new JsonArray(),
         }, ct, timeoutSec: 300);
         _sessionClient[sessionId] = client;
+        _freshness.RecordServed(sessionId, EventsPath(sessionId));
+    }
+
+    /// <summary>
+    /// True if another process advanced this session's on-disk events past what
+    /// our serving child last synced -- so a resume would otherwise be served a
+    /// stale in-memory snapshot. False for sessions we have never served.
+    /// </summary>
+    public bool MayBeStale(string sessionId) =>
+        _freshness.MayBeStale(sessionId, EventsPath(sessionId));
+
+    /// <summary>
+    /// Reload a session that was advanced on disk into a fresh, dedicated
+    /// copilot --acp child. copilot won't re-read disk for a session its current
+    /// child already holds, so a brand-new child is the only way to serve
+    /// current state. Future prompts/streams for the session route to the fresh
+    /// child; the previously-serving child keeps its now-inert in-memory copy
+    /// (we simply stop routing to it -- it processes no further turns, so it
+    /// writes nothing).
+    /// </summary>
+    public async Task ReloadFreshAsync(string sessionId, string cwd, CancellationToken ct)
+    {
+        _logger.LogWarning(
+            "Reloading session {Sid} into a fresh ACP child -- on-disk state advanced past the serving child",
+            sessionId);
+        var fresh = await _pool.StartDedicatedAsync(AcpFlavor.Default, ct);
+        await fresh.CallAsync("session/load", new JsonObject
+        {
+            ["sessionId"] = sessionId,
+            ["cwd"] = cwd,
+            ["mcpServers"] = new JsonArray(),
+        }, ct, timeoutSec: 300);
+        _sessionClient[sessionId] = fresh;
+        _freshness.RecordServed(sessionId, EventsPath(sessionId));
     }
 
     public async Task PromptAsync(string sessionId, string text, CancellationToken ct, string? requester = null)
@@ -154,6 +200,10 @@ public sealed class AcpSessionManager
 
         // Notify subscribers so the SPA can clear its busy/thinking flags.
         Publish(sessionId, new TurnComplete(stopReason));
+
+        // Our child just advanced the session on disk; resync the freshness
+        // watermark so its own writes don't later read as a foreign advance.
+        _freshness.RecordServed(sessionId, EventsPath(sessionId));
     }
 
     /// <summary>
@@ -239,6 +289,7 @@ public sealed class AcpSessionManager
                 }
             }
             _sessionClient.TryRemove(sessionId, out _);
+            _freshness.Forget(sessionId);
         }
     }
 

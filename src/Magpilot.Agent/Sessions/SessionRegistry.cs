@@ -130,7 +130,16 @@ public sealed class SessionRegistry
         }
 
         if (info.State == SessionState.Owned)
+        {
+            // Another process may have advanced this session on disk since our
+            // child last synced it. copilot can't re-read disk in place, so
+            // reload into a fresh child before serving the otherwise-stale
+            // resume. When nothing advanced disk this is a no-op and the served
+            // child is reused as before.
+            if (_acp.MayBeStale(sessionId))
+                await _acp.ReloadFreshAsync(sessionId, info.Cwd ?? Environment.CurrentDirectory, ct);
             return WithYolo(info)!;
+        }
 
         if (info.State == SessionState.Locked)
         {
