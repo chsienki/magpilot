@@ -460,7 +460,7 @@ public sealed class AcpClient : IAsyncDisposable
         if (_proc is not null)
         {
             try { _proc.StandardInput.Close(); } catch { }
-            try { if (!_proc.WaitForExit(2000)) _proc.Kill(); } catch { }
+            try { if (!_proc.WaitForExit(2000)) _proc.Kill(entireProcessTree: true); } catch { }
             _proc.Dispose();
         }
         FailAllPending(new ObjectDisposedException(nameof(AcpClient)));

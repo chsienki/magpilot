@@ -386,6 +386,7 @@ with the installed agent" above.
 | `MAGPILOT_HUB_BEARER` | hub + non-cookie clients | Bearer secret the hub validates for API calls without a session cookie (agents, sidecars, curl, MAUI app). Required for `/api/log` ingest from non-SPA sources. **In active use** -- set it. |
 | `MAGPILOT_AUTO_APPROVE` | agent (optional) | When `"true"`, the agent auto-picks an allow-flavored option for every Copilot `session/request_permission` callback (prefers `allow_always`, falls back to `allow_once`, then any "allow" option). Intended for always-on autonomous agents like Magnus where `/quick-prompt` callers (WhatsApp, cron) have no human to click "approve". Without it, permission requests fan out to SSE subscribers that have no UI to answer, and time out after 5 minutes to a deny. **Don't set this on agents that share a host with the user** (e.g. HENDRIK); only on dedicated agent containers where the trust boundary is the container itself. Superseded for granular use by the per-session yolo toggle (see `MAGPILOT_YOLO_DISABLED` below) but still honoured for backward compat. |
 | `MAGPILOT_YOLO_DISABLED` | agent (optional) | When `"true"`, the per-session yolo toggle is refused with 403; the SPA greys out the YOLO switch and shows a tooltip explaining why. The legacy `MAGPILOT_AUTO_APPROVE` env var is unaffected (it's a separate code path). Set this on user-account agents like HENDRIK where the agent runs with the user's full permissions and unattended auto-approve would be dangerous; leave unset (default-allow) on dedicated container agents like Magnus. |
+| `MAGPILOT_STALE_RECYCLE` | agent (optional) | When set (`1`/`true`/`yes`/`on`), a resume the agent detects as **stale** (the session's `events.jsonl` grew past what our ACP child last synced -- a foreign process advanced it) triggers a **whole-child recycle**: kill the multiplexing `copilot --acp` child, respawn a fresh one, and `session/load` the session from disk so current state is served. Default off; enable per host after soak. Recycle is refused while any co-hosted session has a turn in flight (never kills a live turn); other co-hosted sessions reload from disk on next use. See the `session/close` ACP gotcha for why in-place reload is impossible. |
 | `MAGPILOT_DEV_BYPASS_AUTH` | hub | When `"true"`, skips OAuth (dev only -- redirects `/login` to `/dev-login`). |
 | `MAGPILOT_HUB_DATA` | hub | Directory for `hub.db` and `logs.db`. Defaults to `./data`. |
 | `MAGPILOT_HUB_TRUSTED_PROXIES` | hub | Comma list of IPs allowed to set `X-Forwarded-*` (NPM IP). Defaults to `127.0.0.1,::1` -- **required** when NPM and the hub run as containers on the same LXC under `network_mode: host`, since NPM's request reaches the hub from `127.0.0.1` not the LXC's external IP. Without this, `X-Forwarded-Proto: https` is dropped, OAuth `redirect_uri` becomes `http://...` and GitHub rejects. |
@@ -1123,9 +1124,20 @@ them by breaking them.
   Practical consequence for `SessionRegistry.ReleaseFromHostAsync`:
   if the host has appended new events to `events.jsonl` while it
   drove the session, the agent's multiplex copy is **stale** -- it
-  still holds whatever it knew at acquire-for-host time. Documented
-  as a known limit; the proper Phase 2+ fix is killing+respawning
-  the default-flavor multiplex child on each release.
+  still holds whatever it knew at acquire-for-host time. So a stale
+  resume cannot be fixed in place. `AcpSessionManager.RecycleForStaleAsync`
+  addresses it by killing the multiplexing child (the only way copilot
+  releases a loaded session) and respawning a fresh one that reloads
+  current state from disk; opt-in via `MAGPILOT_STALE_RECYCLE`, gated by
+  an in-flight guard so a live turn is never killed. **Empirical (do NOT
+  relearn):** two live `copilot --acp` children holding one session hang
+  the second's `session/prompt`, but a `copilot --resume` *terminal*
+  holding it does NOT block a fresh `--acp` child's load+prompt -- so
+  recycle (which never runs two `--acp` children per session) works even
+  when a foreign terminal co-holds the session. Staleness is detected via
+  a per-session `events.jsonl` watermark (`SessionFreshness`), settled a
+  few seconds after each of our turns (`ResyncAfterSettleAsync`) so
+  copilot's async post-turn flush isn't mistaken for a foreign advance.
 - **Dead-child respawn in `AcpFlavorPool.AcquireAsync`.** A long-running
   agent eventually sees its cached `copilot --acp` child die (crash,
   OOM, machine sleep, copilot CLI self-update mid-run). Without

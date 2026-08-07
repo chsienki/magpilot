@@ -4,6 +4,17 @@ using Magpilot.Shared.Models;
 
 namespace Magpilot.Agent.Acp;
 
+/// <summary>Result of <see cref="AcpSessionManager.RecycleForStaleAsync"/>.</summary>
+public enum RecycleOutcome
+{
+    /// <summary>The session isn't loaded into any child here; nothing to recycle.</summary>
+    NotLoaded,
+    /// <summary>A co-hosted session has a turn in flight; recycle was refused to avoid killing it.</summary>
+    Busy,
+    /// <summary>The child was recycled and the session reloaded from disk.</summary>
+    Recycled,
+}
+
 /// <summary>
 /// Higher-level wrapper that bundles ACP method calls with structured event
 /// dispatch. Holds a per-session subscriber list so HTTP SSE handlers can
@@ -144,14 +155,71 @@ public sealed class AcpSessionManager
     }
 
     /// <summary>
+    /// Clear a stale resume by recycling the multiplexing ACP child that holds
+    /// <paramref name="sessionId"/>: kill it (the only way copilot releases a
+    /// loaded session -- <c>session/close</c> is unimplemented and
+    /// <c>session/load</c> won't re-read disk for an already-loaded session),
+    /// spawn a fresh child, and reload the session from disk so current state is
+    /// served. Every OTHER session the child multiplexed is dropped from our
+    /// routing and its stale lock reaped, so it reads as Dormant and reloads from
+    /// disk on next adopt. Refuses (<see cref="RecycleOutcome.Busy"/>) while any
+    /// co-hosted session has a turn in flight, so a live turn is never killed.
+    /// <paramref name="cwdResolver"/> supplies the reload cwd; the registry backs
+    /// it with the session scanner.
+    /// </summary>
+    public async Task<RecycleOutcome> RecycleForStaleAsync(string sessionId, Func<string, string?> cwdResolver, CancellationToken ct)
+    {
+        if (!_sessionClient.TryGetValue(sessionId, out var target))
+            return RecycleOutcome.NotLoaded;
+
+        var coHosted = _sessionClient
+            .Where(kv => ReferenceEquals(kv.Value, target))
+            .Select(kv => kv.Key)
+            .ToList();
+
+        var busy = coHosted.Where(_inFlight.ContainsKey).ToList();
+        if (busy.Count > 0)
+        {
+            _logger.LogWarning(
+                "Stale recycle for {Sid} deferred: {Count} co-hosted session(s) have a turn in flight ({Busy})",
+                sessionId, busy.Count, string.Join(", ", busy));
+            return RecycleOutcome.Busy;
+        }
+
+        _logger.LogWarning(
+            "Recycling multiplexing ACP child to clear stale resume of {Sid}; {Count} co-hosted session(s) will reload from disk on next use",
+            sessionId, coHosted.Count);
+
+        await _pool.RecycleAsync(AcpFlavor.Default, ct);
+
+        // Drop routing for every session the killed child held and reap its now-
+        // dead locks so a rescan sees Dormant (free to reload), not Locked.
+        foreach (var s in coHosted)
+        {
+            _sessionClient.TryRemove(s, out _);
+            _freshness.Forget(s);
+            _ourSessionPids.TryRemove(s, out _);
+            try { Magpilot.Agent.Sessions.SessionLocks.ReapDead(Path.Combine(SessionStateRoot, s)); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Reaping locks for {Sid} during recycle threw", s); }
+        }
+
+        // Eagerly reload the session that triggered this so the resume serves
+        // current state; bystanders self-heal via the Dormant path on next use.
+        var cwd = cwdResolver(sessionId) ?? Environment.CurrentDirectory;
+        await LoadSessionAsync(sessionId, cwd, AcpFlavor.Default, ct);
+        return RecycleOutcome.Recycled;
+    }
+
+    /// <summary>
     /// True if a resume would be served a stale in-memory snapshot: the session's
-    /// on-disk events have grown past what our child last synced AND a live lock
-    /// is held by a process that is not one of our children for this session (a
-    /// genuinely foreign writer). Requiring a foreign holder is what stops our
-    /// own child's async post-turn disk flush from reading as staleness.
+    /// on-disk events have grown past what our child last synced. A foreign writer
+    /// that has since exited still left us behind, so this does NOT require a live
+    /// foreign holder. Our own child's asynchronous post-turn disk flush is
+    /// absorbed by <see cref="ResyncAfterSettleAsync"/> (settle-then-record) so it
+    /// isn't mistaken for a foreign advance here.
     /// </summary>
     public bool MayBeStale(string sessionId) =>
-        _freshness.MayBeStale(sessionId, EventsPath(sessionId)) && HasForeignLiveHolder(sessionId);
+        _freshness.MayBeStale(sessionId, EventsPath(sessionId));
 
     /// <summary>
     /// Resync the freshness watermark to the current on-disk size. Called after a
@@ -161,7 +229,40 @@ public sealed class AcpSessionManager
     public void ResyncWatermark(string sessionId) =>
         _freshness.RecordServed(sessionId, EventsPath(sessionId));
 
-    private bool HasForeignLiveHolder(string sessionId)
+    /// <summary>
+    /// Resync the freshness watermark after a turn once copilot has finished its
+    /// asynchronous post-turn flush. Polls events.jsonl until its size stops
+    /// growing, then records it, so our own turn's flushed tail (final chunks +
+    /// usage_update) is not later mistaken for a foreign advance. Bounded so a
+    /// runaway (or a concurrent foreign writer) can never leak the task; a foreign
+    /// write that lands inside the settle window is absorbed into our watermark --
+    /// a narrow race, and the next foreign write is still caught.
+    /// </summary>
+    private async Task ResyncAfterSettleAsync(string sessionId)
+    {
+        try
+        {
+            var path = EventsPath(sessionId);
+            long last = -1;
+            var stable = 0;
+            for (var i = 0; i < 40 && stable < 3; i++) // <= ~20s; settle after ~1.5s stable
+            {
+                await Task.Delay(500);
+                var size = Magpilot.Agent.Sessions.SessionFreshness.Watermark(path);
+                if (size == last) stable++;
+                else { stable = 0; last = size; }
+            }
+            _freshness.RecordServed(sessionId, path);
+        }
+        catch { /* best-effort */ }
+    }
+
+    /// <summary>
+    /// True if a live lock on this session is held by a process that is not one of
+    /// our children for it (a genuinely foreign holder). Used to warn that a
+    /// recycled session may go stale again while another process keeps writing.
+    /// </summary>
+    public bool HasForeignLiveHolder(string sessionId)
     {
         var dir = Path.Combine(SessionStateRoot, sessionId);
         var ours = _ourSessionPids.TryGetValue(sessionId, out var set) ? set : null;
@@ -212,7 +313,13 @@ public sealed class AcpSessionManager
 
         // Our child just advanced the session on disk; resync the freshness
         // watermark so its own writes don't later read as a foreign advance.
+        // Record immediately, then settle: copilot flushes the turn tail (final
+        // chunks + usage_update) asynchronously after session/prompt returns, so
+        // a one-shot record here can miss the tail and later read as a foreign
+        // advance. The settle task waits for the file to stop growing and records
+        // again.
         _freshness.RecordServed(sessionId, EventsPath(sessionId));
+        _ = ResyncAfterSettleAsync(sessionId);
     }
 
     /// <summary>

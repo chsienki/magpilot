@@ -19,6 +19,14 @@ public sealed class SessionRegistry
     private readonly ILogger<SessionRegistry> _logger;
     private readonly ConcurrentDictionary<string, byte> _owned = new();
 
+    // Opt-in: when set, a resume detected as stale recycles the multiplexing ACP
+    // child and reloads current disk state instead of only warning. Default off
+    // (enable with MAGPILOT_STALE_RECYCLE=1|true|yes|on) so it is turned on
+    // deliberately per host.
+    private readonly bool _recycleOnStale =
+        (Environment.GetEnvironmentVariable("MAGPILOT_STALE_RECYCLE") ?? "").Trim().ToLowerInvariant()
+            is "1" or "true" or "yes" or "on";
+
     public SessionRegistry(AcpSessionManager acp, SessionScanner scanner, HostOwnership hostOwnership, YoloRegistry yolo, ILogger<SessionRegistry> logger)
     {
         _acp = acp;
@@ -41,6 +49,10 @@ public sealed class SessionRegistry
     // codebase.
     private SessionInfo? WithYolo(SessionInfo? info) =>
         info is null ? null : info with { Yolo = _yolo.IsEnabled(info.Id) };
+
+    // cwd for a session, from its on-disk workspace.yaml; backs the recycle
+    // reload path so AcpSessionManager stays free of the scanner.
+    private string? CwdFor(string sessionId) => _scanner.Get(sessionId, Owned)?.Cwd;
 
     public async Task<SessionInfo> CreateAsync(string? cwd, bool useAgency, CancellationToken ct, string? name = null)
     {
@@ -131,17 +143,44 @@ public sealed class SessionRegistry
 
         if (info.State == SessionState.Owned)
         {
-            // Detect (but don't try to auto-fix) a stale resume: another process
-            // advanced this session on disk past what our child loaded. copilot
-            // cannot reload a session in place, and a second child that loads it
-            // cannot prompt while the first still holds it -- so current state
-            // cannot be served from here. Surface it loudly; the resolution is to
-            // restart the agent or drive the session from its owning process.
+            // Detect a stale resume: another process advanced this session on disk
+            // past what our child loaded. copilot cannot reload a session in place,
+            // so the only way to serve current state is to recycle the child that
+            // holds it (kill + respawn + reload from disk). Opt-in via
+            // MAGPILOT_STALE_RECYCLE; otherwise surface it loudly.
             if (_acp.MayBeStale(sessionId))
+            {
+                if (_recycleOnStale)
+                {
+                    var outcome = await _acp.RecycleForStaleAsync(sessionId, CwdFor, ct);
+                    switch (outcome)
+                    {
+                        case RecycleOutcome.Recycled:
+                            _logger.LogWarning(
+                                "Session {Sid} resume was stale; recycled the ACP child and reloaded current state from disk",
+                                sessionId);
+                            if (_acp.HasForeignLiveHolder(sessionId))
+                                _logger.LogWarning(
+                                    "Session {Sid} still has a live foreign holder after recycle; it may go stale again while that process keeps writing",
+                                    sessionId);
+                            break;
+                        case RecycleOutcome.Busy:
+                            _logger.LogWarning(
+                                "Session {Sid} resume is stale but a co-hosted turn is in flight; served context stays behind until it is idle",
+                                sessionId);
+                            break;
+                        case RecycleOutcome.NotLoaded:
+                            _acp.ResyncWatermark(sessionId);
+                            break;
+                    }
+                    return WithYolo(_scanner.Get(sessionId, Owned) ?? info)!;
+                }
+
                 _logger.LogWarning(
-                    "Session {Sid} resume is stale: another process advanced it on disk past our loaded copy, " +
-                    "so served context is behind. Restart the agent or use the owning process for current context.",
+                    "Session {Sid} resume is stale: another process advanced it on disk past our loaded copy, so served " +
+                    "context is behind. Set MAGPILOT_STALE_RECYCLE=true to auto-recycle, or use the owning process for current context.",
                     sessionId);
+            }
             else
                 _acp.ResyncWatermark(sessionId); // absorb our child's async post-turn flush
             return WithYolo(info)!;

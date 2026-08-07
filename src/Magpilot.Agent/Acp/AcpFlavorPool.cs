@@ -84,6 +84,35 @@ public sealed class AcpFlavorPool(ILoggerFactory loggerFactory, ILogger<AcpFlavo
         finally { _lock.Release(); }
     }
 
+    /// <summary>
+    /// Dispose the cached client for a multiplexing flavor and spawn a fresh one
+    /// in its place, returning the replacement. Used to clear a stale-resume: a
+    /// long-lived ACP child serves a frozen in-memory snapshot of a session that
+    /// another process advanced on disk, and copilot's <c>session/load</c> won't
+    /// re-read disk for an already-loaded session. Killing the child is the only
+    /// way to make it release the session so the replacement can load current
+    /// state. This drops every OTHER session the child was multiplexing -- the
+    /// caller is responsible for re-mapping/reloading those.
+    /// </summary>
+    public async Task<AcpClient> RecycleAsync(AcpFlavor flavor, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            if (_clients.Remove(flavor.Key, out var existing))
+            {
+                log.LogWarning("Recycling ACP child for flavor {Flavor} (pid={Pid}) to clear stale state",
+                    flavor.Key, existing.ProcessId?.ToString() ?? "?");
+                try { await existing.DisposeAsync(); }
+                catch (Exception ex) { log.LogDebug(ex, "Disposing recycled ACP client threw"); }
+            }
+            var fresh = await StartFreshAsync(flavor, ct);
+            _clients[flavor.Key] = fresh;
+            return fresh;
+        }
+        finally { _lock.Release(); }
+    }
+
     // Warn once per drifted child: a long-lived ACP child that launched from a
     // copilot binary since replaced on disk (an in-place upgrade) keeps serving
     // the old image. Restarting the agent is the fix; surfacing it turns a
