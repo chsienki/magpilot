@@ -1959,3 +1959,4 @@ Open items:
 - 2026-06-15: vertical alignment of the chat-toolbar toggles vs the release icon -- "Show thinking" + "YOLO" toggles on the left don't share a baseline with the Logout / release icon on the right.
 - 2026-06-13: ability to upload screenshots
 - 2026-06-13: oauth callbacks -- a local extra server the PC instance runs so the SPA can intercept and forward the callback back to the agent
+- 2026-08-07: installer-coordinated shutdown + restart of running magpilot exes -- the magpilot exe's should be tellable by the installer to temporarily shut down, then restart once the updated binary is in place, enabling automatic in-place updates without manually closing + reopening a lot of sessions
