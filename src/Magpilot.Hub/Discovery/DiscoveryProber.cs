@@ -54,12 +54,14 @@ public sealed class DiscoveryProber : BackgroundService
         udp.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
         var payload = Encoding.UTF8.GetBytes(Magic);
         // Send to each interface's DIRECTED broadcast, not just
-        // 255.255.255.255. The hub shares its LXC's network namespace,
-        // which is multi-homed (eth0 on the LAN + docker bridges), so a
-        // limited broadcast can egress a docker bridge instead of the LAN
-        // and never reach agents like HENDRIK -- they then only come
-        // online via the proxied-call heartbeat, and show OFFLINE after
-        // every hub restart until something calls into them.
+        // 255.255.255.255. The hub shares its LXC's multi-homed
+        // namespace (eth0 on the LAN + docker bridges); a limited
+        // broadcast can egress a docker bridge instead of the LAN, so
+        // directed per-interface broadcasts make the WIRED-LAN segment
+        // reliably covered. Note this does NOT reach a Wi-Fi agent: APs
+        // don't deliver a wired->wireless LAN broadcast to a station, so
+        // a Wi-Fi (or WireGuard) agent is undiscoverable and stays online
+        // via the proxied-call heartbeat instead.
         foreach (var target in Magpilot.Shared.Net.BroadcastAddresses.DiscoveryTargets())
         {
             try { await udp.SendAsync(payload, payload.Length, new IPEndPoint(target, Port)); }

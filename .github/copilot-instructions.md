@@ -942,15 +942,18 @@ rather than spawn parallel implementations.
   the column without a downtime. Don't write bare `ALTER TABLE`
   in `InitDb` -- it'll throw on the second startup.
 
-  > **WireGuard agents can't be discovered, so seed their registry
-  > columns by hand.** UDP discovery (`DiscoveryProber` broadcast) is
-  > the only thing that refreshes an agent's `url` + `flavors`, and it
-  > can't cross a WG point-to-point tunnel (no broadcast domain there).
-  > This is distinct from the multi-homed-LAN case, which IS handled:
-  > `DiscoveryProber` sends to each interface's directed broadcast
-  > (`BroadcastAddresses.DiscoveryTargets`), so a plain LAN host like
-  > HENDRIK is discovered fine. Only genuinely non-broadcast transports
-  > (WG) need the manual seed. Both columns are persisted
+  > **WireGuard and Wi-Fi agents can't be discovered by the hub, so
+  > seed their registry columns by hand.** UDP discovery
+  > (`DiscoveryProber` broadcast) is the only thing that refreshes an
+  > agent's `url` + `flavors`. It can't cross a WG point-to-point tunnel
+  > (no broadcast domain there), and -- verified empirically -- it also
+  > can't reach a **Wi-Fi** agent: APs don't deliver a wired->wireless
+  > LAN broadcast to a station, so the hub's probe never lands on
+  > HENDRIK (on Wi-Fi) even though a directed UNICAST to it works.
+  > `DiscoveryProber` does send per-interface directed broadcasts (which
+  > helps a multi-homed WIRED sender), but that doesn't change the Wi-Fi
+  > outcome. Such agents stay online via the proxied-call heartbeat, not
+  > discovery. Both columns are persisted
   > in `agents` so a WG-only agent (Sandbox, a Dev Box) is a one-time
   > `UPDATE agents SET url=..., flavors='["default","agency"]' WHERE
   > name=...` + hub restart (the registry reads these only in `Load()`
@@ -978,16 +981,18 @@ rather than spawn parallel implementations.
   > knowing: (1) a wedged ACP child that 502s every call will flip an
   > agent OFFLINE (the timeouts are `TaskCanceledException`), so a
   > "went offline" report can actually be a wedged child, not a
-  > network drop; (2) UDP discovery reaches LAN agents via each
-  > interface's DIRECTED broadcast (`BroadcastAddresses.DiscoveryTargets`,
-  > used by `DiscoveryProber`); before that fix the hub sent only the
-  > limited broadcast (255.255.255.255), which on the multi-homed LXC
-  > (eth0 + docker bridges) egressed a docker bridge instead of the LAN,
-  > so a LAN host like HENDRIK never got the probe and showed OFFLINE
-  > after every hub restart until a proxied call re-onlined it. It still
-  > can't cross a WireGuard point-to-point tunnel (no broadcast there) --
-  > WG agents rely on the proxied-call heartbeat. To force an agent
-  > online immediately, make any proxied GET (e.g.
+  > network drop; (2) `DiscoveryProber` sends to each interface's
+  > DIRECTED broadcast (`BroadcastAddresses.DiscoveryTargets`) rather
+  > than only 255.255.255.255 -- correct for a multi-homed WIRED sender
+  > -- BUT broadcast discovery still can't reach a **Wi-Fi** agent:
+  > verified empirically that a directed broadcast to `192.168.1.255`
+  > from the LXC is answered only by the co-located wired `magnus`,
+  > while HENDRIK (on Wi-Fi) answers a directed UNICAST but never the
+  > broadcast. APs forward wireless->wired broadcast (so HENDRIK's own
+  > pair-discovery reaches the hub) but drop wired->wireless broadcast
+  > to a station. So a Wi-Fi agent -- like a WireGuard agent -- is NOT
+  > discoverable and shows OFFLINE after a hub restart until a proxied
+  > call re-onlines it. To force it, make any proxied GET (e.g.
   > `GET /api/agents/<name>/sessions`) with the hub bearer; the SPA does
   > this implicitly the moment someone opens the agent.
 
