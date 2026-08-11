@@ -2694,10 +2694,17 @@
             // copilot still holds replays the growing events.jsonl (duplicated
             // text) and can never cleanly drive it (turns never land) -- the
             // "garbled then stalled" failure. Only Owner None/Agent means the
-            // session is free for us to drive. Poll briefly so a slightly-slow
-            // cooperative release still counts as success.
+            // session is free for us to drive.
+            //
+            // Poll until the holder clears, breaking early on success. The
+            // budget must comfortably outlast a healthy cooperative release
+            // (the launcher exiting its PTY on release_requested) so a
+            // slightly-slow-but-successful handoff is never mistaken for a
+            // stuck terminal -- a full handoff is ~3.4s typical, so give ~6s.
+            // A genuinely stuck/live terminal (e.g. the same session you are
+            // live in) never releases, so it still trips the guard below.
             SessionStateInfo? postState = null;
-            for (var attempt = 0; attempt < 4; attempt++)
+            for (var attempt = 0; attempt < 12; attempt++)
             {
                 postState = await Hub.GetStateAsync(Agent, SessionId);
                 if (postState is null
