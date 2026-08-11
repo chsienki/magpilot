@@ -959,6 +959,22 @@ rather than spawn parallel implementations.
   endpoints will drift; the wrapper exists precisely so they
   don't have to.
 
+  > **A successful proxied call is also the online heartbeat.** On
+  > success `Proxy` calls `reg.MarkOnline(name)`; on a transport
+  > failure (`HttpRequestException`/`TaskCanceledException` -> the 502
+  > branch) it calls `reg.MarkOffline(name)`. Two consequences worth
+  > knowing: (1) a wedged ACP child that 502s every call will flip an
+  > agent OFFLINE (the timeouts are `TaskCanceledException`), so a
+  > "went offline" report can actually be a wedged child, not a
+  > network drop; (2) UDP discovery only round-trips to agents on the
+  > hub's own broadcast segment (co-located `magnus`), NOT across the
+  > Proxmox bridge to a LAN host like HENDRIK or over WireGuard -- so
+  > after a hub restart those remote agents show OFFLINE until the
+  > first successful proxied call re-onlines them. To force it, make
+  > any proxied GET (e.g. `GET /api/agents/<name>/sessions`) with the
+  > hub bearer; the SPA does this implicitly the moment someone opens
+  > the agent.
+
 * **`TaskCompletionSource<bool>` keyed by entity id** -- the
   hub-side push-style long-poll pattern, demonstrated in
   `ClaimService` for claim-status. The waiter awaits the TCS with
