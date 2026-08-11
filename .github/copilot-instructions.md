@@ -1558,6 +1558,26 @@ them (`magpilot --resume=<sid>`) to get full graceful handoff.**
   stream from cache (or `/history` if no cache). The polite knock
   gives a cooperative launcher time to tear down its PTY cleanly;
   the forceful flip catches stuck cases.
+  **Post-dance guard (do NOT drop it):** force-clearing HostOwnership
+  does not evict a launcher that is still wrapping a LIVE, actively-used
+  interactive copilot -- its on-disk `inuse.<pid>.lock` persists, so the
+  scanner re-reports the session `Locked` and `/state` returns
+  `Owner=External` (or still `Host`). Adopting a session a live foreign
+  copilot holds replays the growing `events.jsonl` (duplicated text on the
+  SPA) and never cleanly drives it (turns never land) -- the "garbled then
+  stalled" failure the user hits when they open the SAME session they are
+  live in a terminal. So after the dance, re-probe `GetStateAsync` (a short
+  poll to allow a slightly-slow cooperative release) and only
+  `StartStreamingAsync` when `Owner` is `None`/`Agent`. If it is still
+  `Host`/`External`, re-raise the takeover banner + a Warning snackbar
+  ("close it in the terminal, then reopen here") instead -- sessions
+  persist to disk, so close-then-reopen resumes without loss. A cooperative
+  release or a genuinely dead launcher both leave `Owner` None/Agent, so
+  those keep streaming as before; only the live-holder case is blocked.
+  (Making a forceful take-over of a live terminal actually succeed --
+  killing the foreign lock PID before adopting, the way the normal
+  Locked-adopt path does -- is a heavier follow-up that needs interactive
+  testing since it ends the terminal session.)
 
 **Agent-side stale-lock cleanup** (`Magpilot.Agent/Acp/AcpSessionManager.cs`):
 `CloseAsync` takes a `string? sessionsRoot` parameter and, after

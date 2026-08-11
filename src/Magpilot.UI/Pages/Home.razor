@@ -2686,6 +2686,46 @@
             await Hub.AcquireForHostAsync(Agent, SessionId, hostPid: 0, force: true);
             await Hub.ReleaseAsync(Agent, SessionId, hostPid: 0);
 
+            // Verify the terminal ACTUALLY released before we adopt + stream.
+            // Force-clearing HostOwnership above does not evict a live launcher
+            // that is still wrapping an interactive copilot: its on-disk
+            // inuse.<pid>.lock persists, so the scanner re-reports the session
+            // as Locked (Owner=External). Adopting a session a live foreign
+            // copilot still holds replays the growing events.jsonl (duplicated
+            // text) and can never cleanly drive it (turns never land) -- the
+            // "garbled then stalled" failure. Only Owner None/Agent means the
+            // session is free for us to drive. Poll briefly so a slightly-slow
+            // cooperative release still counts as success.
+            SessionStateInfo? postState = null;
+            for (var attempt = 0; attempt < 4; attempt++)
+            {
+                postState = await Hub.GetStateAsync(Agent, SessionId);
+                if (postState is null
+                    || postState.Owner is not (SessionOwner.Host or SessionOwner.External))
+                {
+                    break;
+                }
+                await Task.Delay(500);
+            }
+            if (postState is { Owner: SessionOwner.Host or SessionOwner.External })
+            {
+                // A live terminal still holds the session. Do NOT stream into
+                // the duplication/deadlock -- re-raise the takeover banner and
+                // point the user at the one action that frees it. Sessions
+                // persist to disk, so closing the terminal and reopening here
+                // resumes the conversation without loss.
+                _hostHasTakenOver = true;
+                _hostTakeoverPid = postState.HostPid ?? postState.Info.OwnerPid;
+                _hostTakeoverRequester = null;
+                _streamingFor = $"{Agent}/{SessionId}";
+                Snackbar.Add(
+                    "This session is still open in a terminal, so it can't be driven "
+                    + "from here yet. Close it in the terminal, then reopen this session "
+                    + "to continue.",
+                    Severity.Warning);
+                return;
+            }
+
             _hostHasTakenOver = false;
             _hostTakeoverRequester = null;
             _hostTakeoverPid = null;

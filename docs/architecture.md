@@ -568,7 +568,15 @@ over" MudAlert with a "Take back" button. Even before any takeover,
 fetch and skips streaming entirely if `Owner=Host`. The "Take back"
 flow is the symmetric counter-pattern: `release-request(force=true)`
 + 1s grace + `acquire-for-host(0, force=true)` + `release(0)` +
-restart stream.
+restart stream. **Guarded**: after that dance it re-probes
+`GetStateAsync` and only restarts the stream when `Owner` is
+`None`/`Agent`. If the session is still held by a live foreign
+process (`Owner=Host`/`External`, i.e. a terminal that did not
+release), it re-raises the takeover banner instead of adopting --
+adopting a live-foreign-held session replays its growing
+`events.jsonl` (duplicated text) and never cleanly drives it
+(the "garbled then stalled" symptom). Close-then-reopen resumes
+without loss since sessions persist to disk.
 
 **End-to-end timing**: a measured-typical 409 -> release-request ->
 SSE -> wrapper exit -> retry -> 202 dance completes in ~3.4s.
