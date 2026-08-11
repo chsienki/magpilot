@@ -53,6 +53,47 @@ public sealed class SessionLocksTests : IDisposable
     }
 
     [Fact]
+    public void Foreign_returns_live_holders_that_are_not_ours()
+    {
+        // pids 10, 20, 30 alive; 40 dead. 20 is our own ACP child.
+        string[] files = ["inuse.10.lock", "inuse.20.lock", "inuse.30.lock", "inuse.40.lock"];
+        var holders = SessionLocks.Inspect(files, pid => pid != 40);
+
+        var foreign = SessionLocks.Foreign(holders, isOurs: pid => pid == 20);
+
+        Assert.Equal(new[] { 10, 30 }, foreign.Select(h => h.Pid).OrderBy(p => p));
+    }
+
+    [Fact]
+    public void Foreign_never_returns_our_own_pid_even_when_alive()
+    {
+        // Safety invariant: an agent that kills Foreign() must never take down
+        // its own ACP child, so our pid is excluded regardless of liveness.
+        string[] files = ["inuse.100.lock"];
+        var holders = SessionLocks.Inspect(files, pid => true); // 100 is alive
+
+        Assert.Empty(SessionLocks.Foreign(holders, isOurs: pid => pid == 100));
+    }
+
+    [Fact]
+    public void Foreign_excludes_dead_holders()
+    {
+        string[] files = ["inuse.55.lock"];
+        var holders = SessionLocks.Inspect(files, pid => false); // 55 is dead
+
+        Assert.Empty(SessionLocks.Foreign(holders, isOurs: _ => false));
+    }
+
+    [Fact]
+    public void Foreign_treats_all_live_holders_as_foreign_when_none_are_ours()
+    {
+        string[] files = ["inuse.7.lock", "inuse.8.lock"];
+        var holders = SessionLocks.Inspect(files, pid => true);
+
+        Assert.Equal(new[] { 7, 8 }, SessionLocks.Foreign(holders, isOurs: _ => false).Select(h => h.Pid).OrderBy(p => p));
+    }
+
+    [Fact]
     public void ReapDead_deletes_only_dead_owner_locks()
     {
         var live = Path.Combine(_dir, $"inuse.{Environment.ProcessId}.lock");

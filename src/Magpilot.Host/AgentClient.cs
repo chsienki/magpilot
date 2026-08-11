@@ -14,6 +14,7 @@ namespace Magpilot.Host;
 public sealed class AgentClient : IDisposable
 {
     private readonly HttpClient _http;
+    private readonly HttpClient _streamHttp;
 
     public AgentClient(string? agentUrl = null, string? agentToken = null)
     {
@@ -25,8 +26,24 @@ public sealed class AgentClient : IDisposable
                 "Set the env var, fix the value in {install}\\config\\magpilot.env, " +
                 "or pass --magpilot-skip-check to bypass the agent entirely.");
 
-        _http = new HttpClient { BaseAddress = new Uri(agentUrl.TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(15) };
+        var baseUri = new Uri(agentUrl.TrimEnd('/') + "/");
+
+        // Short-timeout client for the quick request/response calls (state,
+        // release-request, acquire, release). 15s fails fast if the agent is
+        // unreachable so the launcher doesn't hang on startup.
+        _http = new HttpClient { BaseAddress = baseUri, Timeout = TimeSpan.FromSeconds(15) };
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", agentToken);
+
+        // Separate client for the long-lived SSE subscribe. It MUST NOT carry a
+        // wall-clock timeout: the stream is open for the life of the session
+        // (idle but for a ~15s heartbeat), and -- critically -- its reconnect
+        // path fetches fresh headers right when the agent is restarting, when
+        // Kestrel is blocked ~30-45s by AcpStarter. A 15s timeout there throws
+        // TaskCanceledException mid-reconnect; infinite timeout lets the header
+        // fetch simply wait for Kestrel to come back. Teardown is driven by the
+        // CancellationToken, not the clock.
+        _streamHttp = new HttpClient { BaseAddress = baseUri, Timeout = Timeout.InfiniteTimeSpan };
+        _streamHttp.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", agentToken);
     }
 
     public string BaseUrl => _http.BaseAddress!.ToString().TrimEnd('/');
@@ -89,7 +106,7 @@ public sealed class AgentClient : IDisposable
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
         using var req = new HttpRequestMessage(HttpMethod.Get, $"api/sessions/{sessionId}/stream");
-        using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+        using var resp = await _streamHttp.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
         resp.EnsureSuccessStatusCode();
         await using var stream = await resp.Content.ReadAsStreamAsync(ct);
         using var reader = new StreamReader(stream);
@@ -107,5 +124,9 @@ public sealed class AgentClient : IDisposable
         }
     }
 
-    public void Dispose() => _http.Dispose();
+    public void Dispose()
+    {
+        _http.Dispose();
+        _streamHttp.Dispose();
+    }
 }

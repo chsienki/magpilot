@@ -47,6 +47,19 @@ public static class SessionLocks
     public static IReadOnlyList<Holder> Dead(IReadOnlyList<Holder> holders) =>
         holders.Where(h => !h.Alive).ToList();
 
+    /// <summary>
+    /// The LIVE holders whose pid is not "ours" per <paramref name="isOurs"/> --
+    /// i.e. genuinely foreign attached processes (a launcher's interactive
+    /// copilot, a stray <c>copilot --resume</c>), as opposed to the agent's own
+    /// ACP child. Pure: both liveness (<see cref="Holder.Alive"/>) and ownership
+    /// are caller-supplied, so this is unit-testable without a process table or
+    /// the agent's session bookkeeping. Load-bearing safety property: a pid the
+    /// predicate calls ours is never returned, so callers that kill the result
+    /// can never take down the agent's own child.
+    /// </summary>
+    public static IReadOnlyList<Holder> Foreign(IReadOnlyList<Holder> holders, Func<int, bool> isOurs) =>
+        holders.Where(h => h.Alive && !isOurs(h.Pid)).ToList();
+
     /// <summary>Default liveness check: is a process with this id running?</summary>
     public static bool ProcessAlive(int pid)
     {

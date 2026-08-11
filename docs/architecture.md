@@ -522,8 +522,12 @@ one re-reads the file before writing).
    a `magpilot` launcher is re-marked Host-owned, recovering sessions
    the persisted map never recorded. The launcher's own
    `release_requested` subscription reconnects with backoff across
-   agent restarts (`SubscribeWithReconnectAsync`) so the handoff stays
-   cooperative rather than degrading to a force kill.
+   agent restarts (`SubscribeWithReconnectAsync`, over a dedicated
+   infinite-timeout `AgentClient._streamHttp` so the reconnect's header
+   fetch survives Kestrel's ~45s cold start) so the handoff stays
+   cooperative rather than degrading to a force kill. Regardless,
+   agent-side eviction in `ReleaseFromHostAsync` is the hard guarantee
+   if that subscription is ever missing (old launcher) or wedged.
    The on-disk `inuse.<PID>.lock` files are advisory only -- two
    PIDs can claim the same session simultaneously and the file
    system does nothing to prevent it. (Verified empirically
@@ -571,15 +575,24 @@ flow is the symmetric counter-pattern: `release-request(force=true)`
 restart stream. Both `acquire-for-host` and `release` ride the hub's
 `Action` (90s) client, not `Read` (10s): `release` re-adopts via
 `session/load`, which can exceed 10s and would otherwise surface as
-`Take back failed: 502` even against a healthy agent. **Guarded**:
-after that dance it re-probes `GetStateAsync` and only restarts the
-stream when `Owner` is `None`/`Agent`. If the session is still held by
-a live foreign process (`Owner=Host`/`External`, i.e. a terminal that
-did not release), it re-raises the takeover banner instead of
-adopting -- adopting a live-foreign-held session replays its growing
-`events.jsonl` (duplicated text) and never cleanly drives it
-(the "garbled then stalled" symptom). Close-then-reopen resumes
-without loss since sessions persist to disk.
+`Take back failed: 502` even against a healthy agent. **Agent-side
+eviction** (`ReleaseFromHostAsync`): before re-loading, the agent
+force-kills any still-live *foreign* holder of the session (a
+launcher's interactive copilot that never tore down) and reaps its
+advisory lock, so there is a single writer. This is the load-bearing
+guarantee -- cooperative teardown (the launcher hearing
+`release_requested` and exiting its own copilot) is best-effort and
+DID fail in practice when an agent restart severed the launcher's SSE
+subscription; without eviction the forceful take-back completed the
+adopt but left two live drivers appending to one `events.jsonl` (the
+"garbled then stalled" split-brain). The agent only ever kills a
+genuinely foreign holder, never its own ACP child. If a foreign holder
+somehow survives the kill, `release` refuses to adopt (leaves
+`Owner=External`) rather than split-brain. **SPA guard** (backstop):
+after the dance it re-probes `GetStateAsync` and only restarts the
+stream when `Owner` is `None`/`Agent`; a surviving live foreign holder
+(`Owner=Host`/`External`) re-raises the takeover banner instead.
+Close-then-reopen resumes without loss since sessions persist to disk.
 
 **End-to-end timing**: a measured-typical 409 -> release-request ->
 SSE -> wrapper exit -> retry -> 202 dance completes in ~3.4s.

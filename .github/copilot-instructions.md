@@ -1567,18 +1567,30 @@ is non-fatal; the existing 409 path still catches uncoordinated cases.
 **Launcher SSE reconnect** (`Magpilot.Host/Program.cs`,
 `SubscribeWithReconnectAsync`): the launcher listens for
 `release_requested` on the session's SSE stream so a web take-over
-can preempt it cooperatively. That subscription reconnects with
-backoff (1s -> 15s cap) until copilot exits or a release arrives.
-Without reconnect, an agent restart (re-pair, update) dropped the
-single `await foreach`, leaving the still-alive launcher permanently
-deaf to `release_requested`: a later SPA take-over would knock, time
-out, and fall back to a force kill. This is the launcher-side twin of
-the agent's `HostOwnership` persistence + `HostOwnershipReconciler` --
-both keep a long-lived interactive session cooperatively preemptible
-across agent restarts. **Sessions whose launcher predates this
-reconnect (< 0.1.18) still can't hear a post-restart release; they
-reclaim to Host via ancestry but only get force handoff. Re-launch
-them (`magpilot --resume=<sid>`) to get full graceful handoff.**
+can preempt it cooperatively. The subscription reconnects with backoff
+(1s -> 15s cap) until copilot exits or a release arrives, surviving an
+agent restart (re-pair, update). **This silently died across a restart
+until fixed -- know the failure so you don't reintroduce it.** Two
+coupled bugs: (1) `AgentClient` used ONE 15s-timeout `HttpClient` for
+both quick calls and the SSE subscribe; the agent's `AcpStarter`
+blocks Kestrel ~30-45s on startup, so a reconnect's header fetch
+exceeded 15s and threw `TaskCanceledException`; (2) that exception is
+an `OperationCanceledException` whose token is the internal timeout,
+NOT the loop's `ct`, but the catch was a blanket
+`catch (OperationCanceledException) { return; }` -- so the loop
+mistook a restart timeout for a real shutdown, returned, and left the
+launcher permanently deaf (a later web take-over then had to
+force-kill instead of handing off). Fix: a dedicated
+`AgentClient._streamHttp` with `Timeout.InfiniteTimeSpan` for the
+subscribe (teardown is via `ct`, not the clock), plus
+`catch (OperationCanceledException) when (ct.IsCancellationRequested)`
+so only OUR cancellation stops the loop; any other OCE falls through to
+backoff + reconnect. Don't merge the two clients or drop the `when`
+filter. **Belt-and-braces:** even with reconnect working, agent-side
+eviction (`ReleaseFromHostAsync`, see the take-back guard above) is the
+hard correctness guarantee -- it force-evicts the live foreign copilot
+so a forceful take-over succeeds regardless of launcher version
+(including < 0.1.18 with no reconnect at all) or a wedged subscription.
 
 **SPA-side reactivity** (`Magpilot.UI/Pages/Home.razor`):
 - `Apply()` handles the `ReleaseRequested` SSE case: sets
@@ -1599,26 +1611,33 @@ them (`magpilot --resume=<sid>`) to get full graceful handoff.**
   stream from cache (or `/history` if no cache). The polite knock
   gives a cooperative launcher time to tear down its PTY cleanly;
   the forceful flip catches stuck cases.
-  **Post-dance guard (do NOT drop it):** force-clearing HostOwnership
-  does not evict a launcher that is still wrapping a LIVE, actively-used
-  interactive copilot -- its on-disk `inuse.<pid>.lock` persists, so the
-  scanner re-reports the session `Locked` and `/state` returns
-  `Owner=External` (or still `Host`). Adopting a session a live foreign
-  copilot holds replays the growing `events.jsonl` (duplicated text on the
-  SPA) and never cleanly drives it (turns never land) -- the "garbled then
-  stalled" failure the user hits when they open the SAME session they are
-  live in a terminal. So after the dance, re-probe `GetStateAsync` (a short
-  poll to allow a slightly-slow cooperative release) and only
-  `StartStreamingAsync` when `Owner` is `None`/`Agent`. If it is still
-  `Host`/`External`, re-raise the takeover banner + a Warning snackbar
-  ("close it in the terminal, then reopen here") instead -- sessions
-  persist to disk, so close-then-reopen resumes without loss. A cooperative
-  release or a genuinely dead launcher both leave `Owner` None/Agent, so
-  those keep streaming as before; only the live-holder case is blocked.
-  (Making a forceful take-over of a live terminal actually succeed --
-  killing the foreign lock PID before adopting, the way the normal
-  Locked-adopt path does -- is a heavier follow-up that needs interactive
-  testing since it ends the terminal session.)
+  **Agent-side eviction is the load-bearing guarantee.**
+  `ReleaseFromHostAsync` force-kills any still-live *foreign* holder of
+  the session (a launcher's interactive copilot that never tore down)
+  and reaps its advisory `inuse.<pid>.lock` before it re-loads, so the
+  agent becomes the single writer. This does NOT depend on the launcher
+  cooperating -- cooperative teardown (the launcher hearing
+  `release_requested` over SSE and exiting its own copilot) is
+  best-effort: a launcher predating the SSE reconnect (< 0.1.18) never
+  hears a post-restart release, and even 0.1.20 had a reconnect bug that
+  left it deaf after an agent restart (a 15s client timeout vs Kestrel's
+  ~45s cold start, misclassified as cancellation -- fixed in 0.1.24; see
+  "Launcher SSE reconnect"). Eviction is the guarantee that holds
+  regardless. The agent only ever kills a genuinely foreign holder,
+  never its own ACP child (`_ourSessionPids` gates it; see
+  `AcpSessionManager.EvictForeignLiveHolders`). After the foreign
+  copilot dies, the launcher's own "child exited -> release + return"
+  path fires and it exits cleanly.
+  **Post-dance guard (belt-and-braces, do NOT drop it):** if a foreign
+  holder somehow survives the kill (e.g. we lacked permission),
+  `ReleaseFromHostAsync` refuses to mark `_owned`, so `/state` returns
+  `Owner=External` and the SPA re-probes `GetStateAsync` after the dance
+  and only `StartStreamingAsync` when `Owner` is `None`/`Agent`. If it
+  is still `Host`/`External`, it re-raises the takeover banner + a
+  Warning snackbar ("close it in the terminal, then reopen here")
+  instead -- sessions persist to disk, so close-then-reopen resumes
+  without loss. Together: eviction makes the take-over actually succeed;
+  the guard prevents a silent split-brain if eviction ever can't.
 
 **Agent-side stale-lock cleanup** (`Magpilot.Agent/Acp/AcpSessionManager.cs`):
 `CloseAsync` takes a `string? sessionsRoot` parameter and, after

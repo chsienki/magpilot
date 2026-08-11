@@ -266,9 +266,52 @@ public sealed class AcpSessionManager
     {
         var dir = Path.Combine(SessionStateRoot, sessionId);
         var ours = _ourSessionPids.TryGetValue(sessionId, out var set) ? set : null;
-        var live = Magpilot.Agent.Sessions.SessionLocks.Live(
-            Magpilot.Agent.Sessions.SessionLocks.Inspect(dir));
-        return live.Any(h => ours is null || !ours.ContainsKey(h.Pid));
+        return Magpilot.Agent.Sessions.SessionLocks.Foreign(
+            Magpilot.Agent.Sessions.SessionLocks.Inspect(dir),
+            pid => ours is not null && ours.ContainsKey(pid)).Count > 0;
+    }
+
+    /// <summary>
+    /// Force-kill every genuinely-foreign live lock holder on this session and
+    /// reap the (now-dead) advisory locks, returning the pids evicted. A foreign
+    /// holder is a live <c>inuse.&lt;pid&gt;.lock</c> whose pid is not one of our
+    /// own ACP children for this session -- i.e. a launcher's interactive copilot
+    /// (or a stray <c>copilot --resume</c>) that never let go. copilot exposes no
+    /// working <c>session/close</c>, so killing the process is the only way to
+    /// drop its lock and guarantee a single writer before we <c>session/load</c>.
+    /// Our own child is never a candidate: <see cref="_ourSessionPids"/> is
+    /// populated the instant the child attaches (session/new + LoadSession) and
+    /// cleared only alongside its lock removal (close/recycle), so a live holder
+    /// absent from that set is always foreign.
+    /// </summary>
+    public IReadOnlyList<int> EvictForeignLiveHolders(string sessionId)
+    {
+        var dir = Path.Combine(SessionStateRoot, sessionId);
+        var ours = _ourSessionPids.TryGetValue(sessionId, out var set) ? set : null;
+        var foreign = Magpilot.Agent.Sessions.SessionLocks.Foreign(
+                Magpilot.Agent.Sessions.SessionLocks.Inspect(dir),
+                pid => ours is not null && ours.ContainsKey(pid))
+            .Select(h => h.Pid)
+            .ToList();
+
+        foreach (var pid in foreign)
+        {
+            try
+            {
+                using var p = System.Diagnostics.Process.GetProcessById(pid);
+                _logger.LogWarning("Evicting live foreign holder PID {Pid} on {Sid} (forceful host take-back)", pid, sessionId);
+                p.Kill(entireProcessTree: true);
+                p.WaitForExit(5000);
+            }
+            catch (Exception ex) { _logger.LogWarning(ex, "Could not evict foreign holder PID {Pid} on {Sid}", pid, sessionId); }
+        }
+
+        if (foreign.Count > 0)
+        {
+            try { Magpilot.Agent.Sessions.SessionLocks.ReapDead(dir); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Reaping locks after eviction on {Sid} threw", sessionId); }
+        }
+        return foreign;
     }
 
     private void MarkOurPid(string sessionId, int? pid)

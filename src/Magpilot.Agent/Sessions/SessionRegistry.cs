@@ -321,9 +321,13 @@ public sealed class SessionRegistry
     }
 
     /// <summary>
-    /// The host's wrapper has shut down its child copilot cleanly and is
-    /// handing the session back to the agent. We re-load it into our ACP
-    /// child and clear the host-ownership marker.
+    /// Hand a host-owned session back to the agent. In the cooperative case the
+    /// launcher has already shut its child copilot down; we clear the host marker
+    /// and re-load the session into our ACP child. If the launcher never let go
+    /// (its release_requested subscription was severed by an agent restart, or it
+    /// was mid-turn), we force-evict its still-live copilot first so there is a
+    /// single writer -- otherwise a forceful SPA take-back would leave two live
+    /// drivers on one session (the "garbled then stalled" split-brain).
     /// </summary>
     public async Task<SessionStateInfo> ReleaseFromHostAsync(string sessionId, int hostPid, CancellationToken ct)
     {
@@ -336,21 +340,39 @@ public sealed class SessionRegistry
 
         _hostOwnership.Clear(sessionId);
 
-        // Re-load the session into our ACP child. We don't kill any lock
-        // holders -- the inuse.<pid>.lock files are advisory. session/load
-        // re-reads events.jsonl from disk so we pick up everything the
-        // host's interactive copilot appended while it was driving.
-        //
-        // Caveats with the current copilot --acp:
-        //   * It doesn't implement session/close (Method not found), so we
-        //     can't politely evict before reloading.
-        //   * session/load on an already-in-memory session returns
-        //     "Session is already loaded" -- it does NOT re-read disk.
-        // The session may therefore be stale in the multiplex child's memory
-        // by the events the host appended. We mark _owned anyway so callers
-        // can route prompts; the staleness window is documented and can be
-        // fixed in a future phase by respawning the default-flavor child
-        // when host hand-back is detected.
+        // Force-evict any still-live FOREIGN holder before we re-load. In the
+        // cooperative handoff the launcher has already torn its copilot down, so
+        // there is nothing to evict and this is a no-op. But if the launcher never
+        // heard the release_requested knock (its SSE subscription was severed by an
+        // agent restart, or it was mid-turn), its interactive copilot is still
+        // attached and appending to events.jsonl. Marking ourselves owner while it
+        // keeps writing is a split-brain: two live drivers on one session, which the
+        // SPA renders as duplicated then stalled output. copilot has no working
+        // session/close, so killing the foreign holder is the only way to become the
+        // single writer. Our own child is never touched.
+        var evicted = _acp.EvictForeignLiveHolders(sessionId);
+        if (evicted.Count > 0)
+            _logger.LogWarning("ReleaseFromHost evicted {Count} live foreign holder(s) on {Sid}: {Pids}",
+                evicted.Count, sessionId, string.Join(", ", evicted));
+
+        // If a foreign holder somehow survived the eviction (e.g. we lacked
+        // permission to kill it), refuse to adopt: leaving ownership unset makes
+        // GetState report Owner=External, so the SPA re-raises the "close it in the
+        // terminal, then reopen" banner instead of streaming a session it cannot
+        // cleanly drive. A clean error beats a silent split-brain.
+        if (_acp.HasForeignLiveHolder(sessionId))
+        {
+            _logger.LogError(
+                "ReleaseFromHost: a live foreign holder remains on {Sid} after eviction; refusing to adopt to avoid a split-brain",
+                sessionId);
+            return GetState(sessionId)!;
+        }
+
+        // Re-load the session into our ACP child. session/load re-reads
+        // events.jsonl from disk so we pick up everything the host's interactive
+        // copilot appended while it was driving. The foreign writer is now gone, so
+        // even the "already loaded" no-op path (copilot won't re-read an
+        // in-memory session) can no longer diverge further.
         var cwd = info.Cwd ?? Environment.CurrentDirectory;
         try
         {
