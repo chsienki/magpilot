@@ -570,29 +570,32 @@ takes the session, the SPA notices): the SPA's `Apply()` reacts to
 over" MudAlert with a "Take back" button. Even before any takeover,
 `OnParametersSetAsync` calls `GetStateAsync` after the session-list
 fetch and skips streaming entirely if `Owner=Host`. The "Take back"
-flow is the symmetric counter-pattern: `release-request(force=true)`
-+ 1s grace + `acquire-for-host(0, force=true)` + `release(0)` +
-restart stream. Both `acquire-for-host` and `release` ride the hub's
-`Action` (90s) client, not `Read` (10s): `release` re-adopts via
-`session/load`, which can exceed 10s and would otherwise surface as
-`Take back failed: 502` even against a healthy agent. **Agent-side
-eviction** (`ReleaseFromHostAsync`): before re-loading, the agent
-force-kills any still-live *foreign* holder of the session (a
-launcher's interactive copilot that never tore down) and reaps its
-advisory lock, so there is a single writer. This is the load-bearing
-guarantee -- cooperative teardown (the launcher hearing
-`release_requested` and exiting its own copilot) is best-effort and
-DID fail in practice when an agent restart severed the launcher's SSE
-subscription; without eviction the forceful take-back completed the
-adopt but left two live drivers appending to one `events.jsonl` (the
-"garbled then stalled" split-brain). The agent only ever kills a
-genuinely foreign holder, never its own ACP child. If a foreign holder
-somehow survives the kill, `release` refuses to adopt (leaves
-`Owner=External`) rather than split-brain. **SPA guard** (backstop):
-after the dance it re-probes `GetStateAsync` and only restarts the
-stream when `Owner` is `None`/`Agent`; a surviving live foreign holder
-(`Owner=Host`/`External`) re-raises the takeover banner instead.
-Close-then-reopen resumes without loss since sessions persist to disk.
+flow is **graceful-first**: `release-request(force=false)` then poll
+`GetStateAsync` (up to ~30s, early-exit) waiting for the launcher to
+hand off ON ITS OWN -- tear down its copilot (leaving the terminal on
+its "resume here" prompt) and call `release` itself. The SPA does NOT
+force-evict here. Only if that window elapses with the terminal still
+holding the session does the SPA offer a **"Force take over"** button,
+which runs the destructive dance: `release-request(force=true)` + 1s
+grace + `acquire-for-host(0, force=true)` + `release(0, force=true)`.
+Both `acquire-for-host` and `release` ride the hub's `Action` (90s)
+client, not `Read` (10s): `release` re-adopts via `session/load`, which
+can exceed 10s and would otherwise surface as `Take back failed: 502`
+even against a healthy agent. **Agent-side eviction is gated on the
+`Force` flag** (`ReleaseFromHostAsync`): a graceful release never kills
+the terminal (it declines to adopt if a live foreign holder remains,
+returning `Owner=External`); a forceful release evicts the still-live
+foreign copilot (reaping its advisory lock) and then adopts. The agent
+only ever kills a genuinely foreign holder, never its own ACP child,
+and NEVER adopts while a live foreign holder remains (two live drivers
+on one `events.jsonl` is the "garbled then stalled" split-brain).
+**SPA guard**: the poll treats `Host`/`External` as "not free" and
+re-raises the takeover choice ("Try again" / "Force take over") instead
+of streaming into the duplication. Close-then-reopen resumes without
+loss since sessions persist to disk. (Force-evicting kills the terminal
+copilot as an external exit, so the launcher exits WITHOUT its resume
+prompt -- acceptable on an explicit force, which is why it is no longer
+the default take-back behaviour.)
 
 **End-to-end timing**: a measured-typical 409 -> release-request ->
 SSE -> wrapper exit -> retry -> 202 dance completes in ~3.4s.

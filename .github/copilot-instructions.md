@@ -1553,9 +1553,15 @@ Wire contract this code base now exposes:
   `WaitForTurnBoundaryAsync` (force issues ACP cancel + 2s grace).
   Then `DetachAsync` + `HostOwnership.Set`. Returns refreshed state.
 - **`POST /api/sessions/{id}/release`** -- body `ReleaseFromHostBody
-  { HostPid }`. 409 Conflict if the wrong host PID claims to release.
-  On success: clears `HostOwnership`, attempts `session/load` (tolerates
-  "already loaded" -- see ACP gotchas).
+  { HostPid, Force = false }`. 409 Conflict if the wrong host PID claims
+  to release. On success: clears `HostOwnership`; if `Force` is true,
+  evicts any still-live foreign copilot first; then attempts
+  `session/load` (tolerates "already loaded" -- see ACP gotchas) UNLESS
+  a live foreign holder still remains, in which case it declines to
+  adopt and reports `Owner=External`. The launcher's own release and the
+  SPA's graceful "Take back" send `Force=false` (never kill the
+  terminal); only the SPA's explicit "Force take over" sends
+  `Force=true`.
 - **SSE `release_requested` event** added to `StreamEvent` discriminator.
 
 ACP-driving endpoints (`/messages`, `/interrupt`, `/approvals/{id}`)
@@ -1626,39 +1632,45 @@ so a forceful take-over succeeds regardless of launcher version
   `state.Owner == SessionOwner.Host`, the same takeover state is
   set and the stream is skipped entirely -- the SPA never opens an
   SSE pump for a session it's not allowed to drive.
-- `HandleTakeBackFromHost` is the symmetric counter-flow:
-  `FireReleaseRequestAsync(force=true)` + 1s grace +
-  `AcquireForHostAsync(0, force=true)` + `ReleaseAsync(0)` + restart
-  stream from cache (or `/history` if no cache). The polite knock
-  gives a cooperative launcher time to tear down its PTY cleanly;
-  the forceful flip catches stuck cases.
-  **Agent-side eviction is the load-bearing guarantee.**
-  `ReleaseFromHostAsync` force-kills any still-live *foreign* holder of
-  the session (a launcher's interactive copilot that never tore down)
-  and reaps its advisory `inuse.<pid>.lock` before it re-loads, so the
-  agent becomes the single writer. This does NOT depend on the launcher
-  cooperating -- cooperative teardown (the launcher hearing
-  `release_requested` over SSE and exiting its own copilot) is
-  best-effort: a launcher predating the SSE reconnect (< 0.1.18) never
-  hears a post-restart release, and even 0.1.20 had a reconnect bug that
-  left it deaf after an agent restart (a 15s client timeout vs Kestrel's
-  ~45s cold start, misclassified as cancellation -- fixed in 0.1.24; see
-  "Launcher SSE reconnect"). Eviction is the guarantee that holds
-  regardless. The agent only ever kills a genuinely foreign holder,
-  never its own ACP child (`_ourSessionPids` gates it; see
-  `AcpSessionManager.EvictForeignLiveHolders`). After the foreign
-  copilot dies, the launcher's own "child exited -> release + return"
-  path fires and it exits cleanly.
-  **Post-dance guard (belt-and-braces, do NOT drop it):** if a foreign
-  holder somehow survives the kill (e.g. we lacked permission),
-  `ReleaseFromHostAsync` refuses to mark `_owned`, so `/state` returns
-  `Owner=External` and the SPA re-probes `GetStateAsync` after the dance
-  and only `StartStreamingAsync` when `Owner` is `None`/`Agent`. If it
-  is still `Host`/`External`, it re-raises the takeover banner + a
-  Warning snackbar ("close it in the terminal, then reopen here")
-  instead -- sessions persist to disk, so close-then-reopen resumes
-  without loss. Together: eviction makes the take-over actually succeed;
-  the guard prevents a silent split-brain if eviction ever can't.
+- `HandleTakeBackFromHost` is the symmetric counter-flow, and it is
+  **graceful-first**: `FireReleaseRequestAsync(force=false)` then poll
+  `GetStateAsync` for up to `GracefulTakeBackSeconds` (~30s) waiting for
+  the launcher to hand off ON ITS OWN -- tear down its copilot (leaving
+  the terminal on its "resume here" prompt) and call `release` itself,
+  flipping ownership to the agent. The SPA does NOT force-evict here.
+  Early-exit the moment `Owner` leaves `Host`/`External`, then
+  `FinishTakeBackAndStreamAsync` restarts the stream from cache (or
+  `/history`). If the window elapses with the terminal still holding it
+  (deaf/dead launcher, or a bare terminal with no launcher),
+  `_takeBackNeedsForce` flips the banner to offer **"Try again"**
+  (another graceful attempt) + **"Force take over"**
+  (`HandleForceTakeBack`). Only the explicit force path does the
+  destructive dance: `FireReleaseRequestAsync(force=true)` + 1s grace +
+  `AcquireForHostAsync(0, force=true)` + `ReleaseAsync(0, force=true)`.
+  Rationale: force-evicting kills the terminal copilot as an EXTERNAL
+  exit, so the launcher takes its "child exited on its own" branch and
+  exits WITHOUT showing the resume prompt -- fine when the user
+  explicitly asked to force, jarring when it happened silently on every
+  take-back (the pre-graceful behaviour).
+  **Agent-side eviction is gated on `force`.**
+  `ReleaseFromHostAsync(sid, hostPid, force, ct)`:
+  - `force=false` (graceful): NEVER kills. If a live foreign holder
+    remains it declines to adopt and returns `Owner=External` so the
+    caller offers the force choice. This is both the launcher's own
+    release (its copilot is already gone -> adopts cleanly) and the
+    SPA's graceful attempt.
+  - `force=true`: `EvictForeignLiveHolders` kills the still-live foreign
+    copilot + reaps its advisory `inuse.<pid>.lock`, then adopts. The
+    agent only ever kills a genuinely foreign holder, never its own ACP
+    child (`_ourSessionPids` gates it).
+  **Never adopt while a live foreign holder remains** (either force
+  mode): two live drivers on one `events.jsonl` is the "garbled then
+  stalled" split-brain, so `ReleaseFromHostAsync` leaves `_owned` unset
+  and returns `Owner=External` in that case. The SPA's poll treats
+  `Host`/`External` as "not free" and re-raises the choice rather than
+  streaming into the duplication. The `force` bit rides on
+  `ReleaseFromHostBody.Force` (additive, defaults false = graceful, so
+  old callers and the launcher stay safe).
 
 **Agent-side stale-lock cleanup** (`Magpilot.Agent/Acp/AcpSessionManager.cs`):
 `CloseAsync` takes a `string? sessionsRoot` parameter and, after

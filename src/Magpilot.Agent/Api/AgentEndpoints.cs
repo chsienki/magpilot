@@ -239,7 +239,7 @@ public static class AgentEndpoints
         {
             try
             {
-                var state = await reg.ReleaseFromHostAsync(id, body.HostPid, ct);
+                var state = await reg.ReleaseFromHostAsync(id, body.HostPid, body.Force, ct);
                 return Results.Ok(state);
             }
             catch (FileNotFoundException ex) { return Results.NotFound(new { error = ex.Message }); }

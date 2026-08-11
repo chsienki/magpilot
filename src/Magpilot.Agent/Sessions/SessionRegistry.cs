@@ -323,13 +323,22 @@ public sealed class SessionRegistry
     /// <summary>
     /// Hand a host-owned session back to the agent. In the cooperative case the
     /// launcher has already shut its child copilot down; we clear the host marker
-    /// and re-load the session into our ACP child. If the launcher never let go
-    /// (its release_requested subscription was severed by an agent restart, or it
-    /// was mid-turn), we force-evict its still-live copilot first so there is a
-    /// single writer -- otherwise a forceful SPA take-back would leave two live
-    /// drivers on one session (the "garbled then stalled" split-brain).
+    /// and re-load the session into our ACP child. If a live foreign copilot still
+    /// holds the session, behaviour depends on <paramref name="force"/>:
+    /// <list type="bullet">
+    ///   <item><c>force=false</c> (graceful): do NOT kill it. Decline to adopt and
+    ///     return with the live holder still present (GetState reports
+    ///     Owner=External) so the caller can offer a forceful retry. This preserves
+    ///     the terminal's cooperative "resume here" prompt.</item>
+    ///   <item><c>force=true</c>: evict the live foreign copilot first, then adopt.
+    ///     This ends the terminal session outright, so it is only ever driven by an
+    ///     explicit user "Force take over".</item>
+    /// </list>
+    /// Adopting while a foreign copilot still writes would split-brain one session
+    /// across two drivers (the "garbled then stalled" failure), so we never adopt
+    /// while a live foreign holder remains.
     /// </summary>
-    public async Task<SessionStateInfo> ReleaseFromHostAsync(string sessionId, int hostPid, CancellationToken ct)
+    public async Task<SessionStateInfo> ReleaseFromHostAsync(string sessionId, int hostPid, bool force, CancellationToken ct)
     {
         var info = _scanner.Get(sessionId, Owned)
             ?? throw new FileNotFoundException($"Session {sessionId} not on disk");
@@ -340,37 +349,40 @@ public sealed class SessionRegistry
 
         _hostOwnership.Clear(sessionId);
 
-        // Force-evict any still-live FOREIGN holder before we re-load. In the
+        // Only a FORCEFUL release evicts a still-live foreign holder. In the
         // cooperative handoff the launcher has already torn its copilot down, so
-        // there is nothing to evict and this is a no-op. But if the launcher never
-        // heard the release_requested knock (its SSE subscription was severed by an
-        // agent restart, or it was mid-turn), its interactive copilot is still
-        // attached and appending to events.jsonl. Marking ourselves owner while it
-        // keeps writing is a split-brain: two live drivers on one session, which the
-        // SPA renders as duplicated then stalled output. copilot has no working
-        // session/close, so killing the foreign holder is the only way to become the
-        // single writer. Our own child is never touched.
-        var evicted = _acp.EvictForeignLiveHolders(sessionId);
-        if (evicted.Count > 0)
-            _logger.LogWarning("ReleaseFromHost evicted {Count} live foreign holder(s) on {Sid}: {Pids}",
-                evicted.Count, sessionId, string.Join(", ", evicted));
+        // there is nothing to evict and this is a no-op either way. But if the
+        // launcher never heard the release_requested knock (deaf/dead subscription)
+        // or was mid-turn, its interactive copilot is still attached and appending
+        // to events.jsonl. Killing it is destructive -- it ends the terminal
+        // session with no cooperative "resume here" prompt -- so we only do it on
+        // an explicit force (the SPA's "Force take over"). A graceful release
+        // leaves the terminal untouched and simply declines to adopt below.
+        if (force)
+        {
+            var evicted = _acp.EvictForeignLiveHolders(sessionId);
+            if (evicted.Count > 0)
+                _logger.LogWarning("ReleaseFromHost force-evicted {Count} live foreign holder(s) on {Sid}: {Pids}",
+                    evicted.Count, sessionId, string.Join(", ", evicted));
+        }
 
-        // If a foreign holder somehow survived the eviction (e.g. we lacked
-        // permission to kill it), refuse to adopt: leaving ownership unset makes
-        // GetState report Owner=External, so the SPA re-raises the "close it in the
-        // terminal, then reopen" banner instead of streaming a session it cannot
-        // cleanly drive. A clean error beats a silent split-brain.
+        // Never adopt while a live foreign copilot still holds the session: two
+        // live drivers on one events.jsonl is the split-brain. On a graceful
+        // release this is the normal "launcher hasn't let go yet" outcome (the
+        // caller re-raises the takeover choice); on a forceful release it only
+        // happens if the eviction couldn't complete (e.g. no permission to kill).
+        // Either way, leaving ownership unset makes GetState report Owner=External.
         if (_acp.HasForeignLiveHolder(sessionId))
         {
-            _logger.LogError(
-                "ReleaseFromHost: a live foreign holder remains on {Sid} after eviction; refusing to adopt to avoid a split-brain",
-                sessionId);
+            _logger.LogInformation(
+                "ReleaseFromHost: a live foreign holder remains on {Sid}; not adopting (force={Force})",
+                sessionId, force);
             return GetState(sessionId)!;
         }
 
         // Re-load the session into our ACP child. session/load re-reads
         // events.jsonl from disk so we pick up everything the host's interactive
-        // copilot appended while it was driving. The foreign writer is now gone, so
+        // copilot appended while it was driving. The foreign writer is gone, so
         // even the "already loaded" no-op path (copilot won't re-read an
         // in-memory session) can no longer diverge further.
         var cwd = info.Cwd ?? Environment.CurrentDirectory;

@@ -702,11 +702,16 @@
                    release_requested event mid-conversation; (2) the
                    on-open /state probe found Owner=Host before we ever
                    started streaming. Either way the chat is read-only
-                   from our side until the user clicks Take back. The
-                   button calls Hub.ForceTakeOverAndSendAsync's
-                   acquire-for-host(force=true) -> release(0) dance to
-                   flip ownership back, then restarts our SSE pump. *@
-                <MudAlert Severity="Severity.Info" Dense="true" Class="mx-3 my-2"
+                   from our side until the user takes it back.
+
+                   "Take back" tries a GRACEFUL handoff first
+                   (HandleTakeBackFromHost): it knocks and waits for the
+                   launcher to tear its copilot down cooperatively, which
+                   leaves the terminal on its "resume here" prompt. Only if
+                   that times out does _takeBackNeedsForce flip the banner to
+                   offer "Force take over" (HandleForceTakeBack), which evicts
+                   the live terminal copilot -- ending that terminal session. *@
+                <MudAlert Severity="@(_takeBackNeedsForce ? Severity.Warning : Severity.Info)" Dense="true" Class="mx-3 my-2"
                           ContentAlignment="HorizontalAlignment.Left">
                     <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
                         <MudText Typo="Typo.body2">
@@ -726,15 +731,45 @@
                             {
                                 <text>A terminal session is now driving this conversation.</text>
                             }
-                            The composer is paused until you take it back.
+                            @if (_hostTakeBackBusy)
+                            {
+                                <text> Waiting for the terminal to hand off...</text>
+                            }
+                            else if (_takeBackNeedsForce)
+                            {
+                                <text> It didn't hand off. Try again, or force the take-over (this ends the terminal session).</text>
+                            }
+                            else
+                            {
+                                <text> The composer is paused until you take it back.</text>
+                            }
                         </MudText>
                         <MudSpacer />
-                        <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary"
-                                   StartIcon="@Icons.Material.Filled.SwapHoriz"
-                                   Disabled="@_hostTakeBackBusy"
-                                   OnClick="HandleTakeBackFromHost">
-                            Take back
-                        </MudButton>
+                        @if (_hostTakeBackBusy)
+                        {
+                            <MudProgressCircular Size="Size.Small" Indeterminate="true" />
+                        }
+                        else if (_takeBackNeedsForce)
+                        {
+                            <MudButton Size="Size.Small" Variant="Variant.Outlined" Color="Color.Primary"
+                                       StartIcon="@Icons.Material.Filled.Refresh"
+                                       OnClick="HandleTakeBackFromHost">
+                                Try again
+                            </MudButton>
+                            <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Warning"
+                                       StartIcon="@Icons.Material.Filled.SwapHoriz"
+                                       OnClick="HandleForceTakeBack">
+                                Force take over
+                            </MudButton>
+                        }
+                        else
+                        {
+                            <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary"
+                                       StartIcon="@Icons.Material.Filled.SwapHoriz"
+                                       OnClick="HandleTakeBackFromHost">
+                                Take back
+                            </MudButton>
+                        }
                     </MudStack>
                 </MudAlert>
             }
@@ -904,6 +939,17 @@
     private string? _hostTakeoverRequester;
     private int? _hostTakeoverPid;
     private bool _hostTakeBackBusy;
+    // Set when a graceful "Take back" times out with the terminal still
+    // holding the session (deaf/dead launcher). Flips the takeover banner
+    // to offer "Try again" (another graceful attempt) + "Force take over"
+    // (the destructive evict path). Reset on any fresh takeover / nav.
+    private bool _takeBackNeedsForce;
+    // Graceful take-back budget. Long because a cooperative handoff includes
+    // the launcher's own release re-adopting via session/load (5-30s under
+    // plugin load, more for a large session). Early-exit on success keeps the
+    // common case fast; only a genuinely deaf terminal waits the full window
+    // before the force choice appears.
+    private const int GracefulTakeBackSeconds = 30;
     private string? _streamingFor;
     private int _streamGeneration;
     // Number of consecutive auto-reconnect attempts since the last successful
@@ -1428,6 +1474,7 @@
             _hostHasTakenOver = false;
             _hostTakeoverRequester = null;
             _hostTakeoverPid = null;
+            _takeBackNeedsForce = false;
 
             var info = _sessions?.FirstOrDefault(s => s.Id == SessionId);
 
@@ -1455,6 +1502,7 @@
                     _hostHasTakenOver = true;
                     _hostTakeoverPid = state.HostPid;
                     _hostTakeoverRequester = null; // /state has no requester label
+                    _takeBackNeedsForce = false;
                     _streamingFor = $"{Agent}/{SessionId}";
                     _switchingSession = false;
                     StateHasChanged();
@@ -2452,6 +2500,7 @@
                     rr.Requester, rr.Force);
                 _hostHasTakenOver = true;
                 _hostTakeoverRequester = string.IsNullOrWhiteSpace(rr.Requester) ? null : rr.Requester;
+                _takeBackNeedsForce = false;
                 _streamingAssistant = null;
                 _streamingThought = null;
                 _thinking = false;
@@ -2641,116 +2690,57 @@
     private void HandleCancelForceTake() { _pendingForceTake = null; StateHasChanged(); }
 
     /// <summary>
-    /// Take a session back from a magpilot launcher (CLI) that's
-    /// currently driving it. Wired to the "Take back" button on the
-    /// host-takeover MudAlert. Reuses the same force-acquire-then-
-    /// release dance the prompt-send 409 path uses (acquire-for-host
-    /// with hostPid=0 + force=true, then release(0)) so the agent
-    /// re-adopts the session and our SSE stream / send path go back
-    /// to working. After the dance succeeds we restart streaming
-    /// from cache so the user lands back in the same conversation
-    /// without a load=true replay storm.
+    /// Take a session back from a magpilot launcher (CLI) that's currently
+    /// driving it, GRACEFULLY. Wired to the "Take back" button on the
+    /// host-takeover MudAlert.
     ///
-    /// The take-back is a forceful operation: any turn the host had
-    /// in flight is interrupted (the launcher's cooperative protocol
-    /// observes a release_requested on its own SSE subscription and
-    /// gracefully shuts down), so this should only run on user
-    /// click, never silently.
+    /// This fires a polite <c>release_requested</c> and then WAITS for the
+    /// launcher to cooperatively hand off -- tear down its own copilot (which
+    /// leaves the terminal on its "resume here" prompt) and release the session
+    /// so the agent re-adopts it. It deliberately does NOT force-evict: killing
+    /// the terminal copilot is destructive (ends the terminal session with no
+    /// resume prompt), so that only happens on an explicit "Force take over".
+    ///
+    /// If the cooperative handoff doesn't complete within
+    /// <see cref="GracefulTakeBackSeconds"/> (the launcher is deaf/dead, or the
+    /// session is held by a bare terminal with no launcher), we surface a choice
+    /// rather than force silently: <see cref="_takeBackNeedsForce"/> flips the
+    /// banner to "Try again" + "Force take over".
     /// </summary>
     private async Task HandleTakeBackFromHost()
     {
         if (Agent is null || SessionId is null || !_hostHasTakenOver) return;
         _hostTakeBackBusy = true;
+        _takeBackNeedsForce = false;
         StateHasChanged();
         try
         {
-            // Polite knock first: broadcast release_requested so the
-            // launcher's SSE subscriber sees the takeover and can
-            // gracefully tear down its PTY (write /exit\r, flush events,
-            // detach). force=true on the request signals "we're going to
-            // take this whether you cooperate or not", which the
-            // wrapper's preemption handler reacts to with no extra
-            // confirmation prompt.
-            await Hub.FireReleaseRequestAsync(Agent, SessionId, requester: "spa", force: true);
-            // Brief grace window so a cooperative launcher's release()
-            // call can land (clears HostOwnership). 1s is comfortably
-            // shorter than a user's "did anything happen?" patience but
-            // long enough for the launcher's SSE foreach + PtyHost
-            // shutdown to fire on a healthy machine.
-            await Task.Delay(1000);
-            // Forceful path -- if the launcher cooperated, this just
-            // confirms ownership is back with the agent. If it didn't
-            // (process hung, no SSE listener, etc.) the force=true
-            // acquire-for-host flips ownership unilaterally and the
-            // immediate release(0) lets the agent re-adopt.
-            await Hub.AcquireForHostAsync(Agent, SessionId, hostPid: 0, force: true);
-            await Hub.ReleaseAsync(Agent, SessionId, hostPid: 0);
+            // Polite knock, force=false: ask the launcher to hand off at its own
+            // pace. A healthy launcher hears this on its SSE subscription, tears
+            // down its copilot (showing its resume prompt), and calls release
+            // itself -- flipping ownership to the agent. We never kill anything.
+            await Hub.FireReleaseRequestAsync(Agent, SessionId, requester: "spa", force: false);
 
-            // Verify the terminal ACTUALLY released before we adopt + stream.
-            // Force-clearing HostOwnership above does not evict a live launcher
-            // that is still wrapping an interactive copilot: its on-disk
-            // inuse.<pid>.lock persists, so the scanner re-reports the session
-            // as Locked (Owner=External). Adopting a session a live foreign
-            // copilot still holds replays the growing events.jsonl (duplicated
-            // text) and can never cleanly drive it (turns never land) -- the
-            // "garbled then stalled" failure. Only Owner None/Agent means the
-            // session is free for us to drive.
-            //
-            // Poll until the holder clears, breaking early on success. The
-            // budget must comfortably outlast a healthy cooperative release
-            // (the launcher exiting its PTY on release_requested) so a
-            // slightly-slow-but-successful handoff is never mistaken for a
-            // stuck terminal -- a full handoff is ~3.4s typical, so give ~6s.
-            // A genuinely stuck/live terminal (e.g. the same session you are
-            // live in) never releases, so it still trips the guard below.
-            SessionStateInfo? postState = null;
-            for (var attempt = 0; attempt < 12; attempt++)
-            {
-                postState = await Hub.GetStateAsync(Agent, SessionId);
-                if (postState is null
-                    || postState.Owner is not (SessionOwner.Host or SessionOwner.External))
-                {
-                    break;
-                }
-                await Task.Delay(500);
-            }
+            // Wait for the cooperative handoff to land. The launcher's own
+            // release re-adopts via session/load, which can take tens of seconds
+            // on a large session, so the budget is generous -- but we early-exit
+            // the moment ownership leaves the terminal, so a healthy handoff is
+            // only as slow as it actually is.
+            var postState = await PollForReleaseAsync(TimeSpan.FromSeconds(GracefulTakeBackSeconds));
+
             if (postState is { Owner: SessionOwner.Host or SessionOwner.External })
             {
-                // A live terminal still holds the session. Do NOT stream into
-                // the duplication/deadlock -- re-raise the takeover banner and
-                // point the user at the one action that frees it. Sessions
-                // persist to disk, so closing the terminal and reopening here
-                // resumes the conversation without loss.
+                // Cooperative handoff didn't complete. Don't force silently --
+                // offer the choice. Sessions persist to disk, so the terminal is
+                // untouched and the user can also just keep using it there.
                 _hostHasTakenOver = true;
                 _hostTakeoverPid = postState.HostPid ?? postState.Info.OwnerPid;
-                _hostTakeoverRequester = null;
+                _takeBackNeedsForce = true;
                 _streamingFor = $"{Agent}/{SessionId}";
-                Snackbar.Add(
-                    "This session is still open in a terminal, so it can't be driven "
-                    + "from here yet. Close it in the terminal, then reopen this session "
-                    + "to continue.",
-                    Severity.Warning);
                 return;
             }
 
-            _hostHasTakenOver = false;
-            _hostTakeoverRequester = null;
-            _hostTakeoverPid = null;
-            // Restore from cache if we have one for this session, so
-            // the chat doesn't redraw from scratch. Cache may be empty
-            // if the user opened straight into a host-owned session
-            // (we never streamed it on this tab); in that case
-            // TryLoadTailHistoryAsync paints it from disk events.
-            var key = $"{Agent}/{SessionId}";
-            if (_msgCache.TryGetValue(key, out var cached))
-            {
-                await StartStreamingAsync(load: false, force: false, restoreFrom: cached);
-            }
-            else
-            {
-                var fromDisk = await TryLoadTailHistoryAsync(50);
-                await StartStreamingAsync(load: false, force: false, restoreFrom: fromDisk);
-            }
+            await FinishTakeBackAndStreamAsync();
         }
         catch (Exception ex)
         {
@@ -2763,6 +2753,114 @@
         {
             _hostTakeBackBusy = false;
             StateHasChanged();
+        }
+    }
+
+    /// <summary>
+    /// The destructive counterpart to <see cref="HandleTakeBackFromHost"/>,
+    /// wired to the "Force take over" button that only appears after a graceful
+    /// attempt failed. Force-acquires + force-releases so the agent EVICTS the
+    /// still-live terminal copilot and re-adopts. This ends the terminal session
+    /// outright (no resume prompt), which is why it is gated behind an explicit
+    /// second click.
+    /// </summary>
+    private async Task HandleForceTakeBack()
+    {
+        if (Agent is null || SessionId is null) return;
+        _hostTakeBackBusy = true;
+        StateHasChanged();
+        try
+        {
+            // force=true throughout: the acquire flips ownership unilaterally and
+            // the release evicts the live foreign copilot before re-adopting.
+            await Hub.FireReleaseRequestAsync(Agent, SessionId, requester: "spa", force: true);
+            await Task.Delay(1000);
+            await Hub.AcquireForHostAsync(Agent, SessionId, hostPid: 0, force: true);
+            await Hub.ReleaseAsync(Agent, SessionId, hostPid: 0, force: true);
+
+            // Eviction is a local kill, so ownership should clear within a couple
+            // of seconds -- a short verify budget is enough (unlike the graceful
+            // path, which waits on a cooperative session/load).
+            var postState = await PollForReleaseAsync(TimeSpan.FromSeconds(6));
+            if (postState is { Owner: SessionOwner.Host or SessionOwner.External })
+            {
+                // Even the force path couldn't free it (e.g. the agent lacked
+                // permission to kill the holder). Keep the choice up.
+                _hostHasTakenOver = true;
+                _hostTakeoverPid = postState.HostPid ?? postState.Info.OwnerPid;
+                _takeBackNeedsForce = true;
+                _streamingFor = $"{Agent}/{SessionId}";
+                Snackbar.Add(
+                    "The terminal still holds this session. Close it in the terminal, "
+                    + "then reopen this session to continue.",
+                    Severity.Warning);
+                return;
+            }
+
+            await FinishTakeBackAndStreamAsync();
+        }
+        catch (Exception ex)
+        {
+            HubLog.LogError($"Force take-over failed: {ex.Message}", ex.ToString(),
+                category: nameof(Home), sessionId: SessionId,
+                extra: new { agent = Agent });
+            Snackbar.Add($"Force take-over failed: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _hostTakeBackBusy = false;
+            StateHasChanged();
+        }
+    }
+
+    /// <summary>
+    /// Poll <c>GetStateAsync</c> until the session leaves the terminal
+    /// (<c>Owner</c> is no longer <c>Host</c>/<c>External</c>) or the budget
+    /// elapses, whichever comes first. Returns the last observed state (may
+    /// still be Host/External on timeout). Adopting a session a live foreign
+    /// copilot holds replays the growing events.jsonl (duplicated text) and
+    /// never cleanly drives it -- the "garbled then stalled" failure -- so
+    /// callers must not stream until this reports None/Agent.
+    /// </summary>
+    private async Task<SessionStateInfo?> PollForReleaseAsync(TimeSpan budget)
+    {
+        SessionStateInfo? state = null;
+        var deadline = DateTime.UtcNow + budget;
+        while (true)
+        {
+            state = await Hub.GetStateAsync(Agent!, SessionId!);
+            if (state is null
+                || state.Owner is not (SessionOwner.Host or SessionOwner.External))
+            {
+                return state;
+            }
+            if (DateTime.UtcNow >= deadline) return state;
+            await Task.Delay(500);
+        }
+    }
+
+    /// <summary>
+    /// Shared tail for a successful take-back (graceful or forced): clear the
+    /// takeover banner and reconnect the live stream. Restores from cache when
+    /// present so the chat doesn't redraw from scratch; falls back to disk tail
+    /// history when the user opened straight into a host-owned session and never
+    /// streamed it on this tab.
+    /// </summary>
+    private async Task FinishTakeBackAndStreamAsync()
+    {
+        _hostHasTakenOver = false;
+        _takeBackNeedsForce = false;
+        _hostTakeoverRequester = null;
+        _hostTakeoverPid = null;
+        var key = $"{Agent}/{SessionId}";
+        if (_msgCache.TryGetValue(key, out var cached))
+        {
+            await StartStreamingAsync(load: false, force: false, restoreFrom: cached);
+        }
+        else
+        {
+            var fromDisk = await TryLoadTailHistoryAsync(50);
+            await StartStreamingAsync(load: false, force: false, restoreFrom: fromDisk);
         }
     }
 

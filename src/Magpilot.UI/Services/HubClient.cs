@@ -240,8 +240,10 @@ public sealed class HubClient
         // taking over so the agent can drive again. The agent treats the
         // PID as advisory after the swap; HostOwnership is cleared.
         await AcquireForHostAsync(agent, id, hostPid: 0, force: true, ct);
-        // Immediately release so the agent re-adopts.
-        await ReleaseAsync(agent, id, hostPid: 0, ct);
+        // Force release so the agent evicts a still-live terminal copilot
+        // and re-adopts. This is an explicit user "take over from terminal"
+        // action, so ending the terminal session is acceptable.
+        await ReleaseAsync(agent, id, hostPid: 0, force: true, ct);
         // Now the prompt should land cleanly.
         await SendPromptAsync(agent, id, text, ct);
     }
@@ -281,11 +283,11 @@ public sealed class HubClient
         return (await resp.Content.ReadFromJsonAsync<SessionStateInfo>(cancellationToken: ct))!;
     }
 
-    public async Task<SessionStateInfo> ReleaseAsync(string agent, string id, int hostPid, CancellationToken ct = default)
+    public async Task<SessionStateInfo> ReleaseAsync(string agent, string id, int hostPid, bool force = false, CancellationToken ct = default)
     {
         var resp = await _http.PostAsJsonAsync(
             $"api/agents/{agent}/sessions/{id}/release",
-            new ReleaseFromHostBody(hostPid),
+            new ReleaseFromHostBody(hostPid, force),
             ct);
         resp.EnsureSuccessStatusCode();
         return (await resp.Content.ReadFromJsonAsync<SessionStateInfo>(cancellationToken: ct))!;
