@@ -1152,6 +1152,28 @@ them by breaking them.
   and respawns if dead, logged at Warning level (visible in
   `/admin/logs`). **Do not undo this; the underlying root cause is
   unfixable from our side.**
+- **Wedged-but-alive child (the gap `IsAlive` does NOT close).**
+  `IsAlive` is `!_proc.HasExited`, so it only catches a child that
+  fully *exited*. A child that is still running but has stopped
+  answering ACP (hung read loop, deadlocked plugin, a very long-lived
+  agent whose child has silently rotted) stays `IsAlive==true`, so
+  the pool keeps handing it out and **every** `session/load` /
+  `session/prompt` waits the full `WaitWithTimeoutAsync` and throws
+  `System.TimeoutException: ACP call id=N timed out`. Because the hub
+  proxies `session/load`-driving routes (`/release`, `/adopt`,
+  `/acquire-for-host`), a wedged child surfaces to the SPA as a wall
+  of 502s -- take-back, adopt, and refresh all fail at once even
+  though `/healthz` and `/api/sessions` (no ACP) still answer fast.
+  There is no auto-recovery for this yet (dead-child respawn requires
+  an actual exit; `MAGPILOT_STALE_RECYCLE` only fires on a detected
+  stale *resume*, not on blanket timeouts). **Manual recovery: restart
+  the agent** -- on Windows `Stop-ScheduledTask -TaskName MagpilotAgent`
+  (which terminates the process tree and frees `:5099`) then
+  `Start-ScheduledTask`; the fresh agent spawns a healthy child on the
+  next ACP call. Host-owned sessions survive (ownership is on disk).
+  Follow-up worth doing: treat N consecutive ACP timeouts on one child
+  as a liveness failure and recycle it the same way a dead child is
+  respawned.
 - **`AcpSessionManager._inFlight`** tracks active `PromptAsync` calls
   keyed by sessionId, with the requester label and start time. Used
   by `GET /sessions/{id}/state` to report activity without polling,
@@ -1172,7 +1194,7 @@ already burned us in production.
 | Client name      | Default timeout | Tunable                        | Used for                                                                 |
 |------------------|-----------------|--------------------------------|--------------------------------------------------------------------------|
 | `agent`          | 10s             | `Hub:AgentHttpTimeoutSec`      | Fast read-only control-plane (GET `/api/sessions`, `/api/info`, etc.)    |
-| `agent-action`   | 90s             | `Hub:AgentActionTimeoutSec`    | Mutating ACP-driving calls (`POST /api/sessions`, `/sessions/{id}/adopt`) |
+| `agent-action`   | 90s             | `Hub:AgentActionTimeoutSec`    | Mutating ACP-driving calls (`POST /api/sessions`, `/sessions/{id}/adopt`, `/acquire-for-host`, `/release`) |
 | `agent-stream`   | infinite        | (n/a)                          | SSE proxy and `/quick-prompt` (turns can run minutes)                    |
 
 Pick via the `AgentClientKind` enum on `AgentHttpClient.ClientFor(name, kind)`:
@@ -1193,10 +1215,13 @@ that the relevant endpoint in `HubEndpoints.cs` still calls
 **Don't add a new mutating endpoint without thinking about which
 client it should use.** `/messages` is fire-and-forget on the agent
 (returns 202 immediately), so `Read` is fine. `/detach`,
-`/interrupt`, `/approvals/{id}` are all quick -- `Read`. Anything
-that triggers `session/new`, `session/load`, or other ACP work
-that can stall: `Action`. Anything that holds an open response
-body for a turn: `Stream`.
+`/interrupt`, `/approvals/{id}`, `/state`, `/release-request` are all
+quick -- `Read`. Anything that triggers `session/new`, `session/load`,
+or other ACP work that can stall: `Action` -- this includes
+`/acquire-for-host` (waits for a turn boundary) and `/release`
+(re-adopts via `session/load`), which were both silently on `Read`
+and surfaced as `Take back failed: 502` when a `session/load` ran
+long. Anything that holds an open response body for a turn: `Stream`.
 
 ### Pinned sessions (long-lived) and `/quick-prompt`
 

@@ -91,7 +91,7 @@ Responsibilities:
   | Kind                       | Timeout       | Used for                                                                                        |
   |----------------------------|---------------|-------------------------------------------------------------------------------------------------|
   | `AgentClientKind.Read`     | 10s (default) | Control-plane GETs (registry, sessions list, host state). Fail-fast so a dead agent can't stall SPA aggregation. |
-  | `AgentClientKind.Action`   | 90s (default) | ACP-driving mutations: `POST /sessions`, `POST /sessions/{id}/adopt`. ACP can spend ~5-30s loading plugins; under 10s the hub returned 502 and marked the agent OFFLINE despite it being healthy. |
+  | `AgentClientKind.Action`   | 90s (default) | ACP-driving mutations: `POST /sessions`, `POST /sessions/{id}/adopt`, `/acquire-for-host`, `/release`. ACP can spend ~5-30s loading plugins or replaying a large session on `session/load`; under 10s the hub returned 502 and marked the agent OFFLINE despite it being healthy. Rule: any proxy that drives `session/load` / `session/new` / a turn-boundary wait belongs here, not on `Read`. |
   | `AgentClientKind.Stream`   | infinite      | SSE proxy + `quick-prompt` (long-poll service caller).                                          |
 
   Tunable via `Hub:AgentHttpTimeoutSec` and `Hub:AgentActionTimeoutSec`.
@@ -568,12 +568,15 @@ over" MudAlert with a "Take back" button. Even before any takeover,
 fetch and skips streaming entirely if `Owner=Host`. The "Take back"
 flow is the symmetric counter-pattern: `release-request(force=true)`
 + 1s grace + `acquire-for-host(0, force=true)` + `release(0)` +
-restart stream. **Guarded**: after that dance it re-probes
-`GetStateAsync` and only restarts the stream when `Owner` is
-`None`/`Agent`. If the session is still held by a live foreign
-process (`Owner=Host`/`External`, i.e. a terminal that did not
-release), it re-raises the takeover banner instead of adopting --
-adopting a live-foreign-held session replays its growing
+restart stream. Both `acquire-for-host` and `release` ride the hub's
+`Action` (90s) client, not `Read` (10s): `release` re-adopts via
+`session/load`, which can exceed 10s and would otherwise surface as
+`Take back failed: 502` even against a healthy agent. **Guarded**:
+after that dance it re-probes `GetStateAsync` and only restarts the
+stream when `Owner` is `None`/`Agent`. If the session is still held by
+a live foreign process (`Owner=Host`/`External`, i.e. a terminal that
+did not release), it re-raises the takeover banner instead of
+adopting -- adopting a live-foreign-held session replays its growing
 `events.jsonl` (duplicated text) and never cleanly drives it
 (the "garbled then stalled" symptom). Close-then-reopen resumes
 without loss since sessions persist to disk.
