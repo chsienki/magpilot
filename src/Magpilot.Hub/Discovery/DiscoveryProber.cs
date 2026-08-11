@@ -53,7 +53,18 @@ public sealed class DiscoveryProber : BackgroundService
         using var udp = new UdpClient { EnableBroadcast = true };
         udp.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
         var payload = Encoding.UTF8.GetBytes(Magic);
-        await udp.SendAsync(payload, payload.Length, new IPEndPoint(IPAddress.Broadcast, Port));
+        // Send to each interface's DIRECTED broadcast, not just
+        // 255.255.255.255. The hub shares its LXC's network namespace,
+        // which is multi-homed (eth0 on the LAN + docker bridges), so a
+        // limited broadcast can egress a docker bridge instead of the LAN
+        // and never reach agents like HENDRIK -- they then only come
+        // online via the proxied-call heartbeat, and show OFFLINE after
+        // every hub restart until something calls into them.
+        foreach (var target in Magpilot.Shared.Net.BroadcastAddresses.DiscoveryTargets())
+        {
+            try { await udp.SendAsync(payload, payload.Length, new IPEndPoint(target, Port)); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Discovery broadcast to {Target} failed", target); }
+        }
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(3));

@@ -737,8 +737,15 @@ could add `enrolled_via_kind` if disambiguation matters.
 `MagpilotPairDiscover.RunAsync` (`src/Magpilot.Host/MagpilotPairDiscover.cs`):
 
 1. Broadcast `MAGPILOT-PAIR-DISCOVER-v1` 3 times across a 3-second
-   window. Concurrent listener collects unicast replies into a
-   `Dictionary<HubUrl, DiscoveredHub>` (dedup).
+   window, to each local interface's DIRECTED broadcast address
+   (`BroadcastAddresses.DiscoveryTargets`), NOT just 255.255.255.255.
+   This is load-bearing on a multi-homed host: a dev box with Wi-Fi +
+   WSL/Hyper-V/Docker virtual switches sends a limited broadcast out a
+   single OS-chosen interface (usually a virtual switch), so the probe
+   never reaches the LAN and discovery finds zero hubs -- the "UDP
+   pairing failed, had to use a bundle" symptom. Concurrent listener
+   collects unicast replies into a `Dictionary<HubUrl, DiscoveredHub>`
+   (dedup).
 2. No hubs found -> exit code 4 with hint to use
    `--magpilot-pair=<bundle>` instead.
 3. One hub -> auto-pick. Multiple -> console picker (`[1] HENDRIK
@@ -938,7 +945,12 @@ rather than spawn parallel implementations.
   > **WireGuard agents can't be discovered, so seed their registry
   > columns by hand.** UDP discovery (`DiscoveryProber` broadcast) is
   > the only thing that refreshes an agent's `url` + `flavors`, and it
-  > can't cross a WG point-to-point tunnel. Both columns are persisted
+  > can't cross a WG point-to-point tunnel (no broadcast domain there).
+  > This is distinct from the multi-homed-LAN case, which IS handled:
+  > `DiscoveryProber` sends to each interface's directed broadcast
+  > (`BroadcastAddresses.DiscoveryTargets`), so a plain LAN host like
+  > HENDRIK is discovered fine. Only genuinely non-broadcast transports
+  > (WG) need the manual seed. Both columns are persisted
   > in `agents` so a WG-only agent (Sandbox, a Dev Box) is a one-time
   > `UPDATE agents SET url=..., flavors='["default","agency"]' WHERE
   > name=...` + hub restart (the registry reads these only in `Load()`
@@ -966,14 +978,18 @@ rather than spawn parallel implementations.
   > knowing: (1) a wedged ACP child that 502s every call will flip an
   > agent OFFLINE (the timeouts are `TaskCanceledException`), so a
   > "went offline" report can actually be a wedged child, not a
-  > network drop; (2) UDP discovery only round-trips to agents on the
-  > hub's own broadcast segment (co-located `magnus`), NOT across the
-  > Proxmox bridge to a LAN host like HENDRIK or over WireGuard -- so
-  > after a hub restart those remote agents show OFFLINE until the
-  > first successful proxied call re-onlines them. To force it, make
-  > any proxied GET (e.g. `GET /api/agents/<name>/sessions`) with the
-  > hub bearer; the SPA does this implicitly the moment someone opens
-  > the agent.
+  > network drop; (2) UDP discovery reaches LAN agents via each
+  > interface's DIRECTED broadcast (`BroadcastAddresses.DiscoveryTargets`,
+  > used by `DiscoveryProber`); before that fix the hub sent only the
+  > limited broadcast (255.255.255.255), which on the multi-homed LXC
+  > (eth0 + docker bridges) egressed a docker bridge instead of the LAN,
+  > so a LAN host like HENDRIK never got the probe and showed OFFLINE
+  > after every hub restart until a proxied call re-onlined it. It still
+  > can't cross a WireGuard point-to-point tunnel (no broadcast there) --
+  > WG agents rely on the proxied-call heartbeat. To force an agent
+  > online immediately, make any proxied GET (e.g.
+  > `GET /api/agents/<name>/sessions`) with the hub bearer; the SPA does
+  > this implicitly the moment someone opens the agent.
 
 * **`TaskCompletionSource<bool>` keyed by entity id** -- the
   hub-side push-style long-poll pattern, demonstrated in

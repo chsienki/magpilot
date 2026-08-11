@@ -146,9 +146,15 @@ internal static class MagpilotPairDiscover
 
         // Broadcast a few times in case packets are dropped or the hub
         // is mid-cycle. 3 broadcasts spread across the window is enough
-        // for a quiet LAN.
+        // for a quiet LAN. Send to each interface's DIRECTED broadcast
+        // (not just 255.255.255.255): on a multi-homed host (Wi-Fi +
+        // WSL/Hyper-V/Docker virtual switches) the OS sends a limited
+        // broadcast out a single, often-virtual interface, so the probe
+        // never reaches the real LAN and no hub is ever found -- the
+        // "UDP pairing failed, had to use a bundle" symptom.
         var broadcasts = 3;
         var perBroadcast = window / broadcasts;
+        var targets = Magpilot.Shared.Net.BroadcastAddresses.DiscoveryTargets();
 
         using var windowCts = new CancellationTokenSource(window);
         var listener = Task.Run(async () =>
@@ -176,13 +182,16 @@ internal static class MagpilotPairDiscover
 
         for (var i = 0; i < broadcasts; i++)
         {
-            try
+            foreach (var target in targets)
             {
-                await udp.SendAsync(payload, payload.Length, new IPEndPoint(IPAddress.Broadcast, DiscoveryPort));
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"  (broadcast {i + 1}/{broadcasts} failed: {ex.Message})");
+                try
+                {
+                    await udp.SendAsync(payload, payload.Length, new IPEndPoint(target, DiscoveryPort));
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"  (broadcast {i + 1}/{broadcasts} to {target} failed: {ex.Message})");
+                }
             }
             if (i < broadcasts - 1)
                 await Task.Delay(perBroadcast);
