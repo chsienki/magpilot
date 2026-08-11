@@ -400,6 +400,22 @@ static async Task<int> RunSessionLoopAsync(AgentClient agent, string sid, Wrappe
         // User pressed enter: re-acquire (polite by default) and loop
         // back to spawn a fresh copilot --resume.
         Console.WriteLine("magpilot: requesting take-back...");
+        // Tell any SSE subscriber (e.g. a SPA tab currently driving this
+        // session) that we're reclaiming it BEFORE we flip ownership --
+        // the same courtesy the two spawn paths extend. Without it a browser
+        // actively viewing the session gets no live "terminal took over"
+        // banner: it only finds out on its next /messages 409 or a manual
+        // refresh's /state probe. Best-effort; a failed broadcast doesn't
+        // block the take-back (the acquire still flips ownership).
+        try
+        {
+            await agent.FireReleaseRequestAsync(sid, $"magpilot/{hostPid}", force: false);
+            await Task.Delay(500);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"magpilot: release-request before take-back failed (non-fatal): {ex.Message}");
+        }
         try
         {
             await agent.AcquireForHostAsync(sid, hostPid, force: false);

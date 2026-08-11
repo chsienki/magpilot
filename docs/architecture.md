@@ -555,7 +555,10 @@ one re-reads the file before writing).
    the session.
 5. The wrapper either exits (with `--magpilot-exit-on-handoff`) or
    sits on a "Press <enter> to take it back" prompt with a 10-min
-   timeout.
+   timeout. Pressing enter fires `release-request` (500ms grace)
+   BEFORE re-acquiring, exactly like the initial spawn paths, so a
+   SPA tab that took the session over sees the live "terminal took
+   over" banner instead of only finding out on its next 409 / refresh.
 6. The agent's `DetachAsync` (called from `acquire-for-host` step 2
    above) deletes the agent's `inuse.<acp-pid>.lock` from the
    session directory so the wrapper's interactive copilot child

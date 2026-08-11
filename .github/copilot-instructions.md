@@ -1583,13 +1583,19 @@ ACP), wrap it with the same retry-on-409 pattern. Don't re-implement
 ad hoc.
 
 **Pre-acquire release-request** (launcher side, `Magpilot.Host/Program.cs`):
-both spawn paths -- known-sid (`--resume=<UUID>`) and post-spawn
-detection (no sid, picker, --continue) -- fire
-`agent.FireReleaseRequestAsync` + a 500ms grace BEFORE
-`AcquireForHostAsync`. Without this courtesy the SPA only learns
-ownership flipped when its NEXT `/messages` POST returns 409 (i.e.
-the user has to send before the UI updates). Failure of the broadcast
-is non-fatal; the existing 409 path still catches uncoordinated cases.
+**every** `AcquireForHostAsync` call site fires
+`agent.FireReleaseRequestAsync` + a 500ms grace BEFORE acquiring. There
+are THREE: the two spawn paths -- known-sid (`--resume=<UUID>`) and
+post-spawn detection (no sid, picker, --continue) -- AND the
+resume-prompt take-back in `RunSessionLoopAsync` (the "Press enter to
+take it back" loop after a web hand-off). Without this courtesy the SPA
+only learns ownership flipped when its NEXT `/messages` POST returns 409
+(i.e. the user has to send before the UI updates) or on a manual refresh
+`/state` probe -- so a browser actively viewing the session shows no live
+"terminal took over" banner. The resume-loop site was missed originally
+and reintroduced exactly that symptom; keep the knock on ALL acquire
+sites. Failure of the broadcast is non-fatal; the existing 409 path still
+catches uncoordinated cases.
 
 **Launcher SSE reconnect** (`Magpilot.Host/Program.cs`,
 `SubscribeWithReconnectAsync`): the launcher listens for
