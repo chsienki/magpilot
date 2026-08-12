@@ -22,6 +22,11 @@
                        aria-label="Back" />
         <MudText Typo="Typo.h6">Paired agents</MudText>
         <MudSpacer />
+        <MudTooltip Text="Create enrollment bundle">
+            <MudIconButton Icon="@Icons.Material.Filled.Key" Color="Color.Inherit"
+                           Href="/admin/enroll"
+                           aria-label="Create enrollment bundle" />
+        </MudTooltip>
         <MudIconButton Icon="@Icons.Material.Filled.Refresh" Color="Color.Inherit"
                        OnClick="LoadAsync" Disabled="@_loading"
                        aria-label="Refresh" />
@@ -105,10 +110,13 @@
                     <MudText Typo="Typo.body2" Color="Color.Default" Align="Align.Center" Class="mb-2">
                         Install magpilot on a machine and run <code>magpilot --magpilot-pair</code>.
                     </MudText>
-                    <MudText Typo="Typo.caption" Color="Color.Default" Align="Align.Center">
-                        Or visit <code>/admin/enroll</code> to mint a bundle for the non-interactive
-                        <code>magpilot --magpilot-pair=&lt;bundle&gt;</code> flow.
+                    <MudText Typo="Typo.caption" Color="Color.Default" Align="Align.Center" Class="mb-3">
+                        Or mint a bundle for the non-interactive
+                        <code>magpilot --magpilot-pair=&lt;bundle&gt;</code> flow:
                     </MudText>
+                    <MudButton Variant="Variant.Outlined" Color="Color.Primary"
+                               StartIcon="@Icons.Material.Filled.Key"
+                               Href="/admin/enroll">Create enrollment bundle</MudButton>
                 </MudPaper>
             }
             else
