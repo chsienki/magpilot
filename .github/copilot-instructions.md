@@ -1087,7 +1087,11 @@ Enforcement is deliberately centralized:
   SPA posts its own errors; agents post via bearer). The SPA hides the
   Logs AppBar link for non-admins; `/admin/logs` shows an "admin only"
   banner if reached directly. The AppBar's **Agents** link is visible
-  to all (everyone needs `/admin/agents` to pair their own hosts).
+  to all (everyone needs `/admin/agents` to pair their own hosts). From
+  `/admin/agents` a **Create enrollment bundle** button (also all-users)
+  reaches `/admin/enroll` to mint a `magpilot2+` voucher payload;
+  minting stamps owner = the signed-in user, so the voucher flow is the
+  identity-safe pairing path for a non-admin.
 - **UDP discovery is ownership-neutral:** it only refreshes
   url/flavors/online and writes null-owner/null-token rows; it never
   sets or changes an owner (`Upsert` preserves `owner_user`). Owner is
@@ -1095,7 +1099,8 @@ Enforcement is deliberately centralized:
   admin-only visible + unreachable until paired. Caveat: pending V3
   claims are still global (any authed user can Adopt -> becomes owner);
   a claim has no owner until adopted, so per-user claim scoping is
-  deferred (mitigated by 5-min TTL + fingerprint + re-pair).
+  deferred (mitigated by 5-min TTL + fingerprint + re-pair; two fix
+  options recorded in the Open items backlog).
 
 ### Autoupdate visibility: two ways the chain silently breaks
 
@@ -2137,6 +2142,7 @@ future "what's left?" sweep doesn't accidentally re-pick them):
 - ~~2026-06-08: fix overflow on repo box~~ -> shipped via MudChip + `min-width: 0` + ellipsis cap-at-180px (chip later removed when the session list moved to a 3-line title/folder/branch layout that doesn't need a chip at all -- see "drop 'past' sessions list" below). The MudChip-clipping recipe survives in the SPA / brand section of these instructions for any future caller.
 - ~~2026-06-08: make 'talking' icon be the magpie~~ -> shipped: assistant + thinking-bubble avatars render `MagpieMark` inside a MudAvatar `Variant.Outlined`. Outlined keeps the chrome transparent so the multi-colour SVG isn't fighting a solid fill, while sharing the same 32x32 circle as Person/Lightbulb/Terminal avatars (so all assistant rows share a left column). The bird drops to `Size=22` so its visible content fits inside the circle's clip without losing its tail.
 - ~~2026-06-09: repo names dominated by repeated `owner/` prefixes when every session is the signed-in user's own repo~~ -> shipped: SPA fetches `/api/me` on init and `DisplayRepo()` strips `{identity}/` from the chip text when it matches the signed-in user. Generic -- repos owned by anyone else still render with their full `owner/repo`. Tooltip always shows the full path so the owner is one hover away.
+- ~~2026-08-11: make the SPA multi-user -- when you auth with GitHub, agents are scoped to that login (log in as someone else and you don't see my HENDRIK)~~ -> shipped v0.1.28: `agents.owner_user` (nullable; stamped from the voucher's `created_by_user` on redeem and the claim adopter's `decided_by_user` on approve; re-pair preserves via `COALESCE`). `Magpilot.Hub.Auth.AgentVisibility` centralizes the rules (`IsInfra`/`IsAdmin`/`ScopedToOwner`/`CanAccess`); `HubAuthOptions.AdminUser` = first `OAUTH_ALLOWED_GITHUB_USERS` entry. A single endpoint filter on the `/api` group gates every `{name}` route (proxies + SSE + revoke + DELETE) with `CanAccess` -> 404 (hide existence). `GET /api/agents` is scoped per-user (infra bearer stays UNSCOPED so preflight still sees all); admin-only `GET /api/admin/agents/all` backs the SPA "Show all agents" toggle + Owner column; `GET /api/me` now returns `isAdmin`. Central log QUERY (`GET /api/log[/sources]`) is admin-only (POST ingest stays open); SPA hides the Logs link for non-admins and adds an all-users Agents link. Null-owner (legacy/discovered) rows fall in the admin's bucket -> no migration. Unit tests in `tests/Magpilot.Hub.Tests` (18; NOT in the slnx). v0.1.29 added a **Create enrollment bundle** button on `/admin/agents` -> `/admin/enroll` (all users). Full detail: the "Multi-user agent ownership" section above. Deferred sub-item (claim scoping) is under Open items.
 
 Open items:
 
@@ -2155,3 +2161,4 @@ Open items:
 - 2026-06-13: ability to upload screenshots
 - 2026-06-13: oauth callbacks -- a local extra server the PC instance runs so the SPA can intercept and forward the callback back to the agent
 - 2026-08-07: installer-coordinated shutdown + restart of running magpilot exes -- the magpilot exe's should be tellable by the installer to temporarily shut down, then restart once the updated binary is in place, enabling automatic in-place updates without manually closing + reopening a lot of sessions
+- 2026-08-11: magpilot multi-user follow-up -- per-user scoping of V3 pairing CLAIMS (the one remaining seam in the multi-user model; see "Multi-user agent ownership"). Today `GET /api/admin/agents/claims` + the approve/reject endpoints are auth-only: ANY signed-in user sees ALL pending claims and whoever clicks Adopt becomes the owner. A claim has no owner until adopted -- the launcher initiates it with no hub cookie, so the hub can't know which user is "expecting" it -- so it can't be owner-scoped the way agents are. Blast radius: an allowlisted user could Adopt another user's pending claim, making that machine's agent theirs (they can then drive its Copilot via the hub); the victim re-pairs to reclaim (COALESCE reassigns owner). Mitigated today by 5-min TTL + the printed fingerprint (visual verify) + re-pair; low-stakes under a small trusted-accounts allowlist. Two fix options if it needs closing: (1) SMALLEST -- gate the claims list + approve/reject to admin only, and have regular users pair via the VOUCHER flow instead, which is already identity-safe (`CreateVoucher` binds `created_by_user` to the minting user's cookie -> owner = them); interactive UDP-discovery pairing then becomes an admin-only convenience. (2) BIGGER -- bind a claim to an intended owner at creation: while logged in, the user generates a short identity-bound PIN, the launcher submits it with the claim, and the hub scopes that claim's visibility + approval to that user (needs a new claim column + a SPA step + a launcher change).
