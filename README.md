@@ -103,7 +103,7 @@ magpilot/
    Magpilot.slnx
    docs/plan.md              <- design doc (start here for the long version)
    docs/architecture.md      <- topology + the agent HTTP contract
-   .github/copilot-instructions.md  <- orientation for AI agents working on this repo
+   AGENTS.md  <- orientation for AI agents working on this repo
    spikes/acp-smoke/         <- standalone ACP smoke test
    scripts/build-hub.ps1     <- builds web SPA + copies into hub wwwroot
    scripts/test-shim-phase1.sh <- bash acceptance test for the shim endpoints

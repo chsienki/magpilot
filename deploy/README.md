@@ -144,5 +144,5 @@ Get-ScheduledTaskInfo -TaskName MagpilotAgent | Select LastRunTime, LastTaskResu
 The installer registers two inbound firewall rules (TCP 5099 + UDP
 47823) restricted to RFC1918 ranges. For dev iteration: stop the
 scheduled task, run `dotnet run --project src/Magpilot.Agent` locally,
-then restart the task. See the magpilot copilot-instructions for the
+then restart the task. See the magpilot AGENTS.md for the
 full dev-loop story.

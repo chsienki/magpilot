@@ -163,7 +163,7 @@ public sealed class HubClient
     /// removes the session from its owned map and calls
     /// <c>session/close</c> (which is a no-op in the current copilot
     /// CLI, but that's an upstream limitation -- see the gotcha in the
-    /// magpilot copilot-instructions). Returns 204 on success; we
+    /// magpilot AGENTS.md). Returns 204 on success; we
     /// surface errors with the standard EnsureSuccessStatusCode path.
     /// </summary>
     public async Task DetachAsync(string agent, string id, CancellationToken ct = default)

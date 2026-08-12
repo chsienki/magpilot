@@ -116,7 +116,7 @@ public sealed class AcpClient : IAsyncDisposable
         // deployment would still leak children -- Magnus survives
         // today because Docker's PID-namespace cleanup reaps the
         // container's process tree on agent exit. Tracked as
-        // agent-linux-orphan-protection in copilot-instructions.md.
+        // agent-linux-orphan-protection in AGENTS.md.
         if (OperatingSystem.IsWindows())
         {
             Win32JobObject.Attach(_proc, _logger);

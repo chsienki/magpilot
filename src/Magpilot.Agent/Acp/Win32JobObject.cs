@@ -26,7 +26,7 @@ namespace Magpilot.Agent.Acp;
 /// orphan copilot. For a bare-metal Linux deployment this fix would
 /// need a Linux equivalent (likely prctl PR_SET_PDEATHSIG via a tiny
 /// preload shim, since the call has to come from the child) --
-/// tracked as `agent-linux-orphan-protection` in copilot-instructions.
+/// tracked as `agent-linux-orphan-protection` in AGENTS.md.
 ///
 /// Singleton-by-static: the job handle is created lazily on first
 /// <see cref="Attach"/> call and held in a static field for the
