@@ -935,12 +935,12 @@ rather than spawn parallel implementations.
 * **`AgentRegistry.AddColumnIfMissing(conn, table, column, type)`** --
   the idempotent schema-migration helper. Probes `PRAGMA
   table_info`, only runs the `ALTER TABLE` when the column is
-  genuinely absent. Used four times in `InitDb` today
-  (`enrolled_at`, `enrolled_via`, `revoked_at`, `flavors`); any new
-  agents / vouchers / claims column goes through here. Default-NULL
-  semantics mean pre-migration rows stay valid, so you can ship
-  the column without a downtime. Don't write bare `ALTER TABLE`
-  in `InitDb` -- it'll throw on the second startup.
+  genuinely absent. Used five times in `InitDb` today
+  (`enrolled_at`, `enrolled_via`, `revoked_at`, `flavors`,
+  `owner_user`); any new agents / vouchers / claims column goes
+  through here. Default-NULL semantics mean pre-migration rows stay
+  valid, so you can ship the column without a downtime. Don't write
+  bare `ALTER TABLE` in `InitDb` -- it'll throw on the second startup.
 
   > **WireGuard and Wi-Fi agents can't be discovered by the hub, so
   > seed their registry columns by hand.** UDP discovery
@@ -966,13 +966,18 @@ rather than spawn parallel implementations.
 * **`Proxy(name, reg, ...)` in `HubEndpoints`** -- the single
   choke point for every per-agent-name HTTP route on the hub.
   Already gates revocation (returns 410 Gone with `revoked: true`
-  when `reg.IsRevoked(name)`). Any future per-agent policy
-  decision (visibility filtering for multi-user, RBAC,
-  rate-limiting, agent-status preconditions) belongs here -- one
-  decision point that returns the right status code consistently.
-  Per-route guards duplicated across the dozen `/api/agents/...`
-  endpoints will drift; the wrapper exists precisely so they
-  don't have to.
+  when `reg.IsRevoked(name)`) and maps transport failures to 502.
+  **Multi-user visibility is NOT in here** -- it's enforced one
+  layer up by a single endpoint filter on the `/api` group (see
+  "Multi-user agent ownership" below) so the ~17 per-agent routes
+  (proxies, SSE, revoke, DELETE) are gated in one place without
+  threading auth through every call site. Any future per-agent
+  policy decision that needs the response body or per-route context
+  (RBAC beyond ownership, rate-limiting, agent-status preconditions)
+  still belongs in `Proxy` -- one decision point that returns the
+  right status code consistently. Per-route guards duplicated across
+  the dozen `/api/agents/...` endpoints will drift; the wrapper (and
+  the group filter) exist precisely so they don't have to.
 
   > **A successful proxied call is also the online heartbeat.** On
   > success `Proxy` calls `reg.MarkOnline(name)`; on a transport
@@ -1020,6 +1025,77 @@ rather than spawn parallel implementations.
   run with a throwaway env file doesn't accidentally bounce an
   unrelated installed agent (see the "Gotcha" above the V2b
   revocation specifics).
+
+### Multi-user agent ownership
+
+The hub is multi-tenant across browser users. `agents.owner_user`
+(nullable TEXT, seeded by `AddColumnIfMissing`) records the GitHub
+login that enrolled/adopted each agent, and the hub scopes what each
+caller sees + can reach. The pure rules live in
+`Magpilot.Hub.Auth.AgentVisibility` (unit-tested in
+`tests/Magpilot.Hub.Tests`, NOT in the slnx -- run
+`dotnet test tests/Magpilot.Hub.Tests`).
+
+Three caller shapes:
+
+- **Infra bearer** (`auth_kind = phone_bearer`): a machine (preflight,
+  sidecars, MAUI), not a person. Unscoped -- sees + reaches everything.
+  `GET /api/agents` returns the full list for it. **Don't regress
+  this** or preflight's host enumeration breaks.
+- **Admin browser user** = `HubAuthOptions.AdminUser` (the FIRST
+  `OAUTH_ALLOWED_GITHUB_USERS` entry). Superuser, but their *main*
+  `GET /api/agents` list is STILL scoped to agents they own -- the
+  cross-user view is the separate `GET /api/admin/agents/all`
+  (admin-only, 403 otherwise). Admin CAN proxy to / manage any agent.
+- **Regular browser user**: only agents they own, everywhere.
+
+Two decisions, two predicates (don't conflate them):
+
+- `ScopedToOwner(owner, login, isAdminLogin)` -- main-list membership.
+  Owner match, OR (owner null AND caller is admin). The admin does
+  **not** see foreign-owned agents in the scoped list; that's the
+  point of the all-agents view being separate.
+- `CanAccess(owner, login, isAdmin)` -- proxy/management gate. Admin
+  (infra bearer OR admin login) reaches anything; everyone else only
+  their own.
+
+A **null owner** (legacy rows from before this column, or
+discovered-but-never-enrolled) counts as the **admin's** in the scoped
+list -- so a deployment's pre-existing agents stay visible to the
+primary user with no data migration, and are unreachable by everyone
+else. Owner is stamped at enrollment: voucher-redeem uses the
+voucher's `created_by_user`, claim-approve uses the adopter's
+`decided_by_user`; a re-pair preserves an existing owner via
+`COALESCE(excluded.owner_user, agents.owner_user)`.
+
+Enforcement is deliberately centralized:
+
+- A single **endpoint filter on the `/api` group** in `HubEndpoints`
+  gates every route carrying an `{name}` agent segment (all per-agent
+  proxies, the SSE stream, `revoke`, `DELETE /agents/{name}`) with
+  `CanAccess`. A non-accessible agent returns **404** (hides existence,
+  not 403). The `Proxy` wrapper stays ownership-agnostic. When you add
+  a new per-agent route it's gated automatically as long as its
+  template uses `{name}` -- no per-route guard needed.
+- `GET /api/agents` scopes in-handler (`ScopedToOwner`), `GET
+  /api/admin/agents/all` is admin-gated in-handler, `GET /api/me`
+  reports `{ identity, isAdmin }` so the SPA shows the "Show all
+  agents" toggle on `/admin/agents`.
+- **Central logs are admin-only.** `GET /api/log` + `/api/log/sources`
+  (viewer/query) are gated to the admin -- they aggregate every user's
+  session activity. Ingest (`POST /api/log[/batch]`) stays open (the
+  SPA posts its own errors; agents post via bearer). The SPA hides the
+  Logs AppBar link for non-admins; `/admin/logs` shows an "admin only"
+  banner if reached directly. The AppBar's **Agents** link is visible
+  to all (everyone needs `/admin/agents` to pair their own hosts).
+- **UDP discovery is ownership-neutral:** it only refreshes
+  url/flavors/online and writes null-owner/null-token rows; it never
+  sets or changes an owner (`Upsert` preserves `owner_user`). Owner is
+  set only by the pairing flows. A discovered-but-unpaired agent is
+  admin-only visible + unreachable until paired. Caveat: pending V3
+  claims are still global (any authed user can Adopt -> becomes owner);
+  a claim has no owner until adopted, so per-user claim scoping is
+  deferred (mitigated by 5-min TTL + fingerprint + re-pair).
 
 ### Autoupdate visibility: two ways the chain silently breaks
 

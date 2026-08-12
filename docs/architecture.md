@@ -250,7 +250,91 @@ Note: the Hub's `/api` endpoints **require browser cookie auth**. Service
 callers can't talk to the hub. That's by design -- it forces sidecars to
 declare which agent they target rather than punching through the hub.
 
-## The agent HTTP API (the public contract)
+### Multi-user agent ownership
+
+The hub is multi-tenant across browser users. Every agent carries an
+`owner_user` (the GitHub login that enrolled or adopted it), and the
+hub scopes what each caller sees and can reach. Three caller shapes,
+implemented as pure predicates in `Magpilot.Hub.Auth.AgentVisibility`
+and enforced in one endpoint filter + the list handlers:
+
+- **Infrastructure bearer** (`auth_kind = phone_bearer` --  preflight,
+  sidecars, the MAUI app): a machine, not a person. Unscoped: sees and
+  can reach every agent. Preflight enumerating hosts relies on this.
+- **Admin browser user** (the first `OAUTH_ALLOWED_GITHUB_USERS` entry,
+  `HubAuthOptions.AdminUser`): a superuser. Their *main* agent list
+  (`GET /api/agents`) is still scoped to agents they own -- the
+  day-to-day UI isn't cluttered with everyone's hosts -- but they get a
+  dedicated cross-user view (`GET /api/admin/agents/all`) and can proxy
+  to / manage any agent.
+- **Regular browser user**: sees and can reach only the agents they own.
+
+A `null` owner (rows enrolled before ownership existed, or
+discovered-but-never-enrolled) is treated as the **admin's** in the
+scoped list, so a deployment's pre-existing agents stay visible to the
+primary user with no data migration -- and are unreachable by anyone
+else.
+
+Two distinct decisions:
+
+| Decision | Predicate | Rule |
+|---|---|---|
+| Main-list membership | `ScopedToOwner(owner, login, isAdminLogin)` | owner matches, OR (owner is null AND caller is the admin login). The admin does NOT see foreign-owned agents here. |
+| Proxy / management access | `CanAccess(owner, login, isAdmin)` | admin (infra bearer or admin login) reaches anything; everyone else only their own. |
+
+Enforcement points:
+
+- `GET /api/agents` -- infra sees all; a browser user gets the
+  `ScopedToOwner` filter applied to `AgentRegistry.List()`.
+- `GET /api/admin/agents/all` -- admin-only (403 otherwise), returns
+  the full registry for the SPA's "Show all agents" toggle.
+- A single **endpoint filter on the `/api` group** gates every route
+  that carries an `{name}` agent segment (all the per-agent proxies,
+  the SSE stream, `revoke`, `DELETE /agents/{name}`) with `CanAccess`;
+  a non-accessible agent returns **404** (hides existence, not 403).
+  This means the `Proxy` wrapper itself stays ownership-agnostic -- the
+  gate lives in one place upstream of all ~17 call sites.
+- `GET /api/me` reports `{ identity, isAdmin }` so the SPA can show the
+  admin toggle.
+
+**Central logs are admin-only.** `GET /api/log` + `/api/log/sources`
+(the viewer/query side) are gated to the admin -- they aggregate every
+user's session activity. Ingest (`POST /api/log[/batch]`) stays open to
+any authenticated producer (the SPA posts its own JS errors; agents
+post via bearer). The SPA hides the Logs AppBar link for non-admins and
+`/admin/logs` shows an "admin only" banner if reached directly.
+
+**SPA nav:** the AppBar has an **Agents** link (all users -- everyone
+needs `/admin/agents` to pair + manage their own hosts; the cross-user
+"Show all agents" toggle inside is admin-only) and a **Logs** link
+(admin only).
+
+**UDP discovery is ownership-neutral.** Discovery is a hub-side,
+unauthenticated LAN broadcast; it only refreshes an agent's
+url/flavors/online-state and records a `null`-owner, `null`-token row
+for any agent that answers. It never assigns or changes an owner --
+ownership is set *exclusively* by the pairing flows (voucher redeem /
+claim approve), and `AgentRegistry.Upsert` preserves an existing
+`owner_user`. A discovered-but-unpaired agent is therefore admin-only
+visible and unreachable by anyone (no token) until someone pairs it.
+There is no per-user discovery.
+
+> **Known multi-user seam (pairing claims are global).** Pending V3
+> pairing claims (`GET /api/admin/agents/claims`) are visible to every
+> authenticated user, and whoever clicks Adopt becomes the owner. A
+> claim has no owner until adopted (the launcher initiates without
+> knowing which hub user will claim it), so per-user claim scoping is a
+> larger change deferred for now. Mitigations today: 5-min TTL, the
+> fingerprint the launcher prints for visual verification, and re-pair
+> to correct a mis-adoption. Low-stakes under a trusted-accounts
+> allowlist.
+
+Owner is stamped at enrollment: the voucher-redeem path uses the
+voucher's `created_by_user`; the claim-approve path uses the adopter's
+login (`decided_by_user`). A re-pair preserves an existing owner when
+the new enrollment carries none (`COALESCE(excluded.owner_user, ...)`).
+
+
 
 All routes are under `/api`, all protected by `Authorization: Bearer <MAGPILOT_AGENT_TOKEN>`
 **except** the two version endpoints (`/version`, `/version/latest`),

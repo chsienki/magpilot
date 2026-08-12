@@ -1,3 +1,4 @@
+using Magpilot.Hub.Auth;
 using Magpilot.Hub.Logging;
 
 namespace Magpilot.Hub.Api;
@@ -8,6 +9,11 @@ public static class LogEndpoints
     {
         var api = routes.MapGroup("/api/log").RequireAuthorization();
 
+        // Ingest stays open to any authenticated producer: the SPA posts
+        // its own JS errors + ILogger output (cookie auth) and agents
+        // post batches (infra bearer). Only the QUERY/viewer side below
+        // is admin-gated -- central logs aggregate every user's session
+        // activity, so a regular multi-user tenant shouldn't read them.
         api.MapPost("/", (LogEventDto evt, LogStore store) =>
         {
             store.Append(new[] { evt });
@@ -24,8 +30,10 @@ public static class LogEndpoints
             return Results.NoContent();
         });
 
-        api.MapGet("/", (HttpContext ctx, LogStore store) =>
+        api.MapGet("/", (HttpContext ctx, LogStore store, HubAuthOptions opts) =>
         {
+            if (!AgentVisibility.IsAdmin(ctx.User, opts))
+                return Results.Json(new { error = "admin only" }, statusCode: StatusCodes.Status403Forbidden);
             var q = ctx.Request.Query;
             var query = new LogQuery(
                 Source:    q["source"],
@@ -39,6 +47,9 @@ public static class LogEndpoints
             return Results.Ok(store.Query(query));
         });
 
-        api.MapGet("/sources", (LogStore store) => Results.Ok(store.KnownSources()));
+        api.MapGet("/sources", (HttpContext ctx, LogStore store, HubAuthOptions opts) =>
+            AgentVisibility.IsAdmin(ctx.User, opts)
+                ? Results.Ok(store.KnownSources())
+                : Results.Json(new { error = "admin only" }, statusCode: StatusCodes.Status403Forbidden));
     }
 }

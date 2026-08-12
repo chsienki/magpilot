@@ -31,7 +31,7 @@ public sealed class HubClient
     public Task<MeInfo?> GetMeAsync(CancellationToken ct = default) =>
         _http.GetFromJsonAsync<MeInfo>("api/me", ct);
 
-    public sealed record MeInfo(string? Identity);
+    public sealed record MeInfo(string? Identity, bool IsAdmin = false);
 
     /// <summary>
     /// Mint a fresh one-time enrollment voucher on the hub. Each call
@@ -65,6 +65,14 @@ public sealed class HubClient
 
     public Task<List<AgentInfo>?> ListAgentsAsync(CancellationToken ct = default) =>
         _http.GetFromJsonAsync<List<AgentInfo>>("api/agents", ct);
+
+    /// <summary>
+    /// Admin-only cross-user view: every agent regardless of owner.
+    /// Backs the "Show all agents" toggle on /admin/agents. Throws
+    /// <see cref="HttpRequestException"/> (403) for non-admin callers.
+    /// </summary>
+    public Task<List<AgentInfo>?> ListAllAgentsAsync(CancellationToken ct = default) =>
+        _http.GetFromJsonAsync<List<AgentInfo>>("api/admin/agents/all", ct);
 
     /// <summary>
     /// Revoke a paired agent. Hub clears the per-agent token + sets

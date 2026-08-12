@@ -1,5 +1,7 @@
 using System.Net.Http.Json;
+using System.Security.Claims;
 using Magpilot.Hub.Agents;
+using Magpilot.Hub.Auth;
 using Magpilot.Hub.Discovery;
 using Magpilot.Hub.Updates;
 using Magpilot.Shared;
@@ -105,8 +107,33 @@ public static class HubEndpoints
 
         var api = routes.MapGroup("/api").RequireAuthorization();
 
-        api.MapGet("/me", (HttpContext ctx) =>
-            Results.Ok(new { identity = ctx.User.Identity?.Name }));
+        // Multi-user agent visibility gate. Every per-agent route
+        // carries a {name} route value; this single filter enforces
+        // that the caller may reach that agent (owner, admin, or infra
+        // bearer) BEFORE the handler runs -- covering the proxy routes,
+        // the SSE stream, revoke, and DELETE in one place instead of
+        // threading the check through ~17 call sites. Routes without a
+        // {name} value (the scoped list, /me, claims, enroll, etc.)
+        // pass straight through and do their own scoping in-handler. A
+        // non-accessible agent returns 404 to hide its existence from a
+        // user who doesn't own it.
+        api.AddEndpointFilter(async (efic, next) =>
+        {
+            var http = efic.HttpContext;
+            if (http.Request.RouteValues.TryGetValue("name", out var nameObj)
+                && nameObj is string name && name.Length > 0)
+            {
+                var reg = http.RequestServices.GetRequiredService<AgentRegistry>();
+                var opts = http.RequestServices.GetRequiredService<HubAuthOptions>();
+                var owner = reg.Get(name)?.OwnerUser;
+                if (!AgentVisibility.CanAccess(owner, http.User.Identity?.Name, AgentVisibility.IsAdmin(http.User, opts)))
+                    return Results.NotFound(new { error = $"Unknown agent {name}" });
+            }
+            return await next(efic);
+        });
+
+        api.MapGet("/me", (ClaimsPrincipal user, HubAuthOptions opts) =>
+            Results.Ok(new { identity = user.Identity?.Name, isAdmin = AgentVisibility.IsAdmin(user, opts) }));
 
         // V2b pairing: revoke a paired agent. Clears the agent's
         // per-agent bearer token + sets revoked_at. The Proxy wrapper
@@ -193,7 +220,34 @@ public static class HubEndpoints
             return Results.Ok(cached with { UpdateAvailable = updateAvailable });
         });
 
-        api.MapGet("/agents", (AgentRegistry reg) => reg.List());
+        // Main agent list, scoped per-user. An infra bearer (preflight,
+        // sidecars, MAUI) is a machine, not a person -- it sees every
+        // agent. A browser user (admin included) sees only the agents
+        // they own; a null-owner agent (legacy / discovered-not-
+        // enrolled) counts as the admin's so the primary user's
+        // pre-existing hosts don't vanish. The admin's cross-user view
+        // is the separate /admin/agents/all endpoint.
+        api.MapGet("/agents", (AgentRegistry reg, ClaimsPrincipal user, HubAuthOptions opts) =>
+        {
+            var all = reg.List();
+            if (AgentVisibility.IsInfra(user))
+                return Results.Ok(all);
+            var login = user.Identity?.Name;
+            var isAdminLogin = AgentVisibility.IsAdminLogin(login, opts);
+            var visible = all
+                .Where(a => AgentVisibility.ScopedToOwner(a.OwnerUser, login, isAdminLogin))
+                .ToList();
+            return Results.Ok(visible);
+        });
+
+        // Admin-only cross-user view: every agent regardless of owner.
+        // Drives the "Show all agents" toggle on /admin/agents. 403 for
+        // non-admins (a regular user has no business enumerating other
+        // users' hosts).
+        api.MapGet("/admin/agents/all", (AgentRegistry reg, ClaimsPrincipal user, HubAuthOptions opts) =>
+            AgentVisibility.IsAdmin(user, opts)
+                ? Results.Ok(reg.List())
+                : Results.Json(new { error = "admin only" }, statusCode: StatusCodes.Status403Forbidden));
 
         // V2a pairing: the manual POST /api/agents register endpoint
         // is gone. The only way to add an agent to the registry now is

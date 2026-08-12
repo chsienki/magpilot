@@ -11,7 +11,17 @@ public sealed record HubAuthOptions(
     IReadOnlyList<string> AllowedGitHubUsers,
     string? OAuthClientId,
     string? OAuthClientSecret,
-    string? CookieDomain);
+    string? CookieDomain)
+{
+    /// <summary>
+    /// The admin login: the first entry in
+    /// <see cref="AllowedGitHubUsers"/>. The admin is the superuser
+    /// who can see every agent (via the all-agents view) and proxy to
+    /// any agent regardless of owner. Null only when the allowlist is
+    /// empty (misconfiguration). See <c>AgentVisibility</c>.
+    /// </summary>
+    public string? AdminUser => AllowedGitHubUsers.Count > 0 ? AllowedGitHubUsers[0] : null;
+}
 
 public static class HubAuthExtensions
 {

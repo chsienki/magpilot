@@ -51,12 +51,21 @@
             }
         }
         <MudSpacer />
-        <MudTooltip Text="View central logs">
-            <MudIconButton Icon="@Icons.Material.Filled.Article"
+        <MudTooltip Text="Agents & pairing">
+            <MudIconButton Icon="@Icons.Material.Filled.DeviceHub"
                            Color="Color.Inherit"
-                           Href="/admin/logs"
-                           aria-label="Logs" />
+                           Href="/admin/agents"
+                           aria-label="Agents" />
         </MudTooltip>
+        @if (_isAdmin)
+        {
+            <MudTooltip Text="View central logs">
+                <MudIconButton Icon="@Icons.Material.Filled.Article"
+                               Color="Color.Inherit"
+                               Href="/admin/logs"
+                               aria-label="Logs" />
+            </MudTooltip>
+        }
         <MudTooltip Text="@((Theme?.IsDark ?? false) ? "Switch to light mode" : "Switch to dark mode")">
             <MudIconButton Icon="@((Theme?.IsDark ?? false) ? Icons.Material.Filled.LightMode : Icons.Material.Filled.DarkMode)"
                            Color="Color.Inherit"
@@ -997,6 +1006,7 @@
     /// session-list chip's tooltip so the original is one hover away.
     /// </summary>
     private string? _currentUserIdentity;
+    private bool _isAdmin;
 
     /// <summary>
     /// Render-time helper: shorten <c>owner/repo</c> to <c>repo</c>
@@ -1064,6 +1074,7 @@
         {
             var me = await Hub.GetMeAsync();
             _currentUserIdentity = me?.Identity;
+            _isAdmin = me?.IsAdmin ?? false;
         }
         catch (Exception ex)
         {

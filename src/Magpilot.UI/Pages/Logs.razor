@@ -25,6 +25,14 @@
     </MudAppBar>
 
     <MudMainContent Class="mt-2 px-3" Style="height: calc(100dvh - 64px); display: flex; flex-direction: column;">
+        @if (!_authorized)
+        {
+            <MudAlert Severity="Severity.Warning" Class="ma-4">
+                Central logs are visible to the admin only.
+            </MudAlert>
+        }
+        else
+        {
         <MudPaper Elevation="0" Class="pa-2 mb-2 d-flex flex-wrap align-center" Style="gap: .5rem;">
             <MudSelect T="string" Label="Source" Value="_source" ValueChanged="OnSourceChanged"
                        Clearable="true" Dense="true" Style="min-width: 150px;">
@@ -140,6 +148,7 @@
                 </ChildRowContent>
             </MudTable>
         </MudPaper>
+        }
     </MudMainContent>
 </MudLayout>
 
@@ -148,6 +157,9 @@
 
     private List<HubClient.LogEntry> _rows = new();
     private List<string> _sources = new();
+    // Optimistic default so the admin doesn't flash the "admin only"
+    // banner before /api/me resolves; flipped false for a non-admin.
+    private bool _authorized = true;
     private string? _source;
     private string? _level;
     private string _search = "";
@@ -165,6 +177,13 @@
 
     protected override async Task OnInitializedAsync()
     {
+        // Central logs aggregate every user's session activity, so the
+        // viewer is admin-only (the hub's GET /api/log also 403s a
+        // non-admin -- this just avoids a confusing empty grid).
+        try { _authorized = (await Hub.GetMeAsync())?.IsAdmin ?? false; }
+        catch { _authorized = false; }
+        if (!_authorized) return;
+
         // Sync the dropdown with whatever value MainLayout already
         // hydrated from localStorage / ?logLevel=X, and keep it in
         // sync if some other code path mutates the gate.

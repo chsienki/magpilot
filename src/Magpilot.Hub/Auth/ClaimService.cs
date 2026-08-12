@@ -168,7 +168,8 @@ public sealed class ClaimService
         // same transaction as the claim status transition. Reuses
         // the V2a redeem machinery so the agents-table side stays
         // identical between voucher-redeem and claim-approve paths.
-        var agentToken = _enrol.MintTokenForClaim(c, tx, agentName, claimId);
+        // The adopting user becomes the agent's owner.
+        var agentToken = _enrol.MintTokenForClaim(c, tx, agentName, claimId, decidedByUser);
 
         using (var update = c.CreateCommand())
         {

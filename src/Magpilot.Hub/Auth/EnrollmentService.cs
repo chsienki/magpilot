@@ -131,12 +131,13 @@ public sealed class EnrollmentService
         long voucherId;
         long expiresAt;
         bool alreadyConsumed;
+        string? createdByUser;
 
         using (var probe = c.CreateCommand())
         {
             probe.Transaction = tx;
             probe.CommandText = """
-                SELECT id, expires_at, consumed_at IS NOT NULL
+                SELECT id, expires_at, consumed_at IS NOT NULL, created_by_user
                 FROM vouchers WHERE secret_hash = $hash
             """;
             probe.Parameters.AddWithValue("$hash", hash);
@@ -146,6 +147,7 @@ public sealed class EnrollmentService
             voucherId = r.GetInt64(0);
             expiresAt = r.GetInt64(1);
             alreadyConsumed = r.GetInt64(2) != 0;
+            createdByUser = r.IsDBNull(3) ? null : r.GetString(3);
         }
 
         if (alreadyConsumed)
@@ -187,14 +189,15 @@ public sealed class EnrollmentService
         {
             upsert.Transaction = tx;
             upsert.CommandText = """
-                INSERT INTO agents (name, url, token, last_seen, enrolled_at, enrolled_via)
-                VALUES ($name, $url, $token, $now / 1000, $now, $vid)
+                INSERT INTO agents (name, url, token, last_seen, enrolled_at, enrolled_via, owner_user)
+                VALUES ($name, $url, $token, $now / 1000, $now, $vid, $owner)
                 ON CONFLICT(name) DO UPDATE SET
                     url          = CASE WHEN excluded.url = '' THEN agents.url ELSE excluded.url END,
                     token        = excluded.token,
                     last_seen    = excluded.last_seen,
                     enrolled_at  = excluded.enrolled_at,
                     enrolled_via = excluded.enrolled_via,
+                    owner_user   = COALESCE(excluded.owner_user, agents.owner_user),
                     revoked_at   = NULL
             """;
             upsert.Parameters.AddWithValue("$name", agentName);
@@ -209,6 +212,9 @@ public sealed class EnrollmentService
             upsert.Parameters.AddWithValue("$token", agentToken);
             upsert.Parameters.AddWithValue("$now", nowMs);
             upsert.Parameters.AddWithValue("$vid", voucherId);
+            // Owner = the login that minted the voucher. Null (dev /
+            // anonymous) leaves the agent in the admin's scoped bucket.
+            upsert.Parameters.AddWithValue("$owner", (object?)createdByUser ?? DBNull.Value);
             upsert.ExecuteNonQuery();
         }
 
@@ -245,7 +251,7 @@ public sealed class EnrollmentService
     /// an <c>enrolled_via_kind</c> column if disambiguation becomes
     /// necessary.
     /// </remarks>
-    public string MintTokenForClaim(SqliteConnection conn, SqliteTransaction tx, string agentName, int claimId)
+    public string MintTokenForClaim(SqliteConnection conn, SqliteTransaction tx, string agentName, int claimId, string? ownerUser)
     {
         var agentToken = GenerateSecret();
         var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -253,14 +259,15 @@ public sealed class EnrollmentService
         using var upsert = conn.CreateCommand();
         upsert.Transaction = tx;
         upsert.CommandText = """
-            INSERT INTO agents (name, url, token, last_seen, enrolled_at, enrolled_via)
-            VALUES ($name, $url, $token, $now / 1000, $now, $cid)
+            INSERT INTO agents (name, url, token, last_seen, enrolled_at, enrolled_via, owner_user)
+            VALUES ($name, $url, $token, $now / 1000, $now, $cid, $owner)
             ON CONFLICT(name) DO UPDATE SET
                 url          = CASE WHEN excluded.url = '' THEN agents.url ELSE excluded.url END,
                 token        = excluded.token,
                 last_seen    = excluded.last_seen,
                 enrolled_at  = excluded.enrolled_at,
                 enrolled_via = excluded.enrolled_via,
+                owner_user   = COALESCE(excluded.owner_user, agents.owner_user),
                 revoked_at   = NULL
         """;
         upsert.Parameters.AddWithValue("$name", agentName);
@@ -268,6 +275,9 @@ public sealed class EnrollmentService
         upsert.Parameters.AddWithValue("$token", agentToken);
         upsert.Parameters.AddWithValue("$now", nowMs);
         upsert.Parameters.AddWithValue("$cid", claimId);
+        // Owner = the admin/user who clicked Adopt. Null (dev / anonymous)
+        // leaves the agent in the admin's scoped bucket.
+        upsert.Parameters.AddWithValue("$owner", (object?)ownerUser ?? DBNull.Value);
         upsert.ExecuteNonQuery();
         return agentToken;
     }

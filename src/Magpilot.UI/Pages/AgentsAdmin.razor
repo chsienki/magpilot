@@ -82,7 +82,16 @@
                 <MudDivider Class="my-4" />
             }
 
-            <MudText Typo="Typo.h6" Class="mb-2">Paired agents</MudText>
+            <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-2">
+                <MudText Typo="Typo.h6">@(_showAll ? "All agents" : "Paired agents")</MudText>
+                <MudSpacer />
+                @if (_isAdmin)
+                {
+                    <MudSwitch T="bool" Value="_showAll" Color="Color.Primary"
+                               Label="Show all agents" LabelPlacement="Placement.Start"
+                               ValueChanged="OnShowAllChanged" />
+                }
+            </MudStack>
 
             @if (_loading && _agents is null)
             {
@@ -107,6 +116,10 @@
                 <MudTable Items="@_agents" Dense="true" Hover="true" Bordered="false" Striped="false">
                     <HeaderContent>
                         <MudTh>Name</MudTh>
+                        @if (_showAll)
+                        {
+                            <MudTh>Owner</MudTh>
+                        }
                         <MudTh>Status</MudTh>
                         <MudTh>URL</MudTh>
                         <MudTh>Enrolled</MudTh>
@@ -121,6 +134,14 @@
                         <MudTd Style="@rowStyle">
                             <MudText Typo="Typo.body2" Style="font-weight: 500;">@context.Name</MudText>
                         </MudTd>
+                        @if (_showAll)
+                        {
+                            <MudTd Style="@rowStyle">
+                                <MudText Typo="Typo.caption" Color="Color.Default">
+                                    @(string.IsNullOrEmpty(context.OwnerUser) ? "(unowned)" : context.OwnerUser)
+                                </MudText>
+                            </MudTd>
+                        }
                         <MudTd Style="@rowStyle">
                             @{
                                 Color statusColor;
@@ -179,6 +200,8 @@
 
 @code {
     private bool _loading;
+    private bool _isAdmin;
+    private bool _showAll;
     private List<AgentInfo>? _agents;
     private List<PairingClaimSummary>? _claims;
     private readonly HashSet<string> _busyAgents = new(StringComparer.OrdinalIgnoreCase);
@@ -209,6 +232,19 @@
             }
         }
 
+        // Whether the current user is the admin (superuser). Only the
+        // admin gets the "Show all agents" cross-user toggle; everyone
+        // else manages only their own paired agents.
+        try
+        {
+            var me = await Hub.GetMeAsync();
+            _isAdmin = me?.IsAdmin ?? false;
+        }
+        catch
+        {
+            _isAdmin = false;
+        }
+
         await LoadAsync();
         // Poll every 5s so a launcher pairing in the background shows
         // up promptly without the admin having to refresh. Same poll
@@ -224,7 +260,9 @@
         StateHasChanged();
         try
         {
-            var agentsTask = Hub.ListAgentsAsync();
+            var agentsTask = (_showAll && _isAdmin)
+                ? Hub.ListAllAgentsAsync()
+                : Hub.ListAgentsAsync();
             var claimsTask = Hub.ListPairingClaimsAsync();
             await Task.WhenAll(agentsTask, claimsTask);
             var agents = await agentsTask;
@@ -246,6 +284,13 @@
             _loading = false;
             StateHasChanged();
         }
+    }
+
+    private async Task OnShowAllChanged(bool value)
+    {
+        _showAll = value;
+        _agents = null;
+        await LoadAsync();
     }
 
     private async Task ApproveAsync(PairingClaimSummary claim)

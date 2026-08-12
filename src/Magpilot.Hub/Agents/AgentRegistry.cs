@@ -116,6 +116,13 @@ public sealed class AgentRegistry
         // restarts + re-pairs instead of being lost with the in-memory
         // registry.
         AddColumnIfMissing(c, "agents", "flavors", "TEXT");
+        // Multi-user: the GitHub login that enrolled/adopted this
+        // agent. Set by the voucher-redeem (created_by_user) and
+        // claim-approve (decided_by_user) paths. NULL on rows enrolled
+        // before this column existed or discovered-but-never-enrolled;
+        // the hub treats a NULL owner as belonging to the admin's
+        // scoped view (see AgentVisibility).
+        AddColumnIfMissing(c, "agents", "owner_user", "TEXT");
     }
 
     private static string? SerializeFlavors(IReadOnlyList<string>? flavors) =>
@@ -156,7 +163,7 @@ public sealed class AgentRegistry
         using var c = new SqliteConnection(ConnString);
         c.Open();
         using var cmd = c.CreateCommand();
-        cmd.CommandText = "SELECT name, url, token, last_seen, enrolled_at, revoked_at, flavors FROM agents";
+        cmd.CommandText = "SELECT name, url, token, last_seen, enrolled_at, revoked_at, flavors, owner_user FROM agents";
         using var r = cmd.ExecuteReader();
         while (r.Read())
         {
@@ -170,7 +177,8 @@ public sealed class AgentRegistry
             var revokedAt = r.IsDBNull(5) ? (DateTimeOffset?)null
                 : DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(5));
             var flavors = r.IsDBNull(6) ? null : ParseFlavors(r.GetString(6));
-            _agents[name] = new AgentInfo(name, url, false, null, lastSeen, flavors, enrolledAt, revokedAt);
+            var ownerUser = r.IsDBNull(7) ? null : r.GetString(7);
+            _agents[name] = new AgentInfo(name, url, false, null, lastSeen, flavors, enrolledAt, revokedAt, ownerUser);
             if (token is not null) _tokens[name] = token;
         }
         _logger.LogInformation("Loaded {N} agents from {Db}", _agents.Count, _dbPath);
@@ -252,6 +260,7 @@ public sealed class AgentRegistry
         IReadOnlyList<string>? resolvedFlavors = flavors;
         DateTimeOffset? resolvedEnrolledAt = null;
         DateTimeOffset? resolvedRevokedAt = null;
+        string? resolvedOwnerUser = null;
         lock (_lock)
         {
             if (_agents.TryGetValue(name, out var existing))
@@ -259,10 +268,11 @@ public sealed class AgentRegistry
                 resolvedFlavors ??= existing.Flavors;
                 resolvedEnrolledAt = existing.EnrolledAt;
                 resolvedRevokedAt = existing.RevokedAt;
+                resolvedOwnerUser = existing.OwnerUser;
             }
         }
 
-        var info = new AgentInfo(name, url, online, null, DateTimeOffset.UtcNow, resolvedFlavors, resolvedEnrolledAt, resolvedRevokedAt);
+        var info = new AgentInfo(name, url, online, null, DateTimeOffset.UtcNow, resolvedFlavors, resolvedEnrolledAt, resolvedRevokedAt, resolvedOwnerUser);
         lock (_lock)
         {
             _agents[name] = info;
@@ -352,7 +362,7 @@ public sealed class AgentRegistry
         c.Open();
         using var cmd = c.CreateCommand();
         cmd.CommandText = """
-            SELECT url, token, last_seen, enrolled_at, revoked_at, flavors
+            SELECT url, token, last_seen, enrolled_at, revoked_at, flavors, owner_user
             FROM agents WHERE name = $n
         """;
         cmd.Parameters.AddWithValue("$n", name);
@@ -367,10 +377,11 @@ public sealed class AgentRegistry
         var revokedAt = r.IsDBNull(4) ? (DateTimeOffset?)null
             : DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(4));
         var dbFlavors = r.IsDBNull(5) ? null : ParseFlavors(r.GetString(5));
+        var ownerUser = r.IsDBNull(6) ? null : r.GetString(6);
         lock (_lock)
         {
             var prevFlavors = _agents.TryGetValue(name, out var prev) ? prev.Flavors : null;
-            _agents[name] = new AgentInfo(name, url, false, null, lastSeen, dbFlavors ?? prevFlavors, enrolledAt, revokedAt);
+            _agents[name] = new AgentInfo(name, url, false, null, lastSeen, dbFlavors ?? prevFlavors, enrolledAt, revokedAt, ownerUser);
             if (token is not null) _tokens[name] = token;
             else _tokens.Remove(name);
         }
