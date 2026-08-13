@@ -2070,9 +2070,9 @@
             .ToList();
     }
 
-    private async Task StartStreamingAsync(bool load = false, bool force = false, List<ChatMessage>? restoreFrom = null, bool isReconnect = false)
+    private Task StartStreamingAsync(bool load = false, bool force = false, List<ChatMessage>? restoreFrom = null, bool isReconnect = false)
     {
-        if (Agent is null || SessionId is null) return;
+        if (Agent is null || SessionId is null || _disposed) return Task.CompletedTask;
 
         // Defensive: if a previous stream task is still alive (caller didn't
         // StopStreamingAsync, or a race in OnParametersSetAsync), cancel it
@@ -2080,12 +2080,21 @@
         // pumping events into Apply() in parallel with the new one, doubling
         // every assistant chunk. (Reproduces as character-interleaving in
         // the streaming bubble.)
-        if (_streamCts is not null)
+        //
+        // This method is deliberately YIELD-FREE (no await): it cancels
+        // SYNCHRONOUSLY and detaches the field first, so two interleaved
+        // invocations -- a reconnect racing a navigation, both formerly
+        // awaiting CancelAsync -- can't each install a CTS and orphan the
+        // other's still-running pump. With no await, no queued async
+        // continuation can interleave here on single-threaded WASM, so the
+        // cancel + reinstall can't be split.
+        var previousCts = _streamCts;
+        _streamCts = null;
+        if (previousCts is not null)
         {
-            try { await _streamCts.CancelAsync(); }
-            catch { /* already cancelled */ }
-            _streamCts.Dispose();
-            _streamCts = null;
+            try { previousCts.Cancel(); }
+            catch { /* already cancelled / disposed */ }
+            previousCts.Dispose();
         }
 
         _messages.Clear();
@@ -2319,17 +2328,24 @@
                 catch { }
             }, ct);
         }
+
+        return Task.CompletedTask;
     }
 
-    private async Task StopStreamingAsync()
+    private Task StopStreamingAsync()
     {
+        // Yield-free like StartStreamingAsync: detach + cancel synchronously
+        // so a stop can't race a concurrent start into an orphaned CTS.
         CancelThinkingDebounce();
-        if (_streamCts is not null)
+        var old = _streamCts;
+        _streamCts = null;
+        if (old is not null)
         {
-            await _streamCts.CancelAsync();
-            _streamCts.Dispose();
-            _streamCts = null;
+            try { old.Cancel(); }
+            catch { /* already cancelled / disposed */ }
+            old.Dispose();
         }
+        return Task.CompletedTask;
     }
 
     /// <summary>
