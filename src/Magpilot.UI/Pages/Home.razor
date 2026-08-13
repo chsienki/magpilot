@@ -966,6 +966,35 @@
     // the user navigates to a different session. Capped to avoid infinite
     // reconnect loops if the agent is genuinely down.
     private int _streamReconnectAttempts;
+    // Liveness watchdog. _lastStreamEventAt is bumped on every event the
+    // pump receives (including the agent's 15s heartbeat). If it goes
+    // stale past StreamLivenessTimeoutMs while we believe we're connected,
+    // the SSE socket has silently died (half-open TCP after a sleep, a
+    // proxy idle-drop) without erroring to unblock the read -- so the
+    // pump would otherwise sit forever and the chat sticks on the dots.
+    // The unconditional heartbeat is what makes a 45s timeout safe: a
+    // legitimately-quiet long turn still refreshes the clock every 15s.
+    private DateTime _lastStreamEventAt = DateTime.UtcNow;
+    private System.Threading.Timer? _livenessTimer;
+    private const int StreamLivenessTimeoutMs = 45_000;
+    // Single-flight guard: the pump drop-path and the watchdog both funnel
+    // through ReconnectWithReconcileAsync. Check+set is atomic against
+    // reentrancy because WASM is single-threaded and there's no await
+    // between the read and the write.
+    private bool _reconnecting;
+    // Single-flight for the health tick itself: two overlapping timer ticks
+    // (a slow probe spanning the 15s period) could otherwise double-heal.
+    private bool _healthTicking;
+    // Throttle clock for the stuck-thinking reconciler (heals dots when a
+    // TurnComplete was lost across a reconnect).
+    private DateTime _lastThinkingProbeAt = DateTime.MinValue;
+    private const int StuckThinkingProbeMs = 20_000;
+    // Shared reconnect-attempt ceiling (pump drop-path + watchdog) before the
+    // stream lands on the Offline "click to retry" pill.
+    private const int MaxReconnectAttempts = 8;
+    // Set in DisposeAsync so timer ticks / async continuations that land
+    // during teardown don't touch a disposed component.
+    private bool _disposed;
     /// <summary>
     /// User-visible connection state for the currently-open session's SSE
     /// stream. Drives the AppBar status pill + the "give up" alert.
@@ -1501,6 +1530,7 @@
             // a failure shouldn't block entering the session -- fall
             // through to the normal Locked / streaming paths and let the
             // SSE pump observe a release_requested if one arrives later.
+            SessionActivity? initialActivity = null;
             try
             {
                 var probedAgent = Agent;
@@ -1508,16 +1538,27 @@
                 var state = await Hub.GetStateAsync(probedAgent, probedSid);
                 if (string.Equals(probedAgent, Agent, StringComparison.OrdinalIgnoreCase)
                     && probedSid == SessionId
-                    && state is { Owner: SessionOwner.Host })
+                    && state is not null)
                 {
-                    _hostHasTakenOver = true;
-                    _hostTakeoverPid = state.HostPid;
-                    _hostTakeoverRequester = null; // /state has no requester label
-                    _takeBackNeedsForce = false;
-                    _streamingFor = $"{Agent}/{SessionId}";
-                    _switchingSession = false;
-                    StateHasChanged();
-                    return;
+                    if (state.Owner == SessionOwner.Host)
+                    {
+                        _hostHasTakenOver = true;
+                        _hostTakeoverPid = state.HostPid;
+                        _hostTakeoverRequester = null; // /state has no requester label
+                        _takeBackNeedsForce = false;
+                        _streamingFor = $"{Agent}/{SessionId}";
+                        _switchingSession = false;
+                        StateHasChanged();
+                        return;
+                    }
+                    // Remember whether the agent is mid-turn so we can
+                    // restore the "working" dots after the stream connects
+                    // below. The live SSE has no replay, so a refresh or a
+                    // switch mid-turn would otherwise show no indicator
+                    // until the next live event lands (symptom: refresh
+                    // while the dots are up and they vanish until a
+                    // message arrives).
+                    initialActivity = state.Activity;
                 }
             }
             catch (Exception ex)
@@ -1576,6 +1617,20 @@
                 // replay flood.
                 var fromDisk = await TryLoadTailHistoryAsync(50);
                 await StartStreamingAsync(load: true, force: false, restoreFrom: fromDisk);
+            }
+
+            // Restore the in-flight indicator if the agent reported a turn
+            // running when we probed /state above. The live stream refines
+            // it from here (a TurnComplete clears it); this just closes the
+            // dead "no dots even though it's working" gap after a mid-turn
+            // refresh or session switch. Also flip _busy so the composer
+            // queues rather than firing a second prompt that would
+            // interrupt the running turn.
+            if (initialActivity == SessionActivity.InFlight)
+            {
+                _busy = true;
+                _thinking = true;
+                StateHasChanged();
             }
         }
     }
@@ -1777,7 +1832,14 @@
     /// in the meantime show up immediately.
     /// </summary>
     [JSInvokable]
-    public Task OnTabVisible() => RefreshSessionsSilentAsync();
+    public async Task OnTabVisible()
+    {
+        await RefreshSessionsSilentAsync();
+        // A backgrounded tab often resumes with a silently-dead SSE socket;
+        // check health immediately rather than waiting up to 15s for the
+        // next watchdog tick.
+        await StreamHealthTickAsync();
+    }
 
     private void SelectAgent(string name)
     {
@@ -2069,6 +2131,9 @@
         }
         _streamCts = new CancellationTokenSource();
         _streamingFor = $"{Agent}/{SessionId}";
+        // Fresh liveness clock: give the new stream a full timeout window
+        // before the watchdog considers it dead.
+        _lastStreamEventAt = DateTime.UtcNow;
         var ct = _streamCts.Token;
         var agent = Agent;
         var sid = SessionId;
@@ -2091,6 +2156,10 @@
                                 streamId, evt.GetType().Name);
                             return;
                         }
+                        // Liveness clock: every event (including the agent's
+                        // 15s heartbeat) proves the socket is alive. The
+                        // watchdog reconnects if this goes stale past 45s.
+                        _lastStreamEventAt = DateTime.UtcNow;
                         if (!gotAnyEvent && _streamReconnectAttempts > 0)
                         {
                             // First event after a reconnect cycle -- emit a
@@ -2183,16 +2252,11 @@
                 if (streamId != _streamGeneration) return;
                 if (_streamingFor != $"{agent}/{sid}") return;
 
-                var snapshot = _messages
-                    .Select(m => new ChatMessage
-                    {
-                        Role = m.Role,
-                        Text = m.Text,
-                        ToolCallId = m.ToolCallId,
-                        ToolStatus = m.ToolStatus,
-                    })
-                    .ToList();
-                await InvokeAsync(() => StartStreamingAsync(load: false, force: false, restoreFrom: snapshot, isReconnect: true));
+                // The agent's SSE has no replay buffer, so any events it
+                // emitted during the disconnect are gone for a freshly
+                // resubscribed stream. Reconcile with the agent's /state +
+                // history tail before resuming live (see the helper).
+                await ReconnectWithReconcileAsync(agent, sid);
             }
             catch (OperationCanceledException)
             {
@@ -2458,13 +2522,7 @@
                 // fresh turn (sets _busy back to true) so subsequent
                 // queue drains are serial -- no chance of two prompts
                 // racing into ACP at once.
-                if (_queuedMessages.Count > 0)
-                {
-                    var next = _queuedMessages[0];
-                    _queuedMessages.RemoveAt(0);
-                    PersistQueueForCurrent();
-                    _ = InvokeAsync(() => SendImmediateAsync(next));
-                }
+                TryDrainQueue();
                 break;
             case LoadStarted:
                 _loading = true;
@@ -2901,6 +2959,232 @@
         await StartStreamingAsync(load: false, force: false, restoreFrom: snapshot, isReconnect: true);
     }
 
+    /// <summary>
+    /// Snapshot the current visible chat as an independent list so a
+    /// reconnect can restore it without aliasing the live
+    /// <see cref="_messages"/> collection.
+    /// </summary>
+    private List<ChatMessage> SnapshotMessages() =>
+        _messages
+            .Select(m => new ChatMessage
+            {
+                Role = m.Role,
+                Text = m.Text,
+                ToolCallId = m.ToolCallId,
+                ToolStatus = m.ToolStatus,
+            })
+            .ToList();
+
+    /// <summary>
+    /// Fire the next queued message (FIFO) if any. Shared by the
+    /// TurnComplete handler and the reconcilers so a queued prompt isn't
+    /// stranded when the TurnComplete that would have drained it was lost
+    /// across a reconnect.
+    /// </summary>
+    private void TryDrainQueue()
+    {
+        if (_queuedMessages.Count == 0) return;
+        var next = _queuedMessages[0];
+        _queuedMessages.RemoveAt(0);
+        PersistQueueForCurrent();
+        _ = InvokeAsync(() => SendImmediateAsync(next));
+    }
+
+    /// <summary>
+    /// Re-establish the live stream while reconciling with the agent's
+    /// authoritative <c>/state</c>. The SSE stream has NO replay buffer,
+    /// so events the agent emitted while we were disconnected are lost to a
+    /// fresh subscription. Cases:
+    /// <list type="bullet">
+    ///   <item>a launcher took the session over during the gap: surface the
+    ///   takeover banner instead of resubscribing.</item>
+    ///   <item>turn STILL in flight: keep the current snapshot (it holds
+    ///   the partial we already streamed) and show the dots; the live
+    ///   stream carries the remainder. The stuck-thinking reconciler in
+    ///   <see cref="StreamHealthTickAsync"/> is the backstop if the
+    ///   TurnComplete lands in the resubscribe race window.</item>
+    ///   <item>turn FINISHED (or none) during the gap: the "sits on three
+    ///   dots forever, but a refresh shows N new messages" bug -- re-fetch
+    ///   the authoritative history tail so those messages land, and clear
+    ///   the dots.</item>
+    ///   <item><c>/state</c> unknown (HTTP failed): resubscribe on a
+    ///   snapshot WITHOUT touching the dots -- never assume Idle, or a
+    ///   genuinely running turn loses its indicator.</item>
+    /// </list>
+    /// Single-flight (via <see cref="_reconnecting"/>): the pump drop-path
+    /// and the liveness watchdog both funnel here; overlapping calls would
+    /// otherwise race two <see cref="StartStreamingAsync"/> resets and
+    /// orphan a CTS.
+    /// </summary>
+    private async Task ReconnectWithReconcileAsync(string agent, string sid)
+    {
+        if (_reconnecting || _disposed) return;
+        _reconnecting = true;
+        try
+        {
+            SessionStateInfo? state = null;
+            try { state = await Hub.GetStateAsync(agent, sid); }
+            catch (Exception ex) { Log.LogTrace("[stream] reconnect /state failed: {Msg}", ex.Message); }
+            if (_disposed || _streamingFor != $"{agent}/{sid}") return; // navigated away mid-await
+
+            // A launcher may have acquired the session while we were gone.
+            if (state is { Owner: SessionOwner.Host })
+            {
+                await InvokeAsync(() =>
+                {
+                    if (_streamingFor != $"{agent}/{sid}") return;
+                    _hostHasTakenOver = true;
+                    _hostTakeoverPid = state.HostPid;
+                    _hostTakeoverRequester = null;
+                    _takeBackNeedsForce = false;
+                    _thinking = false;
+                    _busy = false;
+                    CancelThinkingDebounce();
+                    _ = StopStreamingAsync();
+                    StateHasChanged();
+                });
+                return;
+            }
+
+            var known = state?.Activity is not null;
+            var stillInFlight = state?.Activity == SessionActivity.InFlight;
+
+            List<ChatMessage>? restore = null;
+            if (known && !stillInFlight)
+            {
+                try { restore = await TryLoadTailHistoryAsync(50); }
+                catch (Exception ex) { Log.LogTrace("[stream] reconnect history refetch failed: {Msg}", ex.Message); }
+                if (_disposed || _streamingFor != $"{agent}/{sid}") return;
+            }
+            restore ??= SnapshotMessages();
+
+            await InvokeAsync(async () =>
+            {
+                if (_disposed || _streamingFor != $"{agent}/{sid}") return;
+                if (known)
+                {
+                    _busy = stillInFlight;
+                    _thinking = stillInFlight;
+                    if (!stillInFlight) CancelThinkingDebounce();
+                }
+                // Unknown state: leave _busy/_thinking untouched (conservative).
+                await StartStreamingAsync(load: false, force: false, restoreFrom: restore, isReconnect: true);
+                // Drain AFTER StartStreamingAsync has cleared + restored
+                // _messages, so the queued message's bubble lands on the
+                // restored list (not one about to be wiped) and its prompt
+                // runs against the fresh subscription.
+                if (known && !stillInFlight) TryDrainQueue();
+                StateHasChanged();
+            });
+        }
+        finally { _reconnecting = false; }
+    }
+
+    /// <summary>
+    /// Stream health tick (15s timer + tab-resume). Two failure modes the
+    /// pump can't notice on its own, both of which leave the chat stuck:
+    /// <list type="number">
+    ///   <item><b>Dead socket:</b> no event (not even the agent's 15s
+    ///   heartbeat) for <see cref="StreamLivenessTimeoutMs"/> -- the SSE
+    ///   socket half-opened (laptop sleep, proxy idle-drop) without an
+    ///   error to unblock the read, so the pump sits forever on the dots.
+    ///   Force a reconcile+reconnect.</item>
+    ///   <item><b>Stuck dots:</b> socket healthy (heartbeats flowing) but a
+    ///   turn's TurnComplete was lost across a reconnect (no replay buffer),
+    ///   so the dots never clear. Re-probe /state; if the turn is genuinely
+    ///   Idle, heal from disk history. Throttled + gated on Idle (not
+    ///   JustFinished) so a normal in-flight TurnComplete isn't pre-empted.</item>
+    /// </list>
+    /// The unconditional heartbeat makes both timeouts safe: a legitimately
+    /// long, quiet turn still refreshes the liveness clock and reports
+    /// InFlight, so neither branch mis-fires mid-think.
+    /// </summary>
+    private async Task StreamHealthTickAsync()
+    {
+        if (_healthTicking || _disposed || Agent is null || SessionId is null) return;
+        if (_hostHasTakenOver || _streamCts is null) return;
+        _healthTicking = true;
+        try
+        {
+            var agent = Agent;
+            var sid = SessionId;
+            var stale = (DateTime.UtcNow - _lastStreamEventAt).TotalMilliseconds >= StreamLivenessTimeoutMs;
+
+            // 1. Dead socket. Cover both Connected and Reconnecting (a reconnect
+            //    that half-opens before its first heartbeat also hangs here), but
+            //    not Offline -- there the pump has given up and shows a manual
+            //    retry. Count silent timeouts toward the same ceiling the pump
+            //    uses so an agent that keeps half-opening every connection
+            //    eventually lands on Offline instead of cycling forever; a
+            //    successful reconnect resets the counter (first event, in the
+            //    pump).
+            if (stale && _streamStatus != StreamStatus.Offline)
+            {
+                if (_streamReconnectAttempts >= MaxReconnectAttempts)
+                {
+                    HubLog.LogError(
+                        $"[stream] liveness: giving up after {_streamReconnectAttempts} silent-timeout reconnects",
+                        stack: null, category: nameof(Home), sessionId: sid, extra: new { agent });
+                    _streamStatus = StreamStatus.Offline;
+                    _reconnectNextAttemptAt = null;
+                    StateHasChanged();
+                    return;
+                }
+                _streamReconnectAttempts++;
+                var staleSec = (int)(DateTime.UtcNow - _lastStreamEventAt).TotalSeconds;
+                HubLog.LogWarning(
+                    $"[stream] liveness timeout ({staleSec}s since last event incl. heartbeat); forcing reconnect (attempt {_streamReconnectAttempts})",
+                    category: nameof(Home), sessionId: sid, extra: new { agent, staleSec, attempt = _streamReconnectAttempts });
+                _streamStatus = StreamStatus.Reconnecting;
+                _reconnectNextAttemptAt = null;
+                _lastStreamEventAt = DateTime.UtcNow; // don't immediately re-trip
+                StateHasChanged();
+                await ReconnectWithReconcileAsync(agent, sid);
+                return;
+            }
+
+            // 2. Stuck dots on a healthy socket.
+            if (!stale && _thinking && _streamStatus == StreamStatus.Connected
+                && (DateTime.UtcNow - _lastThinkingProbeAt).TotalMilliseconds >= StuckThinkingProbeMs)
+            {
+                _lastThinkingProbeAt = DateTime.UtcNow;
+                SessionStateInfo? state = null;
+                try { state = await Hub.GetStateAsync(agent, sid); }
+                catch { return; }
+                if (_disposed || _hostHasTakenOver || _streamingFor != $"{agent}/{sid}") return;
+                // Unknown, still in flight, or just-finished (grace, TurnComplete
+                // imminent): leave the dots alone. Only a settled Idle means the
+                // TurnComplete was genuinely lost.
+                if (state?.Activity != SessionActivity.Idle) return;
+
+                List<ChatMessage>? fresh = null;
+                try { fresh = await TryLoadTailHistoryAsync(50); }
+                catch (Exception ex) { Log.LogTrace("[stream] stuck-thinking heal history failed: {Msg}", ex.Message); }
+                if (_disposed || _streamingFor != $"{agent}/{sid}") return;
+                await InvokeAsync(() =>
+                {
+                    if (_streamingFor != $"{agent}/{sid}" || _hostHasTakenOver) return;
+                    if (fresh is not null)
+                    {
+                        _messages.Clear();
+                        foreach (var m in fresh) _messages.Add(m);
+                    }
+                    _thinking = false;
+                    _busy = false;
+                    _streamingAssistant = null;
+                    _streamingThought = null;
+                    CancelThinkingDebounce();
+                    HubLog.LogWarning(
+                        "[stream] healed stuck thinking indicator via /state (missed TurnComplete)",
+                        category: nameof(Home), sessionId: sid, extra: new { agent });
+                    TryDrainQueue();
+                    StateHasChanged();
+                });
+            }
+        }
+        finally { _healthTicking = false; }
+    }
+
     private string StreamStatusTooltip() => _streamStatus switch
     {
         StreamStatus.Connected => "Connected",
@@ -3036,10 +3320,21 @@
                 $"Failed to install tab-visibility watcher: {ex.Message}",
                 category: nameof(Home));
         }
+
+        // Liveness watchdog: poll every 15s (the agent heartbeat cadence)
+        // to catch a silently-dead SSE socket the pump can't notice on its
+        // own. Cheap -- it no-ops unless the stream is genuinely stale.
+        // Guard against disposal completing during the JS awaits above.
+        if (_disposed) return;
+        _livenessTimer ??= new System.Threading.Timer(
+            _ => _ = InvokeAsync(StreamHealthTickAsync), null,
+            TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(15));
     }
 
     public async ValueTask DisposeAsync()
     {
+        _disposed = true;
+        _livenessTimer?.Dispose();
         if (_visibilityWatcher is not null)
         {
             try { await _visibilityWatcher.InvokeVoidAsync("dispose"); } catch { }
