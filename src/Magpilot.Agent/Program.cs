@@ -53,6 +53,7 @@ builder.Services.AddHttpClient("hub-update", c => c.Timeout = TimeSpan.FromSecon
 builder.Services.AddHostedService<Magpilot.Agent.Update.UpdatePoller>();
 builder.Services.AddHostedService<DiscoveryResponder>();
 builder.Services.AddHostedService<AcpStarter>();
+builder.Services.AddHostedService<Magpilot.Agent.Acp.TurnWatchdog>();
 
 var token = builder.Configuration["Agent:Token"]
     ?? Environment.GetEnvironmentVariable("MAGPILOT_AGENT_TOKEN")

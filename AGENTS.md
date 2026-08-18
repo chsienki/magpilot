@@ -387,6 +387,7 @@ with the installed agent" above.
 | `MAGPILOT_AUTO_APPROVE` | agent (optional) | When `"true"`, the agent auto-picks an allow-flavored option for every Copilot `session/request_permission` callback (prefers `allow_always`, falls back to `allow_once`, then any "allow" option). Intended for always-on autonomous agents like Magnus where `/quick-prompt` callers (WhatsApp, cron) have no human to click "approve". Without it, permission requests fan out to SSE subscribers that have no UI to answer, and time out after 5 minutes to a deny. **Don't set this on agents that share a host with the user** (e.g. HENDRIK); only on dedicated agent containers where the trust boundary is the container itself. Superseded for granular use by the per-session yolo toggle (see `MAGPILOT_YOLO_DISABLED` below) but still honoured for backward compat. |
 | `MAGPILOT_YOLO_DISABLED` | agent (optional) | When `"true"`, the per-session yolo toggle is refused with 403; the SPA greys out the YOLO switch and shows a tooltip explaining why. The legacy `MAGPILOT_AUTO_APPROVE` env var is unaffected (it's a separate code path). Set this on user-account agents like HENDRIK where the agent runs with the user's full permissions and unattended auto-approve would be dangerous; leave unset (default-allow) on dedicated container agents like Magnus. |
 | `MAGPILOT_STALE_RECYCLE` | agent (optional) | When set (`1`/`true`/`yes`/`on`), a resume the agent detects as **stale** (the session's `events.jsonl` grew past what our ACP child last synced -- a foreign process advanced it) triggers a **whole-child recycle**: kill the multiplexing `copilot --acp` child, respawn a fresh one, and `session/load` the session from disk so current state is served. Default off; enable per host after soak. Recycle is refused while any co-hosted session has a turn in flight (never kills a live turn); other co-hosted sessions reload from disk on next use. See the `session/close` ACP gotcha for why in-place reload is impossible. |
+| `MAGPILOT_TURN_STALL_SECONDS` | agent (optional) | Stall threshold in seconds (default `90`) for the **turn watchdog** (`Acp/TurnWatchdog.cs`, a `BackgroundService`). An in-flight `PromptAsync` turn that emits no ACP activity (no message chunk, no tool call) for this long is treated as a wedged child (hung model request that never returns and ignores `session/cancel`): the watchdog fails the turn with an `ErrorEvent` so the caller stops spinning, then recycles the ACP child holding it (respawn + `session/load` on the session's own flavor). A live-but-slow turn keeps emitting updates, resetting the clock, so it is never killed; a co-hosted session with a still-progressing turn vetoes the recycle. Sweeps every `max(15, threshold/3)`s. Set lower to recover faster, higher if legitimately long first-token latencies trip it. |
 | `MAGPILOT_DEV_BYPASS_AUTH` | hub | When `"true"`, skips OAuth (dev only -- redirects `/login` to `/dev-login`). |
 | `MAGPILOT_HUB_DATA` | hub | Directory for `hub.db` and `logs.db`. Defaults to `./data`. |
 | `MAGPILOT_HUB_TRUSTED_PROXIES` | hub | Comma list of IPs allowed to set `X-Forwarded-*` (NPM IP). Defaults to `127.0.0.1,::1` -- **required** when NPM and the hub run as containers on the same LXC under `network_mode: host`, since NPM's request reaches the hub from `127.0.0.1` not the LXC's external IP. Without this, `X-Forwarded-Proto: https` is dropped, OAuth `redirect_uri` becomes `http://...` and GitHub rejects. |
@@ -1282,16 +1283,27 @@ them by breaking them.
   `/acquire-for-host`), a wedged child surfaces to the SPA as a wall
   of 502s -- take-back, adopt, and refresh all fail at once even
   though `/healthz` and `/api/sessions` (no ACP) still answer fast.
-  There is no auto-recovery for this yet (dead-child respawn requires
-  an actual exit; `MAGPILOT_STALE_RECYCLE` only fires on a detected
-  stale *resume*, not on blanket timeouts). **Manual recovery: restart
-  the agent** -- on Windows `Stop-ScheduledTask -TaskName MagpilotAgent`
-  (which terminates the process tree and frees `:5099`) then
-  `Start-ScheduledTask`; the fresh agent spawns a healthy child on the
-  next ACP call. Host-owned sessions survive (ownership is on disk).
-  Follow-up worth doing: treat N consecutive ACP timeouts on one child
-  as a liveness failure and recycle it the same way a dead child is
-  respawned.
+  Auto-recovery for the **in-flight-turn** case is the `TurnWatchdog`
+  `BackgroundService` (`Acp/TurnWatchdog.cs`): an in-flight `PromptAsync`
+  turn that emits no ACP activity (no message chunk, no tool call) for
+  `MAGPILOT_TURN_STALL_SECONDS` (default 90) is treated as wedged -- the
+  watchdog fails the turn (publishes an `ErrorEvent` so the caller stops
+  spinning) and recycles the child holding it (respawn + `session/load`
+  on the session's **own flavor**, so e.g. Magnus's fast-model phone
+  child comes back on `gpt-5.4-mini`, not the default). A live-but-slow
+  turn keeps emitting updates, which resets its clock, so it is never
+  killed; a co-hosted session with a still-progressing turn vetoes the
+  recycle (the child is shared). This covers every `PromptAsync` path
+  (SPA, WhatsApp, cron, the phone assistant), including an idle-rotted
+  child -- the next turn attempt sets `_inFlight` and then stalls into
+  the sweep. **Still manual: a child wedged on `session/load`-driving
+  routes** (`/adopt`, `/release`, `/acquire-for-host`) with no in-flight
+  turn never sets `_inFlight`, so the watchdog can't see it and the
+  502-wall still needs an agent restart -- on Windows
+  `Stop-ScheduledTask -TaskName MagpilotAgent` (which terminates the
+  process tree and frees `:5099`) then `Start-ScheduledTask`; the fresh
+  agent spawns a healthy child on the next ACP call. Host-owned sessions
+  survive (ownership is on disk).
 - **`AcpSessionManager._inFlight`** tracks active `PromptAsync` calls
   keyed by sessionId, with the requester label and start time. Used
   by `GET /sessions/{id}/state` to report activity without polling,

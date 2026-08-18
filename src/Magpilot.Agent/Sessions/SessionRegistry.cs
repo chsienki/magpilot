@@ -52,7 +52,7 @@ public sealed class SessionRegistry
 
     // cwd for a session, from its on-disk workspace.yaml; backs the recycle
     // reload path so AcpSessionManager stays free of the scanner.
-    private string? CwdFor(string sessionId) => _scanner.Get(sessionId, Owned)?.Cwd;
+    internal string? CwdFor(string sessionId) => _scanner.Get(sessionId, Owned)?.Cwd;
 
     public async Task<SessionInfo> CreateAsync(string? cwd, bool useAgency, CancellationToken ct, string? name = null, string? model = null, string? reasoningEffort = null)
     {

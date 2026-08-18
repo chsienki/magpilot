@@ -77,6 +77,23 @@ public sealed class AcpSessionManager
     /// </summary>
     private readonly ConcurrentDictionary<string, TaskCompletionSource> _turnDone = new();
 
+    /// <summary>
+    /// Per-session timestamp of the last activity (any session/update) from the
+    /// child. The turn watchdog compares this against the in-flight start to tell
+    /// a live-but-slow turn (still streaming chunks / firing tool calls) apart
+    /// from a wedged one -- a hung model request that emits nothing and never
+    /// honours session/cancel.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _lastEventAt = new();
+
+    /// <summary>
+    /// The flavor each session was loaded/created under, so the watchdog can
+    /// recycle the right ACP child (e.g. the phone assistant's fast-model child)
+    /// and reload the session on that same flavor rather than downgrading it to
+    /// the default.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, AcpFlavor> _sessionFlavor = new();
+
     public AcpSessionManager(AcpFlavorPool pool, Magpilot.Agent.Sessions.YoloRegistry yolo, ILogger<AcpSessionManager> logger)
     {
         _pool = pool;
@@ -120,6 +137,7 @@ public sealed class AcpSessionManager
             return existing;
         }
         var fallback = await _pool.AcquireAsync(AcpFlavor.Default, ct);
+        _sessionFlavor.TryAdd(sessionId, AcpFlavor.Default);
         return _sessionClient.GetOrAdd(sessionId, fallback);
     }
 
@@ -134,6 +152,7 @@ public sealed class AcpSessionManager
         var sid = res?["sessionId"]?.GetValue<string>()
             ?? throw new InvalidOperationException("session/new returned no sessionId");
         _sessionClient[sid] = client;
+        _sessionFlavor[sid] = flavor;
         _freshness.RecordServed(sid, EventsPath(sid));
         MarkOurPid(sid, client.ProcessId);
         _logger.LogInformation("New ACP session {SessionId} cwd={Cwd} flavor={Flavor}", sid, cwd, flavor.Key);
@@ -150,6 +169,7 @@ public sealed class AcpSessionManager
             ["mcpServers"] = new JsonArray(),
         }, ct, timeoutSec: 300);
         _sessionClient[sessionId] = client;
+        _sessionFlavor[sessionId] = flavor;
         _freshness.RecordServed(sessionId, EventsPath(sessionId));
         MarkOurPid(sessionId, client.ProcessId);
     }
@@ -208,6 +228,133 @@ public sealed class AcpSessionManager
         var cwd = cwdResolver(sessionId) ?? Environment.CurrentDirectory;
         await LoadSessionAsync(sessionId, cwd, AcpFlavor.Default, ct);
         return RecycleOutcome.Recycled;
+    }
+
+    /// <summary>
+    /// True when an in-flight turn has produced no child activity for at least
+    /// <paramref name="threshold"/>: nothing has streamed and no tool call has
+    /// fired since <paramref name="lastEventAt"/> (or since the turn started, if
+    /// it never emitted anything). A hung model request that never returns looks
+    /// exactly like this; a legitimately slow turn keeps emitting tool-call /
+    /// message-chunk updates, which resets the clock.
+    /// </summary>
+    internal static bool IsTurnStalled(DateTimeOffset startedAt, DateTimeOffset? lastEventAt, DateTimeOffset now, TimeSpan threshold)
+    {
+        var lastActivity = lastEventAt is { } t && t > startedAt ? t : startedAt;
+        return now - lastActivity >= threshold;
+    }
+
+    /// <summary>
+    /// Find in-flight turns that have wedged (no child activity for
+    /// <paramref name="threshold"/>) and recover them: tell subscribers the turn
+    /// failed so a waiting caller (phone assistant, SPA, WhatsApp) stops spinning,
+    /// then recycle the ACP child holding the session so it becomes usable again.
+    /// Without this a hung turn pins the session in flight until the 10-minute
+    /// session/prompt timeout and blocks every later turn on that child until the
+    /// agent is restarted by hand. A co-hosted session whose turn is still
+    /// progressing vetoes the recycle -- the child is shared, so a healthy turn is
+    /// never killed as collateral. Returns the number of sessions recovered.
+    /// </summary>
+    public async Task<int> SweepStalledTurnsAsync(TimeSpan threshold, Func<string, string?> cwdResolver, CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var recovered = 0;
+
+        foreach (var (sid, entry) in _inFlight.ToArray())
+        {
+            var last = _lastEventAt.TryGetValue(sid, out var l) ? (DateTimeOffset?)l : null;
+            if (!IsTurnStalled(entry.StartedAt, last, now, threshold))
+                continue;
+            if (!_sessionClient.TryGetValue(sid, out var client))
+                continue;
+
+            // Recycling kills the shared child, so never do it while a co-hosted
+            // session has a turn that is still making progress.
+            var healthyNeighbour = _sessionClient.Any(kv =>
+                !string.Equals(kv.Key, sid, StringComparison.Ordinal)
+                && ReferenceEquals(kv.Value, client)
+                && _inFlight.TryGetValue(kv.Key, out var e2)
+                && !IsTurnStalled(
+                        e2.StartedAt,
+                        _lastEventAt.TryGetValue(kv.Key, out var l2) ? l2 : null,
+                        now, threshold));
+            if (healthyNeighbour)
+            {
+                _logger.LogWarning(
+                    "Turn watchdog: session {Sid} is stalled but a co-hosted session has a live turn; deferring recycle",
+                    sid);
+                continue;
+            }
+
+            var stalledFor = now - (last is { } lv && lv > entry.StartedAt ? lv : entry.StartedAt);
+            _logger.LogError(
+                "Turn watchdog: session {Sid} produced no activity for {Seconds:F0}s (requester={Req}); " +
+                "recycling its ACP child and failing the turn",
+                sid, stalledFor.TotalSeconds, entry.Requester ?? "(none)");
+
+            // Re-check under fresh state: if the turn finished between the snapshot
+            // and here, recycling would needlessly drop the child's other sessions.
+            if (!_inFlight.ContainsKey(sid))
+                continue;
+
+            // Unblock the caller first. PromptAsync also emits TurnComplete(error)
+            // once the recycle faults its session/prompt call, but an explicit
+            // error lets a voice caller speak a failure instead of ending silent.
+            Publish(sid, new ErrorEvent("The assistant stalled and was reset. Please try again."));
+
+            try
+            {
+                await RecycleForStalledTurnAsync(sid, client, cwdResolver, ct);
+                recovered++;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Turn watchdog: recycling the ACP child for stalled session {Sid} failed", sid);
+            }
+        }
+
+        return recovered;
+    }
+
+    /// <summary>
+    /// Kill and respawn the ACP child holding <paramref name="sessionId"/> -- the
+    /// only way copilot releases a wedged in-flight turn, since session/cancel is a
+    /// notification the hung child never reads -- then reload the session from disk
+    /// on the fresh child using its original flavor. Disposing the old child faults
+    /// its pending session/prompt call, so <see cref="PromptAsync"/> unwinds and
+    /// clears the in-flight entry. Every OTHER session the child multiplexed is
+    /// dropped from routing and reloads on next use, mirroring
+    /// <see cref="RecycleForStaleAsync"/>.
+    /// </summary>
+    private async Task RecycleForStalledTurnAsync(string sessionId, AcpClient target, Func<string, string?> cwdResolver, CancellationToken ct)
+    {
+        var flavor = _sessionFlavor.TryGetValue(sessionId, out var f) ? f : AcpFlavor.Default;
+
+        var coHosted = _sessionClient
+            .Where(kv => ReferenceEquals(kv.Value, target))
+            .Select(kv => kv.Key)
+            .ToList();
+
+        if (flavor.MultiplexesSessions)
+            await _pool.RecycleAsync(flavor, ct);
+        else
+            await target.DisposeAsync(); // per-session child; just kill it
+
+        // Drop routing for every session the killed child held and reap its now-
+        // dead locks so a rescan sees Dormant (free to reload), not Locked. Keep
+        // each session's flavor mapping so a bystander reloads on its own flavor.
+        foreach (var s in coHosted)
+        {
+            _sessionClient.TryRemove(s, out _);
+            _freshness.Forget(s);
+            _ourSessionPids.TryRemove(s, out _);
+            _lastEventAt.TryRemove(s, out _);
+            try { Magpilot.Agent.Sessions.SessionLocks.ReapDead(Path.Combine(SessionStateRoot, s)); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Reaping locks for {Sid} during stalled-turn recycle threw", s); }
+        }
+
+        var cwd = cwdResolver(sessionId) ?? Environment.CurrentDirectory;
+        await LoadSessionAsync(sessionId, cwd, flavor, ct);
     }
 
     /// <summary>
@@ -462,6 +609,8 @@ public sealed class AcpSessionManager
             _sessionClient.TryRemove(sessionId, out _);
             _freshness.Forget(sessionId);
             _ourSessionPids.TryRemove(sessionId, out _);
+            _lastEventAt.TryRemove(sessionId, out _);
+            _sessionFlavor.TryRemove(sessionId, out _);
         }
     }
 
@@ -508,6 +657,10 @@ public sealed class AcpSessionManager
     private void HandleUpdate(string sessionId, JsonNode? update)
     {
         if (update is null) return;
+        // Any update from the child means this session's turn is making progress.
+        // Record it so the turn watchdog can distinguish a live-but-slow turn from
+        // a wedged one that emits nothing.
+        _lastEventAt[sessionId] = DateTimeOffset.UtcNow;
         var kind = update["sessionUpdate"]?.GetValue<string>();
         _logger.LogDebug("HandleUpdate sid={Sid} kind={Kind}", sessionId, kind);
         StreamEvent? evt = kind switch
