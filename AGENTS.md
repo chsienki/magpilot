@@ -1380,6 +1380,17 @@ conversation instead of spawning a throwaway one.
   channel via `acp.PublishToSubscribers(...)`. Without this, an SPA
   tab subscribed to the same pinned session would see the assistant
   reply but no question.
+- **Message provenance (`source`).** `/messages` + `/quick-prompt` take an
+  optional `source` (e.g. `assistant`, `whatsapp`, `cron`). When set,
+  `AcpSessionManager.PromptAsync` prefixes the model prompt with `[via <source>]`
+  (ACP has no per-message metadata, so an inline tag is the only channel to the
+  brain) AND publishes a `UserDelta { Text, Source }` so out-of-band injections
+  (the phone assistant relaying into `main`, cron-to-main) surface the *question*
+  to a persistent watcher, not just the answer. The synthesis fires **only when
+  `source` is set** -- sourceless sends (the SPA's own) rely on the SPA's local
+  echo, so synthesizing would double-render. This is the generic knob a satellite
+  uses for cross-surface view coherence + so the brain can disambiguate/tailor
+  (e.g. terser, spoken replies for `assistant`); magpilot names no surface.
 
 ### SPA stream lifecycle (`Home.razor`)
 

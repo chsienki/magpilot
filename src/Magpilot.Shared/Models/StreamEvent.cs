@@ -21,7 +21,10 @@ public abstract record StreamEvent;
 
 public sealed record AssistantDelta(string Text) : StreamEvent;
 public sealed record ThoughtDelta(string Text) : StreamEvent;
-public sealed record UserDelta(string Text) : StreamEvent;
+/// <param name="Source">Originating surface when the turn was injected out-of-band
+/// (e.g. "assistant", "whatsapp", "cron"); null for a normal in-band send. Lets a
+/// subscriber render the question with a "[via ...]" attribution.</param>
+public sealed record UserDelta(string Text, string? Source = null) : StreamEvent;
 public sealed record ToolCallStart(string ToolCallId, string Name, string? RawInput) : StreamEvent;
 public sealed record ToolCallProgress(string ToolCallId, string? PartialOutput) : StreamEvent;
 public sealed record ToolCallEnd(string ToolCallId, string? Result, bool Success) : StreamEvent;

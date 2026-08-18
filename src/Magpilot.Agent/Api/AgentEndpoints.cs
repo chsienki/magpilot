@@ -126,8 +126,11 @@ public static class AgentEndpoints
                 // X" before the assistant deltas arrive. ACP doesn't emit
                 // user_message_chunk for live prompts (only during
                 // session/load history replay), so without this the SPA would
-                // see Magnus's reply but no question.
-                acp.PublishToSubscribers(sid, new UserDelta(req.Prompt));
+                // see Magnus's reply but no question. When a source is set,
+                // PromptAsync publishes the tagged UserDelta instead, so skip
+                // this to avoid a double render.
+                if (string.IsNullOrEmpty(req.Source))
+                    acp.PublishToSubscribers(sid, new UserDelta(req.Prompt));
             }
             else
             {
@@ -145,7 +148,7 @@ public static class AgentEndpoints
             try
             {
                 // Fire the prompt; PromptAsync resolves when the turn ends.
-                _ = Task.Run(() => acp.PromptAsync(sid, req.Prompt, cts.Token), cts.Token);
+                _ = Task.Run(() => acp.PromptAsync(sid, req.Prompt, cts.Token, source: req.Source), cts.Token);
 
                 // Drain events until TurnComplete or ErrorEvent.
                 await foreach (var evt in reader.ReadAllAsync(cts.Token))
@@ -294,8 +297,10 @@ public static class AgentEndpoints
 
             // Fire-and-forget: session/prompt returns when the turn completes
             // (could be 60s+). The endpoint returns 202 immediately and the
-            // SPA learns the turn ended via the SSE TurnComplete event.
-            _ = Task.Run(() => acp.PromptAsync(id, req.Text, CancellationToken.None));
+            // SPA learns the turn ended via the SSE TurnComplete event. A
+            // `source` (out-of-band injection like the phone assistant relay)
+            // tags the prompt for the brain + echoes the question to subscribers.
+            _ = Task.Run(() => acp.PromptAsync(id, req.Text, CancellationToken.None, requester: req.Source, source: req.Source));
             return Results.Accepted();
         });
 

@@ -363,7 +363,7 @@ works without a configured token.
 | GET    | `/sessions/{id}/state`                     | Rich ownership + activity view (see "Cooperative single-owner handoff" below). Returns `SessionStateInfo`. **NEW (shim Phase 1).** |
 | POST   | `/sessions/{id}/adopt`                     | Bring a dormant session live (re-attach the ACP child). Body `AdoptRequest { Force?, Model?, ReasoningEffort? }` -- pass the same `Model`/`ReasoningEffort` as create to reload onto the pinned model flavor (nothing persists it agent-side). |
 | POST   | `/sessions/{id}/detach`                    | Detach without deleting on-disk state                      |
-| POST   | `/sessions/{id}/messages`                  | Send a prompt; returns 202; SSE delivers the reply. **Returns 409** + `HostOwnedResponse` when a magpilot launcher holds the session (see handoff section). |
+| POST   | `/sessions/{id}/messages`                  | Send a prompt; returns 202; SSE delivers the reply. **Returns 409** + `HostOwnedResponse` when a magpilot launcher holds the session (see handoff section). Body `PromptRequest { Text, Source? }` -- an optional `Source` (e.g. `assistant`, `whatsapp`) tags an out-of-band injection: the agent prefixes the prompt with `[via <source>]` for the brain and echoes a `UserDelta { Text, Source }` to subscribers so watchers see the question, not just the answer. |
 | GET    | `/sessions/{id}/stream`                    | SSE stream of session events (deltas, tool calls, etc.)    |
 | POST   | `/sessions/{id}/interrupt`                 | Cancel the in-flight turn. **Returns 409** when host-owned. |
 | POST   | `/sessions/{id}/approvals/{approvalId}`    | Resolve an approval prompt. **Returns 409** when host-owned. |
@@ -371,7 +371,7 @@ works without a configured token.
 | POST   | `/sessions/{id}/acquire-for-host`          | Atomic combined op: agent waits for clean turn boundary (or aborts in-flight if `force=true`), drops its lock, marks the session host-owned. **NEW (shim Phase 1).** |
 | POST   | `/sessions/{id}/release`                   | Wrapper signals it has shut down its child; agent re-adopts. 409 if wrong `hostPid`. **NEW (shim Phase 1).** |
 | POST   | `/sessions/{id}/yolo`                      | Flip the per-session yolo (auto-approve) bit. Body `YoloRequest { Enabled }`. Returns refreshed `SessionStateInfo` (the new bit is on `Info.Yolo`). **Returns 403** with `{ hostDisabled: true }` if the agent has `MAGPILOT_YOLO_DISABLED=true`. |
-| POST   | `/quick-prompt`                            | Synchronous "ask + answer" -- handles SSE internally       |
+| POST   | `/quick-prompt`                            | Synchronous "ask + answer" -- handles SSE internally. Body also accepts an optional `Source` (same provenance semantics as `/messages`). |
 
 ### `quick-prompt` -- the convenience door for non-SPA clients
 
@@ -588,6 +588,16 @@ pinned, publishes a synthesized `UserDelta(req.Prompt)` into the
 session's broadcast channel before dispatching to ACP. All other
 subscribers (the SPA) see "the user said X" before the assistant
 deltas arrive. Used `AcpSessionManager.PublishToSubscribers` (a thin
+
+**Provenance generalization**: the same synthesized-`UserDelta` mechanism
+carries an optional **`source`** on `/messages` (and `/quick-prompt`). When a
+caller sets it -- e.g. the phone assistant relaying a question into the main
+session with `source="assistant"` -- `PromptAsync` prefixes the model prompt
+with `[via <source>]` (so the brain can disambiguate + tailor tone) AND publishes
+a `UserDelta { Text, Source }`, so a persistent watcher (WhatsApp's coherent
+stream) or the SPA sees the out-of-band question tagged, not just the answer.
+Sourceless sends (the SPA's own) skip the synthesis so they don't double-render
+against the SPA's local echo.
 wrapper over the existing private Publish).
 
 ### Edge 3: phone or SPA wants to drive a session a terminal owns

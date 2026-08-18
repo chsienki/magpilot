@@ -320,9 +320,21 @@ public sealed class AcpSessionManager
             _ourSessionPids.GetOrAdd(sessionId, _ => new()).TryAdd(p, 0);
     }
 
-    public async Task PromptAsync(string sessionId, string text, CancellationToken ct, string? requester = null)
+    public async Task PromptAsync(string sessionId, string text, CancellationToken ct, string? requester = null, string? source = null)
     {
-        _logger.LogDebug("PromptAsync sid={Sid} len={Len} requester={Requester}", sessionId, text.Length, requester ?? "(null)");
+        _logger.LogDebug("PromptAsync sid={Sid} len={Len} requester={Requester} source={Source}", sessionId, text.Length, requester ?? "(null)", source ?? "(null)");
+        // Tag the prompt with its originating surface so the brain can read
+        // provenance (ACP has no per-message metadata channel, so an inline tag
+        // is the only way). The same tagged text is echoed to subscribers below.
+        var promptText = string.IsNullOrEmpty(source) ? text : $"[via {source}] {text}";
+        // When a source is set the send is out-of-band (e.g. the phone assistant
+        // relaying into the main session). ACP emits user_message_chunk only during
+        // load replay, never for live prompts, so echo the tagged question into the
+        // broadcast channel -- otherwise a persistent watcher (WhatsApp) or the SPA
+        // would see the answer with no question. Sourceless prompts skip this: the
+        // SPA self-echoes its own sends, so synthesizing here would double-render.
+        if (!string.IsNullOrEmpty(source))
+            Publish(sessionId, new UserDelta(promptText, source));
         var stopReason = "end_turn";
         _inFlight[sessionId] = new InFlightEntry(requester, DateTimeOffset.UtcNow);
         try
@@ -333,7 +345,7 @@ public sealed class AcpSessionManager
                 ["sessionId"] = sessionId,
                 ["prompt"] = new JsonArray
                 {
-                    new JsonObject { ["type"] = "text", ["text"] = text },
+                    new JsonObject { ["type"] = "text", ["text"] = promptText },
                 },
             }, ct, timeoutSec: 600);
             stopReason = resp?["stopReason"]?.GetValue<string>() ?? stopReason;

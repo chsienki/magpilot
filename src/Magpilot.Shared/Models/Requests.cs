@@ -7,7 +7,7 @@ public sealed record NewSessionRequest(
     bool UseAgency = false,
     string? Model = null,
     string? ReasoningEffort = null);
-public sealed record PromptRequest(string Text);
+public sealed record PromptRequest(string Text, string? Source = null);
 public sealed record AdoptRequest(bool Force = false, string? Model = null, string? ReasoningEffort = null);
 public sealed record ApprovalResponse(string OptionId);
 
@@ -92,7 +92,8 @@ public sealed record QuickPromptRequest(
     string? Cwd = null,
     int? TimeoutSeconds = null,
     bool KeepSession = false,
-    string? SessionId = null);
+    string? SessionId = null,
+    string? Source = null);
 
 /// <summary>
 /// Response body for /quick-prompt. <see cref="ResponseText"/> is the concatenation
