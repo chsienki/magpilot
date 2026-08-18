@@ -57,4 +57,21 @@ public sealed class TurnWatchdogTests
     {
         Assert.True(AcpSessionManager.IsTurnStalled(T0, lastEventAt: null, now: T0 + Threshold, Threshold));
     }
+
+    [Fact]
+    public void Open_tool_call_is_never_stalled_even_far_past_threshold()
+    {
+        // A turn silent for ten minutes but waiting on a tool it invoked -- a long
+        // shell command, a slow MCP call -- is busy, not wedged, and must survive.
+        Assert.False(AcpSessionManager.IsTurnStalled(
+            T0, lastEventAt: T0.AddSeconds(1), now: T0.AddSeconds(600), Threshold, hasOpenToolCall: true));
+    }
+
+    [Fact]
+    public void No_open_tool_call_past_threshold_is_stalled()
+    {
+        // The same elapsed silence with no tool pending is a hung model -> recover.
+        Assert.True(AcpSessionManager.IsTurnStalled(
+            T0, lastEventAt: null, now: T0.AddSeconds(120), Threshold, hasOpenToolCall: false));
+    }
 }

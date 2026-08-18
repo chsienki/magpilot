@@ -94,6 +94,16 @@ public sealed class AcpSessionManager
     /// </summary>
     private readonly ConcurrentDictionary<string, AcpFlavor> _sessionFlavor = new();
 
+    /// <summary>
+    /// Open (pending / in-progress) tool-call ids per session. A turn that is
+    /// waiting on a tool it invoked -- a long shell command, a slow MCP call --
+    /// is silent on the ACP stream between the tool's <c>tool_call</c> (pending)
+    /// and <c>tool_call_update</c> (completed) updates, but it is NOT wedged. The
+    /// watchdog consults this so it never mistakes a legitimately long tool for a
+    /// hung model. Cleared when the turn ends.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> _openToolCalls = new();
+
     public AcpSessionManager(AcpFlavorPool pool, Magpilot.Agent.Sessions.YoloRegistry yolo, ILogger<AcpSessionManager> logger)
     {
         _pool = pool;
@@ -238,10 +248,26 @@ public sealed class AcpSessionManager
     /// exactly like this; a legitimately slow turn keeps emitting tool-call /
     /// message-chunk updates, which resets the clock.
     /// </summary>
-    internal static bool IsTurnStalled(DateTimeOffset startedAt, DateTimeOffset? lastEventAt, DateTimeOffset now, TimeSpan threshold)
+    internal static bool IsTurnStalled(DateTimeOffset startedAt, DateTimeOffset? lastEventAt, DateTimeOffset now, TimeSpan threshold, bool hasOpenToolCall = false)
     {
+        // A turn waiting on a tool it invoked (a long shell command, a slow MCP
+        // call) is silent on the stream but not wedged -- never stall it.
+        if (hasOpenToolCall) return false;
         var lastActivity = lastEventAt is { } t && t > startedAt ? t : startedAt;
         return now - lastActivity >= threshold;
+    }
+
+    /// <summary>
+    /// Whether the in-flight turn for <paramref name="sid"/> looks wedged: silent
+    /// past <paramref name="threshold"/> AND not currently waiting on a tool call
+    /// it invoked. Only a hung model -- nothing streaming, nothing pending -- is
+    /// treated as stalled, so a legitimately long tool is never killed.
+    /// </summary>
+    private bool IsSessionStalled(string sid, InFlightEntry entry, DateTimeOffset now, TimeSpan threshold)
+    {
+        var hasOpenTool = _openToolCalls.TryGetValue(sid, out var open) && !open.IsEmpty;
+        var last = _lastEventAt.TryGetValue(sid, out var l) ? (DateTimeOffset?)l : null;
+        return IsTurnStalled(entry.StartedAt, last, now, threshold, hasOpenTool);
     }
 
     /// <summary>
@@ -262,22 +288,19 @@ public sealed class AcpSessionManager
 
         foreach (var (sid, entry) in _inFlight.ToArray())
         {
-            var last = _lastEventAt.TryGetValue(sid, out var l) ? (DateTimeOffset?)l : null;
-            if (!IsTurnStalled(entry.StartedAt, last, now, threshold))
+            if (!IsSessionStalled(sid, entry, now, threshold))
                 continue;
             if (!_sessionClient.TryGetValue(sid, out var client))
                 continue;
 
             // Recycling kills the shared child, so never do it while a co-hosted
-            // session has a turn that is still making progress.
+            // session has a turn that is still making progress or waiting on a
+            // tool it invoked.
             var healthyNeighbour = _sessionClient.Any(kv =>
                 !string.Equals(kv.Key, sid, StringComparison.Ordinal)
                 && ReferenceEquals(kv.Value, client)
                 && _inFlight.TryGetValue(kv.Key, out var e2)
-                && !IsTurnStalled(
-                        e2.StartedAt,
-                        _lastEventAt.TryGetValue(kv.Key, out var l2) ? l2 : null,
-                        now, threshold));
+                && !IsSessionStalled(kv.Key, e2, now, threshold));
             if (healthyNeighbour)
             {
                 _logger.LogWarning(
@@ -286,7 +309,8 @@ public sealed class AcpSessionManager
                 continue;
             }
 
-            var stalledFor = now - (last is { } lv && lv > entry.StartedAt ? lv : entry.StartedAt);
+            var lastAct = _lastEventAt.TryGetValue(sid, out var lg) && lg > entry.StartedAt ? lg : entry.StartedAt;
+            var stalledFor = now - lastAct;
             _logger.LogError(
                 "Turn watchdog: session {Sid} produced no activity for {Seconds:F0}s (requester={Req}); " +
                 "recycling its ACP child and failing the turn",
@@ -349,6 +373,7 @@ public sealed class AcpSessionManager
             _freshness.Forget(s);
             _ourSessionPids.TryRemove(s, out _);
             _lastEventAt.TryRemove(s, out _);
+            _openToolCalls.TryRemove(s, out _);
             try { Magpilot.Agent.Sessions.SessionLocks.ReapDead(Path.Combine(SessionStateRoot, s)); }
             catch (Exception ex) { _logger.LogDebug(ex, "Reaping locks for {Sid} during stalled-turn recycle threw", s); }
         }
@@ -505,6 +530,7 @@ public sealed class AcpSessionManager
         finally
         {
             _inFlight.TryRemove(sessionId, out _);
+            _openToolCalls.TryRemove(sessionId, out _);
             // Wake anyone waiting for the turn to finish.
             if (_turnDone.TryRemove(sessionId, out var tcs))
                 tcs.TrySetResult();
@@ -611,6 +637,7 @@ public sealed class AcpSessionManager
             _ourSessionPids.TryRemove(sessionId, out _);
             _lastEventAt.TryRemove(sessionId, out _);
             _sessionFlavor.TryRemove(sessionId, out _);
+            _openToolCalls.TryRemove(sessionId, out _);
         }
     }
 
@@ -662,6 +689,22 @@ public sealed class AcpSessionManager
         // a wedged one that emits nothing.
         _lastEventAt[sessionId] = DateTimeOffset.UtcNow;
         var kind = update["sessionUpdate"]?.GetValue<string>();
+        // Track open tool calls so the watchdog can tell a turn waiting on a long
+        // tool (silent between the tool's pending and completed updates) apart from
+        // a wedged model.
+        if (kind == "tool_call")
+        {
+            var tid = update["toolCallId"]?.GetValue<string>();
+            if (!string.IsNullOrEmpty(tid))
+                _openToolCalls.GetOrAdd(sessionId, static _ => new()).TryAdd(tid, 0);
+        }
+        else if (kind == "tool_call_update"
+                 && update["status"]?.GetValue<string>() is "completed" or "failed")
+        {
+            var tid = update["toolCallId"]?.GetValue<string>();
+            if (!string.IsNullOrEmpty(tid) && _openToolCalls.TryGetValue(sessionId, out var openSet))
+                openSet.TryRemove(tid, out _);
+        }
         _logger.LogDebug("HandleUpdate sid={Sid} kind={Kind}", sessionId, kind);
         StreamEvent? evt = kind switch
         {
@@ -766,6 +809,9 @@ public sealed class AcpSessionManager
             return new JsonObject();
 
         var sessionId = @params?["sessionId"]?.GetValue<string>() ?? "";
+        // A permission request is child activity too -- a turn paused on an
+        // approval is waiting on the user, not wedged.
+        if (sessionId.Length > 0) _lastEventAt[sessionId] = DateTimeOffset.UtcNow;
         var optsArr = @params?["options"] as JsonArray ?? new JsonArray();
         var options = new List<ApprovalOption>();
         foreach (var o in optsArr)
