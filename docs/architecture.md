@@ -133,6 +133,17 @@ conversations -- so the "default" flavor uses a single shared child.
 "Agency" flavor on Windows spawns one child per session because agency's
 session multiplexing isn't reliable.
 
+A session create/adopt request may also pin a **model** + **reasoning effort**:
+the agent then spawns a dedicated `copilot --acp --allow-all-tools --model <M>
+[--reasoning-effort <E>]` child for it (pool-keyed by model+effort), isolated
+from the default child. This lets a caller run a session on a faster/cheaper
+model -- e.g. magstronaut's Magnus-Phone router runs on a small minimal-reasoning
+model for a snappy first response, while the main session it relays to keeps its
+own model. Magpilot stays generic: it exposes the option; the satellite's
+bootstrap chooses to use it. The flavor is NOT persisted, so a caller that wants
+it durable (across agent restarts) must re-supply the model on each adopt -- which
+a bootstrap that re-adopts every boot does naturally.
+
 The Copilot CLI authenticates with GitHub on its own (device flow, or
 `COPILOT_GITHUB_TOKEN` env). It runs the conversations, calls tools,
 writes/reads files, talks to MCP servers.
@@ -347,10 +358,10 @@ works without a configured token.
 | GET    | `/version/latest`                          | Hub-reported latest release (cached locally by `UpdatePoller`). **No auth.** Drives the launcher's upgrade banner + `--magpilot-update`. |
 | GET    | `/info`                                    | Agent name, OS, available flavors                          |
 | GET    | `/sessions`                                | List sessions on disk (with state, cwd, last-touched)      |
-| POST   | `/sessions`                                | Create a new session                                       |
+| POST   | `/sessions`                                | Create a new session. Body `NewSessionRequest { Cwd?, Name?, InitialPrompt?, UseAgency?, Model?, ReasoningEffort? }`. `Model` (+ optional `ReasoningEffort`: none/minimal/low/medium/high/xhigh/max) pins the session to a dedicated `copilot --acp --model <M> --reasoning-effort <E>` child. **400** on an invalid model/effort token. |
 | GET    | `/sessions/{id}`                           | Get session metadata                                       |
 | GET    | `/sessions/{id}/state`                     | Rich ownership + activity view (see "Cooperative single-owner handoff" below). Returns `SessionStateInfo`. **NEW (shim Phase 1).** |
-| POST   | `/sessions/{id}/adopt`                     | Bring a dormant session live (re-attach the ACP child)     |
+| POST   | `/sessions/{id}/adopt`                     | Bring a dormant session live (re-attach the ACP child). Body `AdoptRequest { Force?, Model?, ReasoningEffort? }` -- pass the same `Model`/`ReasoningEffort` as create to reload onto the pinned model flavor (nothing persists it agent-side). |
 | POST   | `/sessions/{id}/detach`                    | Detach without deleting on-disk state                      |
 | POST   | `/sessions/{id}/messages`                  | Send a prompt; returns 202; SSE delivers the reply. **Returns 409** + `HostOwnedResponse` when a magpilot launcher holds the session (see handoff section). |
 | GET    | `/sessions/{id}/stream`                    | SSE stream of session events (deltas, tool calls, etc.)    |

@@ -4,9 +4,11 @@ public sealed record NewSessionRequest(
     string? Cwd,
     string? Name,
     string? InitialPrompt = null,
-    bool UseAgency = false);
+    bool UseAgency = false,
+    string? Model = null,
+    string? ReasoningEffort = null);
 public sealed record PromptRequest(string Text);
-public sealed record AdoptRequest(bool Force = false);
+public sealed record AdoptRequest(bool Force = false, string? Model = null, string? ReasoningEffort = null);
 public sealed record ApprovalResponse(string OptionId);
 
 public sealed record SessionDetails(SessionInfo Info, string? AcpSessionId);

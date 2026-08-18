@@ -78,7 +78,12 @@ public static class AgentEndpoints
 
         api.MapPost("/sessions", async (NewSessionRequest req, SessionRegistry reg, AcpSessionManager acp, CancellationToken ct) =>
         {
-            var info = await reg.CreateAsync(req.Cwd, req.UseAgency, ct, name: req.Name);
+            SessionInfo info;
+            try
+            {
+                info = await reg.CreateAsync(req.Cwd, req.UseAgency, ct, name: req.Name, model: req.Model, reasoningEffort: req.ReasoningEffort);
+            }
+            catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
 
             // If the caller provided an initial prompt, fire-and-forget it so the
             // response returns immediately. The caller can subscribe to the SSE
@@ -181,9 +186,10 @@ public static class AgentEndpoints
         {
             try
             {
-                var info = await reg.AdoptAsync(id, req.Force, ct);
+                var info = await reg.AdoptAsync(id, req.Force, ct, req.Model, req.ReasoningEffort);
                 return Results.Ok(info);
             }
+            catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
             catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
             catch (FileNotFoundException ex) { return Results.NotFound(new { error = ex.Message }); }
         });
