@@ -1366,16 +1366,22 @@ anything talking to the agent's HTTP API) can route into a long-lived
 conversation instead of spawning a throwaway one.
 
 - `POST /api/sessions` accepts an optional `name` to create one.
-- **`POST /api/sessions` + `/adopt` accept an optional `model` (+ `reasoningEffort`)**
-  to pin a session to a dedicated `copilot --acp --allow-all-tools --model <M>
-  [--reasoning-effort <E>]` child, isolated from the default multiplexed child.
+- **`POST /api/sessions` + `/adopt` accept an optional `model` (+ `reasoningEffort`,
+  + `disableMcpServers`)** to pin a session to a dedicated `copilot --acp
+  --allow-all-tools --model <M> [--reasoning-effort <E>] [--disable-mcp-server
+  <S>...]` child, isolated from the default multiplexed child.
   `AcpFlavor.ForModel`/`Resolve` build + select it; the pool keys one child per
-  distinct model+effort. Both tokens are validated (safe charset / the fixed
-  effort set) before hitting the command line -- invalid -> 400. The flavor is
-  NOT persisted agent-side: a caller wanting it durable across restarts must
-  re-supply `model` on every adopt (a bootstrap that re-adopts each boot does).
-  Used by magstronaut's Magnus-Phone router (small minimal-reasoning model for a
-  fast first response; relayed questions still hit the main session's own model).
+  distinct model+effort+disabled-set (a scoped child never shares a process with
+  the full-tool one). All three inputs are validated (safe charset / the fixed
+  effort set) before hitting the command line -- invalid -> 400. `disableMcpServers`
+  drops named MCP servers from that flavor's tool surface: fewer tool schemas
+  re-sent every turn (faster first token) and a smaller blast radius for a fast
+  model that would otherwise fumble tools it should delegate. The flavor is NOT
+  persisted agent-side: a caller wanting it durable across restarts must re-supply
+  these on every adopt (a bootstrap that re-adopts each boot does). Used by
+  magstronaut's Magnus-Phone router (small minimal-reasoning model, `home-assistant`
+  + `tunebase` disabled so it can only fire `phone.*` and relay; relayed questions
+  still hit the main session's own model + full tools).
   Magpilot stays generic -- it exposes the knob; the satellite chooses to use it.
 - `POST /api/quick-prompt` accepts an optional `sessionId` -- when
   provided, the agent adopts-on-demand and routes the prompt to that

@@ -81,7 +81,7 @@ public static class AgentEndpoints
             SessionInfo info;
             try
             {
-                info = await reg.CreateAsync(req.Cwd, req.UseAgency, ct, name: req.Name, model: req.Model, reasoningEffort: req.ReasoningEffort);
+                info = await reg.CreateAsync(req.Cwd, req.UseAgency, ct, name: req.Name, model: req.Model, reasoningEffort: req.ReasoningEffort, disableMcpServers: req.DisableMcpServers);
             }
             catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
 
@@ -189,7 +189,7 @@ public static class AgentEndpoints
         {
             try
             {
-                var info = await reg.AdoptAsync(id, req.Force, ct, req.Model, req.ReasoningEffort);
+                var info = await reg.AdoptAsync(id, req.Force, ct, req.Model, req.ReasoningEffort, req.DisableMcpServers);
                 return Results.Ok(info);
             }
             catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }

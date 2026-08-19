@@ -54,10 +54,10 @@ public sealed class SessionRegistry
     // reload path so AcpSessionManager stays free of the scanner.
     internal string? CwdFor(string sessionId) => _scanner.Get(sessionId, Owned)?.Cwd;
 
-    public async Task<SessionInfo> CreateAsync(string? cwd, bool useAgency, CancellationToken ct, string? name = null, string? model = null, string? reasoningEffort = null)
+    public async Task<SessionInfo> CreateAsync(string? cwd, bool useAgency, CancellationToken ct, string? name = null, string? model = null, string? reasoningEffort = null, string[]? disableMcpServers = null)
     {
         cwd ??= Environment.CurrentDirectory;
-        var flavor = AcpFlavor.Resolve(useAgency, model, reasoningEffort);
+        var flavor = AcpFlavor.Resolve(useAgency, model, reasoningEffort, disableMcpServers);
         var sid = await _acp.NewSessionAsync(cwd, flavor, ct);
         _owned.TryAdd(sid, 0);
 
@@ -121,7 +121,7 @@ public sealed class SessionRegistry
     /// Adopted sessions always use the default flavor; the original flavor is
     /// not persisted on disk (yet).
     /// </summary>
-    public async Task<SessionInfo> AdoptAsync(string sessionId, bool force, CancellationToken ct, string? model = null, string? reasoningEffort = null)
+    public async Task<SessionInfo> AdoptAsync(string sessionId, bool force, CancellationToken ct, string? model = null, string? reasoningEffort = null, string[]? disableMcpServers = null)
     {
         var info = _scanner.Get(sessionId, Owned)
             ?? throw new FileNotFoundException($"Session {sessionId} not on disk");
@@ -215,7 +215,7 @@ public sealed class SessionRegistry
         // else the default multiplexed Copilot. The caller (a bootstrap that
         // re-adopts every boot) re-supplies the model, so nothing needs to persist
         // the flavor across restarts.
-        await _acp.LoadSessionAsync(sessionId, cwd, AcpFlavor.Resolve(useAgency: false, model, reasoningEffort), ct);
+        await _acp.LoadSessionAsync(sessionId, cwd, AcpFlavor.Resolve(useAgency: false, model, reasoningEffort, disableMcpServers), ct);
         _owned.TryAdd(sessionId, 0);
         return WithYolo(_scanner.Get(sessionId, Owned)) ?? info with { State = SessionState.Owned };
     }
