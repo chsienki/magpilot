@@ -193,6 +193,7 @@
             @ComposerLeadingContent
             <textarea @ref="_textarea" value="@_draft" @oninput="OnDraftInput"
                       @onkeydown="OnKeyDown"
+                      @onfocus="OnComposerFocusInternal"
                       class="composer-textarea"
                       placeholder="@ComposerPlaceholder"
                       rows="2" disabled="@Disabled"></textarea>
@@ -292,6 +293,12 @@
     /// the half-typed message.
     /// </summary>
     [Parameter] public EventCallback<string> OnDraftChanged { get; set; }
+    /// <summary>
+    /// Fires when the composer textarea gains focus. Hosts can use this to
+    /// react to the user switching to typing (e.g. a voice host cancelling
+    /// in-progress speech capture).
+    /// </summary>
+    [Parameter] public EventCallback OnComposerFocus { get; set; }
     /// <summary>
     /// True if there are older messages on the server that aren't yet
     /// loaded into <see cref="Messages"/>. Drives the "Load older
@@ -467,6 +474,9 @@
             await Send();
         }
     }
+
+    private Task OnComposerFocusInternal() =>
+        OnComposerFocus.HasDelegate ? OnComposerFocus.InvokeAsync() : Task.CompletedTask;
 
     private async Task Send()
     {
