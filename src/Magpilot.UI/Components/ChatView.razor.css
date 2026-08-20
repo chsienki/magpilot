@@ -5,12 +5,20 @@
 .chat-view-mud {
     display: flex;
     flex-direction: column;
+    position: relative; /* anchor for the optional OverlayContent layer */
     /* Fill the available column height in MudMainContent (which also
        contains the "Show thinking" toolbar above us). Using flex:1 instead
        of height:100% means we share the column's height with our siblings
        rather than overflowing them. */
     flex: 1 1 0;
     min-height: 0; /* required for flex child to allow inner scroll */
+}
+
+.chat-view-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 10;
+    pointer-events: none; /* content opts back in with pointer-events: auto */
 }
 
 .messages-mud {

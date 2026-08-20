@@ -5,6 +5,10 @@
 @implements IAsyncDisposable
 
 <div class="chat-view-mud">
+    @if (OverlayContent is not null)
+    {
+        <div class="chat-view-overlay">@OverlayContent</div>
+    }
     <div class="messages-mud" @ref="_messagesEl">
         @if (HasMore)
         {
@@ -186,6 +190,7 @@
             </div>
         }
         <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Stretch" Class="composer-row">
+            @ComposerLeadingContent
             <textarea @ref="_textarea" value="@_draft" @oninput="OnDraftInput"
                       @onkeydown="OnKeyDown"
                       class="composer-textarea"
@@ -222,6 +227,15 @@
     [Parameter] public bool ShowThoughts { get; set; } = true;
     [Parameter] public EventCallback<string> OnSend { get; set; }
     [Parameter] public EventCallback<(string ApprovalId, string OptionId)> OnApproval { get; set; }
+
+    /// <summary>Optional content rendered as an absolutely-positioned layer over the
+    /// chat surface (e.g. a floating close/action button). The layer ignores pointer
+    /// events; give the content itself <c>pointer-events: auto</c> to make it interactive.</summary>
+    [Parameter] public RenderFragment? OverlayContent { get; set; }
+
+    /// <summary>Optional content rendered at the start of the composer row, before the
+    /// text field (e.g. a microphone / voice-input button).</summary>
+    [Parameter] public RenderFragment? ComposerLeadingContent { get; set; }
 
     /// <summary>
     /// True while a turn is in flight. Swaps the Send icon for a
