@@ -17,6 +17,7 @@ public sealed class AcpFlavorPool(ILoggerFactory loggerFactory, ILogger<AcpFlavo
     private readonly HashSet<int> _driftWarned = new();
 
     public event Action<string, System.Text.Json.Nodes.JsonNode?>? OnSessionUpdate;
+    public event Action<AcpClient, string, System.Text.Json.Nodes.JsonNode?>? OnConfigStateObserved;
     public event Func<string, System.Text.Json.Nodes.JsonNode?, Task<System.Text.Json.Nodes.JsonNode>>? OnRequest;
 
     /// <summary>
@@ -29,6 +30,7 @@ public sealed class AcpFlavorPool(ILoggerFactory loggerFactory, ILogger<AcpFlavo
         try
         {
             client.OnSessionUpdate += FanoutSessionUpdate;
+            client.OnConfigStateObserved += FanoutConfigStateObserved;
             client.OnRequest += FanoutRequest;
             _clients[flavor.Key] = client;
         }
@@ -94,11 +96,22 @@ public sealed class AcpFlavorPool(ILoggerFactory loggerFactory, ILogger<AcpFlavo
     /// state. This drops every OTHER session the child was multiplexing -- the
     /// caller is responsible for re-mapping/reloading those.
     /// </summary>
-    public async Task<AcpClient> RecycleAsync(AcpFlavor flavor, CancellationToken ct)
+    public async Task<AcpClient?> RecycleAsync(AcpFlavor flavor, AcpClient expected, CancellationToken ct)
     {
         await _lock.WaitAsync(ct);
         try
         {
+            if (!_clients.TryGetValue(flavor.Key, out var current) ||
+                !ReferenceEquals(current, expected))
+            {
+                log.LogInformation(
+                    "Skipping stale recycle request for flavor {Flavor}; expected pid={ExpectedPid}, current pid={CurrentPid}",
+                    flavor.Key,
+                    expected.ProcessId?.ToString() ?? "?",
+                    current?.ProcessId?.ToString() ?? "(none)");
+                return null;
+            }
+
             if (_clients.Remove(flavor.Key, out var existing))
             {
                 log.LogWarning("Recycling ACP child for flavor {Flavor} (pid={Pid}) to clear stale state",
@@ -138,6 +151,7 @@ public sealed class AcpFlavorPool(ILoggerFactory loggerFactory, ILogger<AcpFlavo
             flavor.Key, flavor.Exe, flavor.Args);
         var client = new AcpClient(loggerFactory.CreateLogger<AcpClient>(), flavor.Exe, flavor.Args);
         client.OnSessionUpdate += FanoutSessionUpdate;
+        client.OnConfigStateObserved += FanoutConfigStateObserved;
         client.OnRequest += FanoutRequest;
         await client.StartAsync(ct);
         return client;
@@ -145,6 +159,9 @@ public sealed class AcpFlavorPool(ILoggerFactory loggerFactory, ILogger<AcpFlavo
 
     private void FanoutSessionUpdate(string sid, System.Text.Json.Nodes.JsonNode? update) =>
         OnSessionUpdate?.Invoke(sid, update);
+
+    private void FanoutConfigStateObserved(AcpClient source, string sid, System.Text.Json.Nodes.JsonNode? state) =>
+        OnConfigStateObserved?.Invoke(source, sid, state);
 
     private async Task<System.Text.Json.Nodes.JsonNode> FanoutRequest(string method, System.Text.Json.Nodes.JsonNode? @params)
     {

@@ -17,7 +17,14 @@ namespace Magpilot.Agent.Acp;
 /// Sessions are tagged with the flavor key they were created against so the
 /// session manager can route prompt/stream/cancel calls to the right child.
 /// </summary>
-public sealed record AcpFlavor(string Key, string Exe, string Args, bool MultiplexesSessions = true)
+public sealed record AcpFlavor(
+    string Key,
+    string Exe,
+    string Args,
+    bool MultiplexesSessions = true,
+    string? Model = null,
+    string? ReasoningEffort = null,
+    IReadOnlyList<string>? DisabledMcpServers = null)
 {
     /// <summary>
     /// The default Copilot CLI flavor. One instance is started eagerly at
@@ -45,46 +52,51 @@ public sealed record AcpFlavor(string Key, string Exe, string Args, bool Multipl
             MultiplexesSessions: false);
 
     /// <summary>
-    /// A model-pinned Copilot flavor: <c>copilot --acp --allow-all-tools --model
-    /// &lt;model&gt; [--reasoning-effort &lt;effort&gt;]</c>. Lets a caller run a session on a
-    /// specific (e.g. faster, cheaper) model with a chosen reasoning effort,
-    /// isolated from the default child that multiplexes everything else. The key
-    /// embeds model+effort so the pool caches one child per distinct combination;
-    /// sessions requesting the same model+effort share it.
+    /// Build the default Copilot process flavor plus per-session model/reasoning
+    /// configuration. Model and reasoning are applied through ACP config options,
+    /// so they do not change the process key or command line. Only process-scoped
+    /// settings such as disabled MCP servers create an isolated child.
     /// </summary>
     public static AcpFlavor ForModel(string model, string? reasoningEffort, IReadOnlyList<string>? disableMcpServers = null)
-    {
-        var m = ValidateModel(model);
-        var effort = ValidateEffort(reasoningEffort);
-        var disabled = ValidateMcpServerNames(disableMcpServers);
-        var exe = OperatingSystem.IsWindows() ? "copilot.exe" : "copilot";
-        var args = new System.Text.StringBuilder("--acp --allow-all-tools --model ").Append(m);
-        if (effort is not null) args.Append(" --reasoning-effort ").Append(effort);
-        foreach (var s in disabled) args.Append(" --disable-mcp-server ").Append(s);
-        // The key must distinguish a tool-scoped child from a plain model child
-        // so the pool never hands a session the wrong tool surface.
-        var key = effort is null ? $"model:{m}" : $"model:{m}:{effort}";
-        if (disabled.Count > 0) key += ":no-" + string.Join("+", disabled);
-        return new AcpFlavor(key, exe, args.ToString(), MultiplexesSessions: true);
-    }
+        => Resolve(useAgency: false, model, reasoningEffort, disableMcpServers);
 
     /// <summary>
-    /// Resolve the flavor for a session create/adopt request. A
-    /// <paramref name="model"/> wins (pinned model flavor); otherwise
-    /// <paramref name="useAgency"/> selects the agency wrapper; otherwise the
-    /// default multiplexed Copilot.
+    /// Resolve the process flavor and per-session configuration for a create or
+    /// adopt request. Model and reasoning remain session-scoped ACP settings, so
+    /// ordinary Copilot sessions share the default multiplexed child even when
+    /// they use different models. Disabled MCP servers alter the process tool
+    /// surface and therefore produce a distinct child flavor.
     /// </summary>
-    public static AcpFlavor Resolve(bool useAgency, string? model, string? reasoningEffort, IReadOnlyList<string>? disableMcpServers = null) =>
-        !string.IsNullOrWhiteSpace(model) ? ForModel(model, reasoningEffort, disableMcpServers)
-        : useAgency ? Agency
-        : Default;
+    public static AcpFlavor Resolve(bool useAgency, string? model, string? reasoningEffort, IReadOnlyList<string>? disableMcpServers = null)
+    {
+        var baseFlavor = useAgency ? Agency : Default;
+        var requestedModel = string.IsNullOrWhiteSpace(model) ? null : ValidateModel(model);
+        var effort = ValidateEffort(reasoningEffort);
+        var disabled = ValidateMcpServerNames(disableMcpServers);
 
-    private static readonly HashSet<string> ValidEfforts =
-        new(StringComparer.OrdinalIgnoreCase) { "none", "minimal", "low", "medium", "high", "xhigh", "max" };
+        var args = new System.Text.StringBuilder(baseFlavor.Args);
+        foreach (var server in disabled)
+            args.Append(" --disable-mcp-server ").Append(server);
+
+        var key = baseFlavor.Key;
+        if (disabled.Count > 0)
+            key += ":no-" + string.Join("+", disabled);
+
+        return baseFlavor with
+        {
+            Key = key,
+            Args = args.ToString(),
+            Model = requestedModel,
+            ReasoningEffort = effort,
+            DisabledMcpServers = disabled,
+        };
+    }
 
     // Model + effort arrive over HTTP and are interpolated into the child's
-    // command line, so constrain them to safe tokens (no spaces, quotes, or shell
-    // metacharacters) to stop them injecting extra arguments into the spawn.
+    // ACP request, while MCP names are also interpolated into the child command
+    // line. Keep validation generic and constrain all of them to safe tokens;
+    // the session's advertised configOptions are authoritative for whether a
+    // particular model or reasoning value is supported.
     private static string ValidateModel(string model)
     {
         if (!System.Text.RegularExpressions.Regex.IsMatch(model, "^[A-Za-z0-9._-]{1,64}$"))
@@ -95,7 +107,7 @@ public sealed record AcpFlavor(string Key, string Exe, string Args, bool Multipl
     private static string? ValidateEffort(string? effort)
     {
         if (string.IsNullOrWhiteSpace(effort)) return null;
-        if (!ValidEfforts.Contains(effort))
+        if (!System.Text.RegularExpressions.Regex.IsMatch(effort, "^[A-Za-z0-9._-]{1,64}$"))
             throw new ArgumentException($"Invalid reasoning effort '{effort}'.", nameof(effort));
         return effort.ToLowerInvariant();
     }
@@ -106,7 +118,7 @@ public sealed record AcpFlavor(string Key, string Exe, string Args, bool Multipl
     private static IReadOnlyList<string> ValidateMcpServerNames(IReadOnlyList<string>? names)
     {
         if (names is null || names.Count == 0) return [];
-        var result = new List<string>(names.Count);
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var n in names)
         {
             if (string.IsNullOrWhiteSpace(n)) continue;
@@ -114,6 +126,6 @@ public sealed record AcpFlavor(string Key, string Exe, string Args, bool Multipl
                 throw new ArgumentException($"Invalid MCP server name '{n}'.", nameof(names));
             result.Add(n);
         }
-        return result;
+        return result.OrderBy(static name => name, StringComparer.OrdinalIgnoreCase).ToArray();
     }
 }

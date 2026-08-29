@@ -29,6 +29,11 @@ public sealed class HostOwnership : IHostedService, IDisposable
 {
     private readonly ILogger<HostOwnership> _logger;
     private readonly ConcurrentDictionary<string, HostOwnerEntry> _entries = new();
+    // Durable handback metadata is kept separately from live ownership. The
+    // launcher intentionally calls /release only after its copilot child exits,
+    // so PID liveness cannot be the lifetime of the flavor information needed
+    // to restore that session after an agent restart.
+    private readonly ConcurrentDictionary<string, HostOwnerEntry> _releaseEntries = new();
     private readonly string _statePath;
     private readonly object _persistLock = new();
     private Timer? _sweep;
@@ -63,10 +68,15 @@ public sealed class HostOwnership : IHostedService, IDisposable
     /// any in-flight ACP work for this session before calling. The
     /// holder's process start time is captured so a reload after an agent
     /// restart can tell the real holder from a reused PID.
+    /// <paramref name="flavor"/> records what the session was running under when
+    /// the agent let go, so a later handback restores the same child scope and
+    /// session configuration instead of silently demoting it to the default.
     /// </summary>
-    public void Set(string sessionId, int hostPid)
+    public void Set(string sessionId, int hostPid, HostSessionFlavor? flavor = null)
     {
-        _entries[sessionId] = new HostOwnerEntry(hostPid, DateTimeOffset.UtcNow, TryGetStartTicks(hostPid));
+        var entry = new HostOwnerEntry(hostPid, DateTimeOffset.UtcNow, TryGetStartTicks(hostPid), flavor);
+        _entries[sessionId] = entry;
+        _releaseEntries[sessionId] = entry;
         _logger.LogInformation("Host {Pid} acquired session {Sid}", hostPid, sessionId);
         Persist();
     }
@@ -74,8 +84,11 @@ public sealed class HostOwnership : IHostedService, IDisposable
     /// <summary>Drop the host-ownership marker (e.g. when the host releases).</summary>
     public bool Clear(string sessionId)
     {
-        if (_entries.TryRemove(sessionId, out var entry))
+        var removedLive = _entries.TryRemove(sessionId, out var liveEntry);
+        var removedRecorded = _releaseEntries.TryRemove(sessionId, out var recordedEntry);
+        if (removedLive || removedRecorded)
         {
+            var entry = removedLive ? liveEntry : recordedEntry;
             _logger.LogInformation("Host {Pid} released session {Sid}", entry.HostPid, sessionId);
             Persist();
             return true;
@@ -92,21 +105,36 @@ public sealed class HostOwnership : IHostedService, IDisposable
     {
         if (_entries.TryGetValue(sessionId, out entry!))
         {
-            if (IsAlive(entry.HostPid))
+            if (IsSameProcess(entry))
                 return true;
-            // Stale entry -- holder process is gone. Clean up.
-            if (_entries.TryRemove(sessionId, out _)) Persist();
+            // Stale live-owner entry -- stop advertising Host ownership, but
+            // retain the durable release metadata. The launcher performs its
+            // release after this process exits, and may do so after an agent
+            // restart.
+            _entries.TryRemove(sessionId, out _);
             _logger.LogWarning("Pruned stale host entry sid={Sid} pid={Pid}", sessionId, entry.HostPid);
         }
         entry = default!;
         return false;
     }
 
+    /// <summary>
+    /// Retrieve the durable acquisition record even after the holder exited.
+    /// Used only by handback paths that validate the caller-supplied host PID;
+    /// normal ownership checks must use <see cref="TryGet"/>.
+    /// </summary>
+    internal bool TryGetRecorded(string sessionId, out HostOwnerEntry entry) =>
+        _releaseEntries.TryGetValue(sessionId, out entry);
+
     private static bool IsAlive(int pid)
     {
         try { return !Process.GetProcessById(pid).HasExited; }
         catch { return false; }
     }
+
+    private static bool IsSameProcess(HostOwnerEntry entry) =>
+        IsAlive(entry.HostPid) &&
+        (entry.HostStartTicks == 0 || TryGetStartTicks(entry.HostPid) == entry.HostStartTicks);
 
     /// <summary>
     /// Process start time in UTC ticks, or 0 if it can't be read. Used as a
@@ -137,16 +165,14 @@ public sealed class HostOwnership : IHostedService, IDisposable
 
     private void Sweep()
     {
-        var changed = false;
         foreach (var (sid, entry) in _entries.ToArray())
         {
-            if (!IsAlive(entry.HostPid) && _entries.TryRemove(sid, out _))
+            if (!IsSameProcess(entry) && _entries.TryRemove(sid, out _))
             {
-                changed = true;
                 _logger.LogInformation("Swept stale host entry sid={Sid} pid={Pid}", sid, entry.HostPid);
             }
         }
-        if (changed) Persist();
+        // The persisted release metadata intentionally survives this pruning.
     }
 
     /// <summary>
@@ -174,13 +200,14 @@ public sealed class HostOwnership : IHostedService, IDisposable
         var kept = 0;
         foreach (var e in saved)
         {
-            if (string.IsNullOrEmpty(e.SessionId) || !IsAlive(e.HostPid)) continue;
-            // PID-reuse guard: if we recorded a start time, the live process
-            // must still have it. A 0 means "unknown at capture" -- accept on
-            // liveness alone rather than drop a genuine holder.
-            if (e.HostStartTicks != 0 && TryGetStartTicks(e.HostPid) != e.HostStartTicks) continue;
-            _entries[e.SessionId] = new HostOwnerEntry(e.HostPid, e.AcquiredAt, e.HostStartTicks);
-            kept++;
+            if (string.IsNullOrEmpty(e.SessionId)) continue;
+            var entry = new HostOwnerEntry(e.HostPid, e.AcquiredAt, e.HostStartTicks, e.Flavor);
+            _releaseEntries[e.SessionId] = entry;
+            if (IsSameProcess(entry))
+            {
+                _entries[e.SessionId] = entry;
+                kept++;
+            }
         }
         if (kept > 0)
             _logger.LogInformation("Reloaded {Kept}/{Total} host-owned session(s) after restart", kept, saved.Count);
@@ -192,12 +219,12 @@ public sealed class HostOwnership : IHostedService, IDisposable
     {
         try
         {
-            var snapshot = _entries
-                .Select(kv => new PersistedEntry(kv.Key, kv.Value.HostPid, kv.Value.AcquiredAt, kv.Value.HostStartTicks))
-                .ToList();
-            var json = JsonSerializer.Serialize(snapshot);
             lock (_persistLock)
             {
+                var snapshot = _releaseEntries
+                    .Select(kv => new PersistedEntry(kv.Key, kv.Value.HostPid, kv.Value.AcquiredAt, kv.Value.HostStartTicks, kv.Value.Flavor))
+                    .ToList();
+                var json = JsonSerializer.Serialize(snapshot);
                 Directory.CreateDirectory(Path.GetDirectoryName(_statePath)!);
                 var tmp = _statePath + ".tmp";
                 File.WriteAllText(tmp, json);
@@ -214,7 +241,30 @@ public sealed class HostOwnership : IHostedService, IDisposable
 
     public void Dispose() => _sweep?.Dispose();
 
-    private sealed record PersistedEntry(string SessionId, int HostPid, DateTimeOffset AcquiredAt, long HostStartTicks);
+    private sealed record PersistedEntry(
+        string SessionId,
+        int HostPid,
+        DateTimeOffset AcquiredAt,
+        long HostStartTicks,
+        HostSessionFlavor? Flavor = null);
 }
 
-public readonly record struct HostOwnerEntry(int HostPid, DateTimeOffset AcquiredAt, long HostStartTicks);
+/// <summary>
+/// What the agent had the session attached under before it handed it to a
+/// launcher: the process-scoped tool surface plus the session-scoped model and
+/// reasoning. Purely descriptive (no ACP types) so the ownership map stays a
+/// plain serialisable record; the registry turns it back into an
+/// <c>AcpFlavor</c> on handback. A null (e.g. an entry persisted by an older
+/// agent) simply falls back to the default flavor.
+/// </summary>
+public sealed record HostSessionFlavor(
+    bool UseAgency = false,
+    string? Model = null,
+    string? ReasoningEffort = null,
+    string[]? DisabledMcpServers = null);
+
+public readonly record struct HostOwnerEntry(
+    int HostPid,
+    DateTimeOffset AcquiredAt,
+    long HostStartTicks,
+    HostSessionFlavor? Flavor = null);

@@ -11,7 +11,7 @@ namespace Magpilot.Agent.Acp;
 /// in parallel (one per <see cref="AcpFlavor"/>), routing each session to its
 /// owning client by sessionId.
 /// </summary>
-public sealed class AcpClient : IAsyncDisposable
+public class AcpClient : IAsyncDisposable
 {
     private readonly ILogger<AcpClient> _logger;
     private readonly string _exe;
@@ -19,7 +19,7 @@ public sealed class AcpClient : IAsyncDisposable
     private Process? _proc;
     private AcpBinaryWatch? _binaryWatch;
     private int _nextId;
-    private readonly Dictionary<int, TaskCompletionSource<JsonNode?>> _pending = new();
+    private readonly Dictionary<int, PendingCall> _pending = new();
     private readonly object _pendingLock = new();
     private readonly Channel<JsonObject> _outgoing = Channel.CreateUnbounded<JsonObject>(new UnboundedChannelOptions
     {
@@ -27,7 +27,18 @@ public sealed class AcpClient : IAsyncDisposable
     });
 
     public event Action<string, JsonNode?>? OnSessionUpdate;
+    public event Action<AcpClient, string, JsonNode?>? OnConfigStateObserved;
     public event Func<string, JsonNode?, Task<JsonNode>>? OnRequest;
+
+    /// <summary>
+    /// True when this client publishes config snapshots synchronously from its
+    /// read loop via <see cref="OnConfigStateObserved"/>. The session manager
+    /// then must not re-store a response from an asynchronous continuation,
+    /// because a later wire notification may already have been observed.
+    /// Test doubles that override <see cref="CallAsync"/> without a read loop
+    /// override this to false.
+    /// </summary>
+    public virtual bool PublishesOrderedConfigState => true;
 
     public AcpClient(ILogger<AcpClient> logger, string? exe = null, string? args = null)
     {
@@ -55,7 +66,7 @@ public sealed class AcpClient : IAsyncDisposable
     /// process (e.g. a magpilot launcher's interactive copilot child)
     /// tries to take over.
     /// </summary>
-    public int? ProcessId => _proc?.Id;
+    public virtual int? ProcessId => _proc?.Id;
 
     /// <summary>
     /// True if the copilot executable this child launched from has since been
@@ -138,11 +149,12 @@ public sealed class AcpClient : IAsyncDisposable
         _logger.LogInformation("ACP initialized: {Result}", init?["agentInfo"]?.ToJsonString());
     }
 
-    public Task<JsonNode?> CallAsync(string method, JsonObject? @params, CancellationToken ct, int timeoutSec = 120)
+    public virtual Task<JsonNode?> CallAsync(string method, JsonObject? @params, CancellationToken ct, int timeoutSec = 120)
     {
         var id = Interlocked.Increment(ref _nextId);
         var tcs = new TaskCompletionSource<JsonNode?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        lock (_pendingLock) _pending[id] = tcs;
+        var sessionId = @params?["sessionId"]?.GetValue<string>();
+        lock (_pendingLock) _pending[id] = new PendingCall(tcs, sessionId);
         var req = new JsonObject
         {
             ["jsonrpc"] = "2.0",
@@ -156,7 +168,7 @@ public sealed class AcpClient : IAsyncDisposable
         return WaitWithTimeoutAsync(id, tcs.Task, ct, timeoutSec);
     }
 
-    public Task NotifyAsync(string method, JsonObject @params)
+    public virtual Task NotifyAsync(string method, JsonObject @params)
     {
         var note = new JsonObject
         {
@@ -172,20 +184,29 @@ public sealed class AcpClient : IAsyncDisposable
     {
         try
         {
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            linked.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
-            var done = await Task.WhenAny(task, Task.Delay(Timeout.Infinite, linked.Token));
-            if (done != task)
-            {
-                lock (_pendingLock) _pending.Remove(id);
-                throw new TimeoutException($"ACP call id={id} timed out");
-            }
-            return await task;
+            return await WaitWithTimeoutCoreAsync(id, task, ct, TimeSpan.FromSeconds(timeoutSec));
         }
-        catch
+        finally
         {
             lock (_pendingLock) _pending.Remove(id);
-            throw;
+        }
+    }
+
+    internal static async Task<T> WaitWithTimeoutCoreAsync<T>(
+        int id,
+        Task<T> task,
+        CancellationToken callerToken,
+        TimeSpan timeout)
+    {
+        using var timeoutCts = new CancellationTokenSource(timeout);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(callerToken, timeoutCts.Token);
+        try
+        {
+            return await task.WaitAsync(linked.Token);
+        }
+        catch (OperationCanceledException) when (!callerToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
+        {
+            throw new TimeoutException($"ACP call id={id} timed out");
         }
     }
 
@@ -374,7 +395,7 @@ public sealed class AcpClient : IAsyncDisposable
         List<TaskCompletionSource<JsonNode?>> snapshot;
         lock (_pendingLock)
         {
-            snapshot = _pending.Values.ToList();
+            snapshot = _pending.Values.Select(p => p.Completion).ToList();
             _pending.Clear();
         }
         foreach (var tcs in snapshot) tcs.TrySetException(ex);
@@ -389,13 +410,17 @@ public sealed class AcpClient : IAsyncDisposable
         {
             // Response
             var id = idNode.GetValue<int>();
-            TaskCompletionSource<JsonNode?>? tcs;
-            lock (_pendingLock) _pending.Remove(id, out tcs);
-            if (tcs is null) return;
+            PendingCall? pending;
+            lock (_pendingLock) _pending.Remove(id, out pending);
+            if (pending is null) return;
             if (msg["error"] is JsonNode err)
-                tcs.TrySetException(new Exception($"ACP error: {err.ToJsonString()}"));
+                pending.Completion.TrySetException(new Exception($"ACP error: {err.ToJsonString()}"));
             else
-                tcs.TrySetResult(msg["result"]);
+            {
+                var responseResult = msg["result"];
+                PublishConfigState(pending.SessionId, responseResult);
+                pending.Completion.TrySetResult(responseResult);
+            }
             return;
         }
 
@@ -411,7 +436,10 @@ public sealed class AcpClient : IAsyncDisposable
                 var sid = @params?["sessionId"]?.GetValue<string>();
                 if (sid is not null)
                 {
-                    try { OnSessionUpdate?.Invoke(sid, @params?["update"]); }
+                    var update = @params?["update"];
+                    if (update?["sessionUpdate"]?.GetValue<string>() == "config_option_update")
+                        PublishConfigState(sid, update);
+                    try { OnSessionUpdate?.Invoke(sid, update); }
                     catch (Exception ex) { _logger.LogError(ex, "OnSessionUpdate handler threw"); }
                 }
             }
@@ -433,6 +461,7 @@ public sealed class AcpClient : IAsyncDisposable
                 result = await handler(method, @params);
             }
         }
+
         catch (Exception ex)
         {
             _logger.LogError(ex, "OnRequest handler threw for {Method}", method);
@@ -454,7 +483,22 @@ public sealed class AcpClient : IAsyncDisposable
         _outgoing.Writer.TryWrite(ok);
     }
 
-    public async ValueTask DisposeAsync()
+    private void PublishConfigState(string? sessionId, JsonNode? state)
+    {
+        if (string.IsNullOrEmpty(sessionId))
+            sessionId = state?["sessionId"]?.GetValue<string>();
+        if (string.IsNullOrEmpty(sessionId) || state?["configOptions"] is not JsonArray)
+            return;
+
+        try { OnConfigStateObserved?.Invoke(this, sessionId, state); }
+        catch (Exception ex) { _logger.LogError(ex, "OnConfigStateObserved handler threw"); }
+    }
+
+    private sealed record PendingCall(
+        TaskCompletionSource<JsonNode?> Completion,
+        string? SessionId);
+
+    public virtual async ValueTask DisposeAsync()
     {
         _outgoing.Writer.TryComplete();
         if (_proc is not null)

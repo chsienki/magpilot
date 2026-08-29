@@ -20,6 +20,35 @@ either a deployment-time **bootstrap hook** (see
 `MAGPILOT_BOOTSTRAP_HOOK_DIR` in `src/Magpilot.Agent/bootstrap.sh`) or a
 new HTTP-API consumer in the deployer's own repo.
 
+A hook needs its deployer's own settings, and magpilot must not learn
+their names. `MAGPILOT_BOOTSTRAP_HOOK_ENV_ALLOWLIST` is the generic
+contract for that: a comma- and/or whitespace-separated list of
+**variable names** (never assignments) to forward from the container
+environment into every hook, on top of the three the hook API always
+supplies (`AGENT_URL`, `MAGPILOT_AGENT_TOKEN`, `MAGPILOT_AGENT_HOME`).
+
+- Each entry must match `[A-Za-z_][A-Za-z0-9_]*`; anything else -- a
+  typo, an assignment, `$(id)`, `FOO;id` -- is logged and skipped, so an
+  allowlist entry can never become shell. Pathname expansion is disabled
+  before entries are split and validated, so a literal `*` cannot turn into
+  a valid-looking filename/environment-variable name.
+- Names `su(1)` always resets for a login shell (`HOME`, `SHELL`,
+  `USER`, `LOGNAME`, `PATH`, `IFS`) are refused rather than silently
+  dropped. Names not set in the environment are skipped.
+- Shell/dynamic-loader startup controls (`BASH_ENV`, `ENV`, `SHELLOPTS`,
+  `BASHOPTS`, every `LD_*` name, `GLIBC_TUNABLES`, `GCONV_PATH`,
+  `LOCPATH`) are also refused; allowing them would let a value affect
+  code loading before the hook starts.
+- Values cross the privilege drop via `su --whitelist-environment`
+  (util-linux 2.38 in the runtime image), so they are copied verbatim:
+  never expanded, `eval`'d, or interpolated into a shell string. A value
+  containing quotes, spaces, `$` or `;` is safe. The hook path itself is
+  passed to `su` as a positional argument for the same reason, so the
+  `-c` script stays a fixed literal.
+- `scripts/test-bootstrap-hook-env.sh` unit-tests the list builder by
+  sourcing `bootstrap.sh` with `MAGPILOT_BOOTSTRAP_LIB_ONLY=1`; it needs
+  no container, agent or network.
+
 ## What this repo is
 
 Magpilot puts the GitHub Copilot CLI on the user's phone (and any
@@ -1244,7 +1273,11 @@ them by breaking them.
   if the host has appended new events to `events.jsonl` while it
   drove the session, the agent's multiplex copy is **stale** -- it
   still holds whatever it knew at acquire-for-host time. So a stale
-  resume cannot be fixed in place. `AcpSessionManager.RecycleForStaleAsync`
+  resume cannot be fixed in place. That is why the handback re-attaches
+  through `AcpSessionManager.ReloadFromDiskAsync`, which recycles the
+  child that still has the session resident BEFORE calling
+  `session/load` -- a plain load would answer "already loaded" and keep
+  serving the pre-detach snapshot. `AcpSessionManager.RecycleForStaleAsync`
   addresses it by killing the multiplexing child (the only way copilot
   releases a loaded session) and respawning a fresh one that reloads
   current state from disk; opt-in via `MAGPILOT_STALE_RECYCLE`, gated by
@@ -1289,8 +1322,8 @@ them by breaking them.
   `MAGPILOT_TURN_STALL_SECONDS` (default 90) is treated as wedged -- the
   watchdog fails the turn (publishes an `ErrorEvent` so the caller stops
   spinning) and recycles the child holding it (respawn + `session/load`
-  on the session's **own flavor**, so e.g. Magnus's fast-model phone
-  child comes back on `gpt-5.4-mini`, not the default). A live-but-slow
+  on the session's **own flavor**, preserving process-scoped MCP exclusions
+  and reapplying that session's stored model/reasoning config). A live-but-slow
   turn keeps emitting updates, which resets its clock, and a turn
   **waiting on a tool it invoked** (a long shell command, a slow MCP
   call -- silent between the tool's pending and completed updates) is
@@ -1366,23 +1399,74 @@ anything talking to the agent's HTTP API) can route into a long-lived
 conversation instead of spawning a throwaway one.
 
 - `POST /api/sessions` accepts an optional `name` to create one.
-- **`POST /api/sessions` + `/adopt` accept an optional `model` (+ `reasoningEffort`,
-  + `disableMcpServers`)** to pin a session to a dedicated `copilot --acp
-  --allow-all-tools --model <M> [--reasoning-effort <E>] [--disable-mcp-server
-  <S>...]` child, isolated from the default multiplexed child.
-  `AcpFlavor.ForModel`/`Resolve` build + select it; the pool keys one child per
-  distinct model+effort+disabled-set (a scoped child never shares a process with
-  the full-tool one). All three inputs are validated (safe charset / the fixed
-  effort set) before hitting the command line -- invalid -> 400. `disableMcpServers`
+- **`POST /api/sessions` + `/adopt` accept optional `model`,
+  `reasoningEffort`, and `disableMcpServers`.** Model/reasoning are
+  session-scoped ACP config, so differently pinned sessions still share the
+  default multiplexed child. Only process-scoped settings such as
+  `disableMcpServers` create a distinct
+  `copilot --acp --allow-all-tools --disable-mcp-server <S>...` flavor/child;
+  a scoped child never shares a process with the full-tool one.
+  `AcpFlavor.ForModel`/`Resolve` validate the input and split session config
+  from process scope. After BOTH `session/new` and `session/load`,
+  `AcpSessionConfig` discovers the semantic model/reasoning selectors from the
+  response's `configOptions`, maps the requested display name or value to the
+  advertised value id, calls `session/set_config_option`, and verifies the
+  returned complete config state. Never hard-code a CLI config id: ACP
+  categories are preferred, with id/name heuristics only because categories are
+  optional. A requested   option/value that is missing, rejected, or not confirmed must fail explicitly
+  (agent HTTP 502), never fall back silently; unsupported-value errors list the
+  values the CLI actually advertised. Apply model first and use that RPC's
+  returned `configOptions` to discover reasoning, because changing models can
+  change the available reasoning levels. If reasoning then fails, restore the
+  prior model before surfacing the error (and report rollback failure too).
+  Inputs use generic safe-token validation -- invalid -> 400; advertised
+  `configOptions`, not a model-specific hard-coded list, decide support.
+  `disableMcpServers`
   drops named MCP servers from that flavor's tool surface: fewer tool schemas
   re-sent every turn (faster first token) and a smaller blast radius for a fast
-  model that would otherwise fumble tools it should delegate. The flavor is NOT
-  persisted agent-side: a caller wanting it durable across restarts must re-supply
-  these on every adopt (a bootstrap that re-adopts each boot does). Used by
-  magstronaut's Magnus-Phone router (small minimal-reasoning model, `home-assistant`
-  + `tunebase` disabled so it can only fire `phone.*` and relay; relayed questions
-  still hit the main session's own model + full tools).
-  Magpilot stays generic -- it exposes the knob; the satellite chooses to use it.
+  model that would otherwise fumble tools it should delegate. ACP persists the
+  selected session config, but the agent's process/tool flavor routing is NOT
+  persisted: a caller wanting the same MCP isolation after restart must
+  re-supply it on every adopt (a bootstrap that re-adopts each boot does).
+  Adopting an already-Owned session actively applies/verifies requested
+  model/reasoning against the latest config state captured from setup/set
+  responses and `config_option_update` notifications. Every attach/configure
+  operation for one session is serialised on a per-session gate, so two
+  concurrent adopts cannot interleave their `set_config_option` calls or their
+  rollbacks. Before the session is released for traffic the WHOLE tuple
+  (process scope + model + reasoning) is re-verified against the newest
+  snapshot when model/reasoning was explicitly requested or an existing
+  verified expectation is being retained -- a set response that confirmed a
+  value is not enough, because a later notification can move it again. ACP
+  `configOptions` itself is optional, so an ordinary unpinned new/load with no
+  requested or retained model/reasoning can become usable without a snapshot;
+  pinned dimensions remain fail-closed. Explicitly pinned dimensions remain
+  expected after success (using ACP's canonical value ids), and a later
+  mismatching notification re-quarantines the route. Shared-child recycle
+  refuses while any co-hosted session is configuring. An in-place request that changes
+  `disableMcpServers` fails explicitly because that requires another child.
+- **A session whose configuration cannot be applied AND verified is
+  quarantined, not detached.** Copilot cannot unload a session, so removing our
+  routing would strand it: the retry's `session/load` would only be told it is
+  "already loaded". Instead the route and lock are KEPT but registry ownership
+  is withheld, and it is refused for prompts (`POST /messages` -> 409 with
+  `needsReadopt`) and internal routing until a later adopt re-applies and
+  verifies its configuration -- which then goes through the in-place config
+  path, no reload needed. Prompts share the same per-session gate as
+  configuration, so a prompt can never run between the model and reasoning
+  updates. Quarantine is driven by whether a
+  `set_config_option` actually went out without a verified outcome: a request
+  rejected up front (unadvertised option/value) or a caller cancellation before
+  any RPC leaves the last verified configuration live and the session
+  usable, while a mid-flight cancellation, an unconfirmed response, or a failed
+  model rollback quarantines. An unverified configuration is never served.
+- If a shared child is recycled, every co-hosted route is invalidated and no
+  longer appears Owned. A later adopt recognizes the stale internal ownership
+  marker and re-attaches from disk even if the dead child's lock has not yet
+  disappeared -- registry ownership never advertises a session the agent cannot
+  actually drive, and `/messages` returns `needsReadopt` instead of accepting a
+  prompt with no route.
+  Magpilot stays generic -- it exposes the knob; API consumers choose to use it.
 - `POST /api/quick-prompt` accepts an optional `sessionId` -- when
   provided, the agent adopts-on-demand and routes the prompt to that
   session. When omitted, it creates an ephemeral session, runs the
@@ -1675,17 +1759,37 @@ Wire contract this code base now exposes:
 - **`POST /api/sessions/{id}/acquire-for-host`** -- body
   `AcquireForHostBody { HostPid, Force }`. Atomic combined op:
   if we own the session and a turn's in flight, polite waits via
-  `WaitForTurnBoundaryAsync` (force issues ACP cancel + 2s grace).
-  Then `DetachAsync` + `HostOwnership.Set`. Returns refreshed state.
+  `WaitForTurnBoundaryAsync` (force issues ACP cancel + 2s grace; if the
+  turn still ignores cancellation, it recycles the owning ACP child before
+  transferring ownership, and refuses rather than kill an active co-hosted
+  turn).
+  Prompt admission is marked draining before that check, so a new turn cannot
+  slip into the handoff window. A different live host owner is rejected; a
+  different live external holder requires explicit force and confirmed
+  eviction. Then `DetachAsync` + `HostOwnership.Set`. `DetachAsync` captures the
+  session's effective flavor under the same per-session gate that excludes
+  concurrent configuration (process/tool scope + the model and reasoning the
+  child last confirmed) and stores it in the ownership entry as
+  `HostSessionFlavor`, which is persisted with the rest of the map so it
+  survives an agent restart. Returns refreshed state.
 - **`POST /api/sessions/{id}/release`** -- body `ReleaseFromHostBody
   { HostPid, Force = false }`. 409 Conflict if the wrong host PID claims
-  to release. On success: clears `HostOwnership`; if `Force` is true,
-  evicts any still-live foreign copilot first; then attempts
-  `session/load` (tolerates "already loaded" -- see ACP gotchas) UNLESS
-  a live foreign holder still remains, in which case it declines to
-  adopt and reports `Owner=External`. The launcher's own release and the
-  SPA's graceful "Take back" send `Force=false` (never kill the
-  terminal); only the SPA's explicit "Force take over" sends
+  to release. If `Force` is true, evicts any still-live foreign copilot
+  first; then re-attaches via
+  `ReloadFromDiskAsync` -- recycle the child still holding the session,
+  then `session/load` on a fresh one, then re-apply and verify the
+  recorded model/reasoning -- UNLESS a live foreign holder still remains,
+  in which case it declines to adopt and retains host ownership for a later
+  retry. The
+  session comes back on the flavor it left on, not on the default; a
+  missing/older `HostSessionFlavor` (pre-upgrade entry) falls back to the
+  default flavor as before. `_owned` and the `HostOwnership` transition happen
+  only after load plus complete configuration verification succeeds. A failure
+  after attach leaves a non-Owned quarantined route and retains the recorded
+  flavor; the next release/adopt retries configuration in place without another
+  `session/load`. The launcher's own
+  release and the SPA's graceful "Take back" send `Force=false` (never
+  kill the terminal); only the SPA's explicit "Force take over" sends
   `Force=true`.
 - **SSE `release_requested` event** added to `StreamEvent` discriminator.
 
@@ -1786,8 +1890,8 @@ so a forceful take-over succeeds regardless of launcher version
   **Agent-side eviction is gated on `force`.**
   `ReleaseFromHostAsync(sid, hostPid, force, ct)`:
   - `force=false` (graceful): NEVER kills. If a live foreign holder
-    remains it declines to adopt and returns `Owner=External` so the
-    caller offers the force choice. This is both the launcher's own
+    remains it declines to adopt and retains `Owner=Host` plus the saved
+    flavor so the caller can retry or offer the force choice. This is both the launcher's own
     release (its copilot is already gone -> adopts cleanly) and the
     SPA's graceful attempt.
   - `force=true`: `EvictForeignLiveHolders` kills the still-live foreign
@@ -1797,7 +1901,7 @@ so a forceful take-over succeeds regardless of launcher version
   **Never adopt while a live foreign holder remains** (either force
   mode): two live drivers on one `events.jsonl` is the "garbled then
   stalled" split-brain, so `ReleaseFromHostAsync` leaves `_owned` unset
-  and returns `Owner=External` in that case. The SPA's poll treats
+  and keeps `Owner=Host` in that case. The SPA's poll treats
   `Host`/`External` as "not free" and re-raises the choice rather than
   streaming into the duplication. The `force` bit rides on
   `ReleaseFromHostBody.Force` (additive, defaults false = graceful, so
@@ -1815,7 +1919,20 @@ launcher startup against a session the agent loaded printed
 "session is already in use by another process" and the new copilot
 piled its own lock on top (multi-lock state). `AcpClient.ProcessId`
 exposes `_proc?.Id` so the cleanup code knows which lock filename
-to target.
+to target. `CloseAsync` drops the route but deliberately KEEPS the
+session's **residency** record (which child still has it in memory) and
+its flavor, because copilot cannot actually unload it. That record is
+what lets the handback path recycle the right child. Every recycle
+(`RecycleForStaleAsync`, the turn watchdog, and the handback) goes
+through one helper that invalidates routes AND residency for every
+session the dying child held -- routed or merely resident -- and reaps
+their locks; a multiplexing flavor is recycled in the pool, a
+non-multiplexing one has its dedicated child disposed. The global routing
+gate covers only the atomic idle check, client retirement, held-session
+snapshot, and route invalidation. It is released before disposing or
+initializing the replacement process, so unrelated children keep accepting
+work; retired-client checks prevent late load/config continuations from
+republishing or using the old generation.
 
 ### The "input never re-enables" pitfall
 

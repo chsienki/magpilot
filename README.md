@@ -216,6 +216,20 @@ answer is almost always a deployment-time bootstrap hook (see
 new HTTP-API consumer, not a magpilot patch. Don't add agent-specific
 code paths or hostnames into magpilot itself.
 
+Hooks always receive `AGENT_URL`, `MAGPILOT_AGENT_TOKEN` and
+`MAGPILOT_AGENT_HOME`. To hand a hook the deployer's own settings
+without magpilot ever learning their names, list additional **variable
+names** in `MAGPILOT_BOOTSTRAP_HOOK_ENV_ALLOWLIST` (comma- and/or
+whitespace-separated). Entries must be shell variable names -- anything
+else is logged and skipped. Pathname expansion is disabled while parsing, so
+even `*` is validated and rejected literally rather than expanding to a file
+or directory name. The values are forwarded verbatim
+across the privilege drop by `su --whitelist-environment`, so they are
+never re-parsed as shell. Login-shell variables and shell/dynamic-loader
+startup controls (`BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, every
+`LD_*` name, `GLIBC_TUNABLES`, `GCONV_PATH`, `LOCPATH`) are refused
+rather than forwarded.
+
 ## Related context
 
 - An example **outer-ring deployment** that consumes magpilot as a git

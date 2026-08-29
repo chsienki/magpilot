@@ -84,6 +84,17 @@ public static class AgentEndpoints
                 info = await reg.CreateAsync(req.Cwd, req.UseAgency, ct, name: req.Name, model: req.Model, reasoningEffort: req.ReasoningEffort, disableMcpServers: req.DisableMcpServers);
             }
             catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
+            catch (SessionConfigurationException ex)
+            {
+                return Results.Json(
+                    new
+                    {
+                        error = ex.Message,
+                        sessionId = ex.SessionId,
+                        needsReadopt = ex.SessionId is not null,
+                    },
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
 
             // If the caller provided an initial prompt, fire-and-forget it so the
             // response returns immediately. The caller can subscribe to the SSE
@@ -104,6 +115,9 @@ public static class AgentEndpoints
             QuickPromptRequest req, SessionRegistry reg, AcpSessionManager acp,
             ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
+            if (req.Prompt is null)
+                return Results.BadRequest(new { error = "Prompt is required." });
+
             var log = loggerFactory.CreateLogger("QuickPrompt");
             var timeoutSec = req.TimeoutSeconds ?? 60;
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -115,8 +129,65 @@ public static class AgentEndpoints
             {
                 // Caller pinned a long-lived session; adopt-on-demand if dormant
                 // and route the prompt at it. Never detach in this branch.
-                try { await reg.AdoptAsync(req.SessionId, force: false, cts.Token); }
-                catch (Exception ex) { log.LogDebug(ex, "QuickPrompt: adopt-on-pin returned {Msg}", ex.Message); }
+                try
+                {
+                    await reg.AdoptAsync(req.SessionId, force: false, cts.Token);
+                }
+                catch (SessionConfigurationException ex)
+                {
+                    return Results.Json(
+                        new
+                        {
+                            error = ex.Message,
+                            sessionId = req.SessionId,
+                            needsReadopt = true,
+                        },
+                        statusCode: StatusCodes.Status502BadGateway);
+                }
+                catch (SessionNotLoadableException ex)
+                {
+                    return Results.Json(
+                        new
+                        {
+                            error = ex.Message,
+                            sessionId = ex.SessionId,
+                            notLoadable = true,
+                        },
+                        statusCode: StatusCodes.Status422UnprocessableEntity);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    return Results.Conflict(new
+                    {
+                        error = ex.Message,
+                        sessionId = req.SessionId,
+                        needsReadopt = true,
+                    });
+                }
+                catch (FileNotFoundException ex)
+                {
+                    return Results.NotFound(new { error = ex.Message, sessionId = req.SessionId });
+                }
+                catch (ArgumentException ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message, sessionId = req.SessionId });
+                }
+                catch (OperationCanceledException)
+                {
+                    return Results.Json(
+                        new
+                        {
+                            error = $"timed out after {timeoutSec}s",
+                            sessionId = req.SessionId,
+                        },
+                        statusCode: StatusCodes.Status504GatewayTimeout);
+                }
+                catch (TimeoutException ex)
+                {
+                    return Results.Json(
+                        new { error = ex.Message, sessionId = req.SessionId },
+                        statusCode: StatusCodes.Status504GatewayTimeout);
+                }
                 sid = req.SessionId;
                 createdEphemeral = false;
                 log.LogInformation("QuickPrompt: using pinned session {Sid}", sid);
@@ -134,7 +205,34 @@ public static class AgentEndpoints
             }
             else
             {
-                var info = await reg.CreateAsync(req.Cwd, useAgency: false, cts.Token);
+                SessionInfo info;
+                try
+                {
+                    info = await reg.CreateAsync(req.Cwd, useAgency: false, cts.Token);
+                }
+                catch (SessionConfigurationException ex)
+                {
+                    return Results.Json(
+                        new
+                        {
+                            error = ex.Message,
+                            sessionId = ex.SessionId,
+                            needsReadopt = ex.SessionId is not null,
+                        },
+                        statusCode: StatusCodes.Status502BadGateway);
+                }
+                catch (OperationCanceledException)
+                {
+                    return Results.Json(
+                        new { error = $"timed out after {timeoutSec}s" },
+                        statusCode: StatusCodes.Status504GatewayTimeout);
+                }
+                catch (TimeoutException ex)
+                {
+                    return Results.Json(
+                        new { error = ex.Message },
+                        statusCode: StatusCodes.Status504GatewayTimeout);
+                }
                 sid = info.Id;
                 createdEphemeral = true;
                 log.LogInformation("QuickPrompt: created ephemeral session {Sid}", sid);
@@ -148,19 +246,38 @@ public static class AgentEndpoints
             try
             {
                 // Fire the prompt; PromptAsync resolves when the turn ends.
-                _ = Task.Run(() => acp.PromptAsync(sid, req.Prompt, cts.Token, source: req.Source), cts.Token);
+                _ = await acp.StartPromptAsync(
+                    sid,
+                    req.Prompt,
+                    cts.Token,
+                    cts.Token,
+                    source: req.Source);
 
                 // Drain events until TurnComplete or ErrorEvent.
                 await foreach (var evt in reader.ReadAllAsync(cts.Token))
                 {
                     if (evt is AssistantDelta ad) responseText.Append(ad.Text);
-                    else if (evt is TurnComplete tc) { stopReason = tc.StopReason; break; }
+                    else if (evt is TurnComplete tc)
+                    {
+                        stopReason = tc.StopReason;
+                        if (string.Equals(stopReason, "error", StringComparison.OrdinalIgnoreCase))
+                            errorMessage = "session/prompt failed";
+                        break;
+                    }
                     else if (evt is ErrorEvent ee) { errorMessage = ee.Message; break; }
                 }
             }
             catch (OperationCanceledException)
             {
                 errorMessage ??= $"timed out after {timeoutSec}s";
+            }
+            catch (TimeoutException ex)
+            {
+                errorMessage = ex.Message;
+            }
+            catch (InvalidOperationException ex)
+            {
+                errorMessage = ex.Message;
             }
             finally
             {
@@ -193,6 +310,16 @@ public static class AgentEndpoints
                 return Results.Ok(info);
             }
             catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
+            catch (SessionConfigurationException ex)
+            {
+                return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status502BadGateway);
+            }
+            catch (SessionNotLoadableException ex)
+            {
+                return Results.Json(
+                    new { error = ex.Message, sessionId = ex.SessionId, notLoadable = true },
+                    statusCode: StatusCodes.Status422UnprocessableEntity);
+            }
             catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
             catch (FileNotFoundException ex) { return Results.NotFound(new { error = ex.Message }); }
         });
@@ -283,8 +410,16 @@ public static class AgentEndpoints
                 : Results.Ok(state);
         });
 
-        api.MapPost("/sessions/{id}/messages", (string id, PromptRequest req, AcpSessionManager acp, HostOwnership hostOwn) =>
+        api.MapPost("/sessions/{id}/messages", async (
+            string id,
+            PromptRequest req,
+            AcpSessionManager acp,
+            HostOwnership hostOwn,
+            CancellationToken ct) =>
         {
+            if (req.Text is null)
+                return Results.BadRequest(new { error = "Text is required." });
+
             // Refuse to drive the session if a magpilot launcher
             // currently owns it. The caller (SPA, WhatsApp, cron) is
             // expected to react to 409 by firing /release-request and
@@ -300,8 +435,46 @@ public static class AgentEndpoints
             // SPA learns the turn ended via the SSE TurnComplete event. A
             // `source` (out-of-band injection like the phone assistant relay)
             // tags the prompt for the brain + echoes the question to subscribers.
-            _ = Task.Run(() => acp.PromptAsync(id, req.Text, CancellationToken.None, requester: req.Source, source: req.Source));
-            return Results.Accepted();
+            //
+            // A quarantined session is attached but its live model/reasoning could
+            // not be applied and verified, so prompting it would answer on a
+            // configuration the agent did not promise. Refuse synchronously rather
+            // than accept the turn and fail it asynchronously; re-adopting with the
+            // intended model/reasoning clears the quarantine.
+            if (acp.IsQuarantined(id))
+                return Results.Conflict(new
+                {
+                    error = $"Session {id} is quarantined: its ACP session configuration could not be " +
+                            "verified. Re-adopt it with the intended model/reasoning before prompting.",
+                    needsReadopt = true,
+                });
+
+            if (!acp.IsAttached(id))
+                return Results.Conflict(new
+                {
+                    error = $"Session {id} is not attached to an ACP child. Re-adopt it before prompting.",
+                    needsReadopt = true,
+                });
+
+            try
+            {
+                // Reserve the route under the same session/routing gates used by
+                // detach and shared-child recycle. Returning 202 now means the
+                // prompt is actually in flight; a route cannot disappear between
+                // this check and the background call starting.
+                _ = await acp.StartPromptAsync(
+                    id,
+                    req.Text,
+                    ct,
+                    CancellationToken.None,
+                    requester: req.Source,
+                    source: req.Source);
+                return Results.Accepted();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.Conflict(new { error = ex.Message, needsReadopt = true });
+            }
         });
 
         api.MapPost("/sessions/{id}/interrupt", async (string id, AcpSessionManager acp, HostOwnership hostOwn, CancellationToken ct) =>

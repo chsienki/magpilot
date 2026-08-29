@@ -45,6 +45,35 @@ public sealed class HostOwnershipTests : IDisposable
     }
 
     [Fact]
+    public async Task Session_flavor_survives_a_restart()
+    {
+        var sid = Guid.NewGuid().ToString();
+        var flavor = new HostSessionFlavor(
+            UseAgency: false,
+            Model: "example-model",
+            ReasoningEffort: "low",
+            DisabledMcpServers: ["example-server"]);
+        New().Set(sid, Environment.ProcessId, flavor);
+
+        var reloaded = New();
+        await reloaded.StartAsync(default);
+        try
+        {
+            Assert.True(reloaded.TryGet(sid, out var entry));
+            Assert.NotNull(entry.Flavor);
+            Assert.Equal(flavor.UseAgency, entry.Flavor.UseAgency);
+            Assert.Equal(flavor.Model, entry.Flavor.Model);
+            Assert.Equal(flavor.ReasoningEffort, entry.Flavor.ReasoningEffort);
+            Assert.Equal(flavor.DisabledMcpServers, entry.Flavor.DisabledMcpServers);
+        }
+        finally
+        {
+            await reloaded.StopAsync(default);
+            reloaded.Dispose();
+        }
+    }
+
+    [Fact]
     public async Task Reused_pid_with_mismatched_start_time_is_dropped()
     {
         var sid = Guid.NewGuid().ToString();
@@ -68,6 +97,38 @@ public sealed class HostOwnershipTests : IDisposable
         await reloaded.StartAsync(default);
         try { Assert.False(reloaded.TryGet(sid, out _)); }
         finally { await reloaded.StopAsync(default); reloaded.Dispose(); }
+    }
+
+    [Fact]
+    public async Task Dead_owner_flavor_remains_available_for_release_after_restart()
+    {
+        var sid = Guid.NewGuid().ToString();
+        const int deadPid = 2147483646;
+        var flavor = new HostSessionFlavor(
+            UseAgency: false,
+            Model: "example-model",
+            ReasoningEffort: "none",
+            DisabledMcpServers: ["example-server"]);
+        New().Set(sid, deadPid, flavor);
+
+        var reloaded = New();
+        await reloaded.StartAsync(default);
+        try
+        {
+            Assert.False(reloaded.TryGet(sid, out _));
+            Assert.True(reloaded.TryGetRecorded(sid, out var entry));
+            Assert.Equal(deadPid, entry.HostPid);
+            Assert.NotNull(entry.Flavor);
+            Assert.Equal(flavor.UseAgency, entry.Flavor.UseAgency);
+            Assert.Equal(flavor.Model, entry.Flavor.Model);
+            Assert.Equal(flavor.ReasoningEffort, entry.Flavor.ReasoningEffort);
+            Assert.Equal(flavor.DisabledMcpServers, entry.Flavor.DisabledMcpServers);
+        }
+        finally
+        {
+            await reloaded.StopAsync(default);
+            reloaded.Dispose();
+        }
     }
 
     private void WriteState(string sid, int hostPid, long hostStartTicks) =>

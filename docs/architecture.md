@@ -133,16 +133,55 @@ conversations -- so the "default" flavor uses a single shared child.
 "Agency" flavor on Windows spawns one child per session because agency's
 session multiplexing isn't reliable.
 
-A session create/adopt request may also pin a **model** + **reasoning effort**:
-the agent then spawns a dedicated `copilot --acp --allow-all-tools --model <M>
-[--reasoning-effort <E>]` child for it (pool-keyed by model+effort), isolated
-from the default child. This lets a caller run a session on a faster/cheaper
-model -- e.g. magstronaut's Magnus-Phone router runs on a small minimal-reasoning
-model for a snappy first response, while the main session it relays to keeps its
-own model. Magpilot stays generic: it exposes the option; the satellite's
-bootstrap chooses to use it. The flavor is NOT persisted, so a caller that wants
-it durable (across agent restarts) must re-supply the model on each adopt -- which
-a bootstrap that re-adopts every boot does naturally.
+A session create/adopt request may also pin a **model** + **reasoning effort**.
+These are session-scoped ACP configuration, so sessions with different models
+share the default multiplexed child. Only process-scoped settings such as
+`disableMcpServers` create a distinct
+`copilot --acp --allow-all-tools --disable-mcp-server <S>...` child. After both
+`session/new` and `session/load`, the agent discovers the model and reasoning
+selectors from the returned ACP
+`configOptions` and calls `session/set_config_option` for each requested value.
+It uses advertised option ids and values rather than hard-coding CLI-specific
+identifiers, lists advertised values when a request is unsupported, and fails
+the HTTP request explicitly if an option/value is absent or the ACP response
+does not confirm it. Model is applied before reasoning because changing model
+can change the reasoning choices; if reasoning fails, the prior model is
+restored before the failure is returned. This makes the selected model part of
+the persisted session configuration instead of relying on child startup
+arguments. Magpilot stays generic: it exposes the option; each API consumer
+chooses whether to use it. The agent's process/tool flavor routing is NOT
+persisted, so a caller that wants the same MCP isolation after an agent restart
+must re-supply `disableMcpServers` on each adopt. Already-Owned adopts apply and
+verify model/reasoning against the latest config state; an in-place MCP-scope
+change fails explicitly.
+
+Every attach/configure operation for a session is serialised on a per-session
+gate. Process scope is always checked, while model/reasoning are re-verified
+against the newest config snapshot when the caller explicitly requested them
+or a retained verified expectation exists. ACP `configOptions` is
+optional, so an ordinary unpinned `session/new` or `session/load` with no such
+expectation does not require a snapshot; explicit or retained pins remain
+fail-closed. Two concurrent adopts can therefore neither interleave their
+`set_config_option` calls nor leave the child on a combination nobody asked
+for. Prompts use that same gate, so no turn can run between the model and
+reasoning updates. A session whose later `config_option_update` drifts from any
+explicitly pinned dimension is immediately quarantined again. Shared-child
+recycling also refuses while any co-hosted session is configuring, so
+successful verification cannot race route invalidation. Its global routing
+gate is released after the atomic idle check, client retirement, held-session
+snapshot, and route invalidation -- before process disposal/replacement
+initialization -- so unrelated children can keep accepting work while late
+operations are rejected from the retired generation.
+A session whose
+configuration cannot be applied and verified is **quarantined rather than
+detached**: copilot cannot unload a session, so dropping the route would only
+make the retry's `session/load` answer "already loaded". The route and lock are
+kept, registry ownership is withheld, and the session is refused for prompts
+(409) until a later adopt re-applies and verifies its configuration in place.
+A request rejected before anything is sent -- an unadvertised option or value,
+or a caller cancellation before the first RPC -- leaves the last verified
+configuration live and the session usable; only an actual unverified mutation
+quarantines. An unverified configuration is never served.
 
 The Copilot CLI authenticates with GitHub on its own (device flow, or
 `COPILOT_GITHUB_TOKEN` env). It runs the conversations, calls tools,
@@ -358,18 +397,18 @@ works without a configured token.
 | GET    | `/version/latest`                          | Hub-reported latest release (cached locally by `UpdatePoller`). **No auth.** Drives the launcher's upgrade banner + `--magpilot-update`. |
 | GET    | `/info`                                    | Agent name, OS, available flavors                          |
 | GET    | `/sessions`                                | List sessions on disk (with state, cwd, last-touched)      |
-| POST   | `/sessions`                                | Create a new session. Body `NewSessionRequest { Cwd?, Name?, InitialPrompt?, UseAgency?, Model?, ReasoningEffort? }`. `Model` (+ optional `ReasoningEffort`: none/minimal/low/medium/high/xhigh/max) pins the session to a dedicated `copilot --acp --model <M> --reasoning-effort <E>` child. **400** on an invalid model/effort token. |
+| POST   | `/sessions`                                | Create a new session. Body `NewSessionRequest { Cwd?, Name?, InitialPrompt?, UseAgency?, Model?, ReasoningEffort?, DisableMcpServers? }`. `Model`/`ReasoningEffort` pin advertised ACP session config options while sharing the normal multiplexed child; `DisableMcpServers` is process-scoped and selects an isolated child. **400** on an unsafe token; **502** if the CLI does not advertise/accept/confirm the requested config. |
 | GET    | `/sessions/{id}`                           | Get session metadata                                       |
 | GET    | `/sessions/{id}/state`                     | Rich ownership + activity view (see "Cooperative single-owner handoff" below). Returns `SessionStateInfo`. **NEW (shim Phase 1).** |
-| POST   | `/sessions/{id}/adopt`                     | Bring a dormant session live (re-attach the ACP child). Body `AdoptRequest { Force?, Model?, ReasoningEffort? }` -- pass the same `Model`/`ReasoningEffort` as create to reload onto the pinned model flavor (nothing persists it agent-side). |
+| POST   | `/sessions/{id}/adopt`                     | Bring a dormant session live (re-attach the ACP child). Body `AdoptRequest { Force?, Model?, ReasoningEffort?, DisableMcpServers? }`. Dormant sessions load with the requested process scope and config. Already-Owned sessions apply/verify model/reasoning in place; a requested MCP-scope change fails explicitly because it requires another child. **502** if config cannot be applied exactly; **422** + `notLoadable` when the on-disk session has no `events.jsonl` and is not still resident in a live child. |
 | POST   | `/sessions/{id}/detach`                    | Detach without deleting on-disk state                      |
-| POST   | `/sessions/{id}/messages`                  | Send a prompt; returns 202; SSE delivers the reply. **Returns 409** + `HostOwnedResponse` when a magpilot launcher holds the session (see handoff section). Body `PromptRequest { Text, Source? }` -- an optional `Source` (e.g. `assistant`, `whatsapp`) tags an out-of-band injection: the agent prefixes the prompt with `[via <source>]` for the brain and echoes a `UserDelta { Text, Source }` to subscribers so watchers see the question, not just the answer. |
+| POST   | `/sessions/{id}/messages`                  | Send a prompt; returns 202; SSE delivers the reply. **Returns 409** + `HostOwnedResponse` when a magpilot launcher holds the session (see handoff section), and **409** + `{ needsReadopt: true }` when the session is quarantined because its ACP config could not be verified. Body `PromptRequest { Text, Source? }` -- an optional `Source` (e.g. `assistant`, `whatsapp`) tags an out-of-band injection: the agent prefixes the prompt with `[via <source>]` for the brain and echoes a `UserDelta { Text, Source }` to subscribers so watchers see the question, not just the answer. |
 | GET    | `/sessions/{id}/stream`                    | SSE stream of session events (deltas, tool calls, etc.)    |
 | POST   | `/sessions/{id}/interrupt`                 | Cancel the in-flight turn. **Returns 409** when host-owned. |
 | POST   | `/sessions/{id}/approvals/{approvalId}`    | Resolve an approval prompt. **Returns 409** when host-owned. |
 | POST   | `/sessions/{id}/release-request`           | Broadcast `release_requested` SSE event to subscribers (e.g. a magpilot launcher) so they can begin graceful shutdown. **NEW (shim Phase 1).** |
-| POST   | `/sessions/{id}/acquire-for-host`          | Atomic combined op: agent waits for clean turn boundary (or aborts in-flight if `force=true`), drops its lock, marks the session host-owned. **NEW (shim Phase 1).** |
-| POST   | `/sessions/{id}/release`                   | Wrapper signals it has shut down its child; agent re-adopts. 409 if wrong `hostPid`. **NEW (shim Phase 1).** |
+| POST   | `/sessions/{id}/acquire-for-host`          | Atomic combined op: first drains prompt admission, then waits for a clean turn boundary (or aborts/recycles in-flight if `force=true`), drops its lock, records the session's current flavor (scope + model + reasoning) and marks it host-owned. Refuses to overwrite another live host owner or a different live external holder (force must evict the latter first). **NEW (shim Phase 1).** |
+| POST   | `/sessions/{id}/release`                   | Wrapper signals it has shut down its child; agent recycles the child still holding the session, reloads it from disk on the recorded flavor, and re-applies + verifies its model/reasoning before claiming ownership. 409 if wrong `hostPid`. **NEW (shim Phase 1).** |
 | POST   | `/sessions/{id}/yolo`                      | Flip the per-session yolo (auto-approve) bit. Body `YoloRequest { Enabled }`. Returns refreshed `SessionStateInfo` (the new bit is on `Info.Yolo`). **Returns 403** with `{ hostDisabled: true }` if the agent has `MAGPILOT_YOLO_DISABLED=true`. |
 | POST   | `/quick-prompt`                            | Synchronous "ask + answer" -- handles SSE internally. Body also accepts an optional `Source` (same provenance semantics as `/messages`). |
 
@@ -639,9 +678,11 @@ one re-reads the file before writing).
    2026-05-13.)
 2. `POST /api/sessions/{id}/acquire-for-host { HostPid, Force }`
    atomically waits for any in-flight ACP turn to reach a clean
-   boundary (or aborts it if `force=true`), drops the agent's
-   ownership, and records the host as owner. Returns the refreshed
-   `SessionStateInfo`.
+   boundary. With `force=true` it sends cancel, gives the turn a 2s
+   grace, then recycles the owning ACP child if the turn still has not
+   stopped; an active co-hosted turn vetoes that destructive recycle.
+   Only after the old writer is gone does it drop the agent's ownership
+   and record the host as owner. Returns the refreshed `SessionStateInfo`.
 3. While host-owned, **`POST /messages`, `POST /interrupt`, and
    `POST /approvals/{id}` return `409 Conflict`** with body
    `HostOwnedResponse { Error, NeedsRelease=true, HostPid }`.
@@ -670,7 +711,23 @@ one re-reads the file before writing).
    starts cleanly. Without this cleanup, the new copilot prints a
    "session is already in use by another process" warning and the
    on-disk state ends up in the multi-lock advisory mode documented
-   in the SessionScanner gotchas.
+   in the SessionScanner gotchas. `acquire-for-host` also snapshots the
+   session's effective flavor -- process/tool scope plus the model and
+   reasoning the ACP child last confirmed -- into the (persisted)
+   host-ownership entry while holding the same per-session gate that excludes
+   concurrent configuration, and the agent remembers which child still has
+   the session resident even after the detach.
+7. `release` re-attaches with that recorded flavor rather than the
+   default. Because copilot implements neither `session/close` nor a
+   disk re-read for an already-loaded session, the child still holding
+   the session is recycled first, so the reload genuinely picks up what
+   the terminal wrote; the model/reasoning are then re-applied and
+   verified. The session is only marked agent-owned, and host ownership only
+   cleared, once load plus full configuration verification succeeds. A failure
+   after load retains a quarantined route and the recorded handback flavor so a
+   later release/adopt can retry configuration in place without another
+   `session/load`. An entry written by an older agent (no recorded flavor)
+   simply falls back to the default flavor as before.
 
 **SPA-side reactivity** (the inverse direction -- something else
 takes the session, the SPA notices): the SPA's `Apply()` reacts to
@@ -691,8 +748,8 @@ client, not `Read` (10s): `release` re-adopts via `session/load`, which
 can exceed 10s and would otherwise surface as `Take back failed: 502`
 even against a healthy agent. **Agent-side eviction is gated on the
 `Force` flag** (`ReleaseFromHostAsync`): a graceful release never kills
-the terminal (it declines to adopt if a live foreign holder remains,
-returning `Owner=External`); a forceful release evicts the still-live
+the terminal (it declines to adopt if a live foreign holder remains and
+retains `Owner=Host` for retry); a forceful release evicts the still-live
 foreign copilot (reaping its advisory lock) and then adopts. The agent
 only ever kills a genuinely foreign holder, never its own ACP child,
 and NEVER adopts while a live foreign holder remains (two live drivers
