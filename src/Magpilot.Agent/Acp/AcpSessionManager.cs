@@ -1727,22 +1727,8 @@ public sealed class AcpSessionManager
             catch (Exception ex) { _logger.LogWarning(ex, "session/close failed for {Sid}", sessionId); }
             finally
             {
-                if (sessionsRoot is not null && clientPid is int pid)
-                {
-                    try
-                    {
-                        var lockFile = Path.Combine(sessionsRoot, sessionId, $"inuse.{pid}.lock");
-                        if (File.Exists(lockFile))
-                        {
-                            File.Delete(lockFile);
-                            _logger.LogInformation("Removed lock {File} after detach (pid={Pid})", lockFile, pid);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Failed to remove lock for session {Sid}", sessionId);
-                    }
-                }
+                if (sessionsRoot is not null)
+                    RemoveOurSessionLocks(Path.Combine(sessionsRoot, sessionId), sessionId, clientPid);
                 // A confirmed close releases the child's in-memory session. If the
                 // RPC failed or timed out, retain residency + flavor so handback can
                 // recycle the child before loading the session from disk.
@@ -1755,6 +1741,47 @@ public sealed class AcpSessionManager
         }
         finally { gate.Release(); }
         return flavor;
+    }
+
+    /// <summary>
+    /// Drop the advisory <c>inuse.&lt;pid&gt;.lock</c> files this agent's own ACP
+    /// child left behind for a session it just released.
+    ///
+    /// <para>The lock is written by the copilot process that actually loaded the
+    /// session, which is not always the process the agent spawned: on Linux the
+    /// agent starts the <c>copilot</c> node shim and the platform binary re-execs
+    /// as a GRANDchild, so the file is <c>inuse.&lt;grandchild&gt;.lock</c> while
+    /// <see cref="AcpClient.ProcessId"/> is the shim's. Matching the client pid
+    /// alone therefore deleted nothing and left the session reading as
+    /// <c>Locked</c> -- invisible while every detach ended with the child being
+    /// recycled (the stale-lock reaper then cleaned up once the pid died), but
+    /// load bearing now a confirmed <c>session/close</c> keeps that child
+    /// alive.</para>
+    ///
+    /// <para>Anything inside this agent's own process tree is ours to reap; a
+    /// foreign live holder (a launcher's interactive copilot, a bare
+    /// <c>copilot --resume</c>) is never touched, and a dead holder is left to
+    /// the reaper.</para>
+    /// </summary>
+    private void RemoveOurSessionLocks(string sessionDir, string sessionId, int? clientPid)
+    {
+        foreach (var holder in Magpilot.Agent.Sessions.SessionLocks.Inspect(sessionDir))
+        {
+            var ours = holder.Pid == clientPid
+                || Magpilot.Agent.Sessions.ProcessAncestry.IsSelfOrDescendantOf(
+                    holder.Pid, Environment.ProcessId);
+            if (!ours) continue;
+            try
+            {
+                File.Delete(holder.Path);
+                _logger.LogInformation(
+                    "Removed lock {File} after detach (pid={Pid})", holder.Path, holder.Pid);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to remove lock for session {Sid}", sessionId);
+            }
+        }
     }
 
     /// <summary>

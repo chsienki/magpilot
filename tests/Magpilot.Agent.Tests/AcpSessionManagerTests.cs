@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text.Json.Nodes;
 using Magpilot.Agent.Acp;
 using Magpilot.Agent.Sessions;
@@ -1393,6 +1394,111 @@ public sealed class AcpSessionManagerTests : IDisposable
         Assert.NotNull(flavor);
         Assert.True(disposed);
         Assert.False(manager.IsResident(sid));
+    }
+
+    [Fact]
+    public async Task Detach_removes_a_lock_written_by_the_childs_own_grandchild()
+    {
+        // Regression: on Linux the agent spawns the `copilot` node shim and the
+        // platform binary re-execs beneath it, so the session lock carries the
+        // GRANDchild's pid, not AcpClient.ProcessId. Matching only the client pid
+        // deleted nothing and the session kept reading as Locked for as long as
+        // that (still-alive) child lived.
+        const string sid = "detach-grandchild-lock";
+
+        var grandchild = StartLivingChildProcess();
+        var grandchildPid = grandchild.Id;
+        Assert.NotEqual(Environment.ProcessId, grandchildPid);
+        try
+        {
+            var client = new FakeAcpClient(
+                Environment.ProcessId,
+                (method, _, _, _) =>
+                {
+                    if (method == "session/new")
+                    {
+                        // The lock the REAL copilot writes: owned by a descendant
+                        // of this process, never by the pid we spawned.
+                        CreateSessionLock(sid, grandchildPid);
+                        return Task.FromResult<JsonNode?>(new JsonObject { ["sessionId"] = sid });
+                    }
+
+                    Assert.Equal("session/close", method);
+                    return Task.FromResult<JsonNode?>(new JsonObject());
+                });
+            var manager = NewManager(() => client);
+
+            await manager.NewSessionAsync(_root, AcpFlavor.Default, CancellationToken.None);
+            Assert.True(File.Exists(LockPath(sid, grandchildPid)));
+
+            await manager.CloseAsync(sid, _root, CancellationToken.None);
+
+            Assert.False(
+                File.Exists(LockPath(sid, grandchildPid)),
+                "a confirmed close must reap the lock our own process tree wrote");
+            Assert.False(manager.IsResident(sid));
+        }
+        finally
+        {
+            try { grandchild.Kill(entireProcessTree: true); } catch { /* already gone */ }
+            grandchild.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task Detach_leaves_a_foreign_live_lock_alone()
+    {
+        // The other half of the ownership rule: a live holder outside this
+        // agent's process tree (a launcher's interactive copilot) is not ours to
+        // reap, so cooperative handoff must not silently steal it.
+        const string sid = "detach-foreign-lock";
+        var foreignPid = ForeignLivePid();
+
+        var client = new FakeAcpClient(
+            Environment.ProcessId,
+            (method, _, _, _) =>
+            {
+                if (method == "session/new")
+                {
+                    CreateSessionLock(sid, foreignPid);
+                    return Task.FromResult<JsonNode?>(new JsonObject { ["sessionId"] = sid });
+                }
+
+                Assert.Equal("session/close", method);
+                return Task.FromResult<JsonNode?>(new JsonObject());
+            });
+        var manager = NewManager(() => client);
+
+        await manager.NewSessionAsync(_root, AcpFlavor.Default, CancellationToken.None);
+        await manager.CloseAsync(sid, _root, CancellationToken.None);
+
+        Assert.True(
+            File.Exists(LockPath(sid, foreignPid)),
+            "a live lock outside our process tree belongs to someone else");
+    }
+
+    // A real, short-lived child of the test process: the only faithful stand-in
+    // for copilot's re-exec'd binary, whose pid we cannot invent.
+    private static Process StartLivingChildProcess()
+    {
+        var psi = OperatingSystem.IsWindows()
+            ? new ProcessStartInfo("cmd.exe", "/c pause")
+            : new ProcessStartInfo("/bin/sh", "-c \"sleep 30\"");
+        psi.RedirectStandardInput = true;
+        psi.UseShellExecute = false;
+        psi.CreateNoWindow = true;
+        var proc = Process.Start(psi)!;
+        Assert.False(proc.HasExited);
+        return proc;
+    }
+
+    // A live pid that is definitely NOT under this process: pid 1 on Unix, and
+    // on Windows the session manager that owns every logon.
+    private static int ForeignLivePid()
+    {
+        if (!OperatingSystem.IsWindows()) return 1;
+        var smss = Process.GetProcessesByName("smss").FirstOrDefault();
+        return smss?.Id ?? 4; // 4 == System, always alive.
     }
 
     [Fact]

@@ -20,8 +20,10 @@ namespace Magpilot.Agent.Sessions;
 /// <c>Magpilot.Agent</c>) and from bare terminal <c>copilot</c> sessions
 /// (parented under a shell).</para>
 ///
-/// Windows-only (agency + the installed launcher are Windows); returns false
-/// elsewhere. A sibling <c>ProcessTree</c> in Magpilot.Host serves the
+/// Windows-only for the launcher-ancestor question (agency + the installed
+/// launcher are Windows); returns false elsewhere.
+/// <see cref="IsSelfOrDescendantOf"/> is cross-platform. A sibling
+/// <c>ProcessTree</c> in Magpilot.Host serves the
 /// launcher's own agency-descendant check.
 /// </summary>
 internal static class ProcessAncestry
@@ -53,6 +55,78 @@ internal static class ProcessAncestry
             cur = node.Parent;
         }
         return false;
+    }
+
+    /// <summary>
+    /// True when <paramref name="pid"/> IS <paramref name="ancestorPid"/> or sits
+    /// anywhere beneath it in the process tree. Unlike
+    /// <see cref="TryFindAncestorPidByName"/> this is cross-platform (Windows
+    /// Toolhelp snapshot, Linux <c>/proc</c>) because the agent's own copilot
+    /// children are reached through a node shim on Linux, so the process that
+    /// writes a session lock is a GRANDchild of the agent rather than the pid the
+    /// agent spawned. Returns false where no parent lookup is available, so a
+    /// caller that reaps on a true answer stays fail-safe.
+    /// </summary>
+    public static bool IsSelfOrDescendantOf(int pid, int ancestorPid)
+    {
+        if (pid <= 0 || ancestorPid <= 0) return false;
+        if (pid == ancestorPid) return true;
+
+        var parents = ParentMap();
+        if (parents is null) return false;
+
+        // Visited-set guards against a cyclic snapshot (pids can be recycled
+        // between the reads that build the map).
+        var seen = new HashSet<int>();
+        var cur = pid;
+        while (seen.Add(cur) && parents.TryGetValue(cur, out var parent) && parent > 0)
+        {
+            if (parent == ancestorPid) return true;
+            cur = parent;
+        }
+        return false;
+    }
+
+    private static Dictionary<int, int>? ParentMap()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var map = new Dictionary<int, int>();
+            foreach (var (pid, node) in Snapshot()) map[pid] = node.Parent;
+            return map;
+        }
+        return OperatingSystem.IsLinux() ? LinuxParentMap() : null;
+    }
+
+    private static Dictionary<int, int> LinuxParentMap()
+    {
+        var map = new Dictionary<int, int>();
+        try
+        {
+            foreach (var dir in Directory.EnumerateDirectories("/proc"))
+                if (int.TryParse(Path.GetFileName(dir), out var pid)
+                    && TryReadLinuxParent(pid, out var parent))
+                    map[pid] = parent;
+        }
+        catch { /* /proc unreadable: fall back to "not ours" */ }
+        return map;
+    }
+
+    private static bool TryReadLinuxParent(int pid, out int parentPid)
+    {
+        parentPid = 0;
+        try
+        {
+            // /proc/<pid>/stat field 2 is the comm, parenthesised and free to
+            // contain spaces and ')', so the fields after it are only reliably
+            // found from the LAST ')'. ppid is the second field after that.
+            var stat = File.ReadAllText($"/proc/{pid}/stat");
+            var commEnd = stat.LastIndexOf(')');
+            if (commEnd < 0 || commEnd + 2 >= stat.Length) return false;
+            var fields = stat[(commEnd + 2)..].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            return fields.Length > 1 && int.TryParse(fields[1], out parentPid);
+        }
+        catch { return false; }
     }
 
     private static bool NameMatches(string exeName, string wanted)
