@@ -377,12 +377,17 @@ public sealed class SessionRegistry
         finally { gate.Release(); }
     }
 
+    public bool IsResident(string sessionId) => _acp.IsResident(sessionId);
+
     private async Task<AcpFlavor?> DetachCoreAsync(string sessionId, CancellationToken ct, bool force)
     {
         if (!_acp.IsAttached(sessionId))
         {
+            var retainedFlavor = force && _acp.IsResident(sessionId)
+                ? await _acp.ForceDetachAsync(sessionId, ct)
+                : _acp.EffectiveFlavor(sessionId);
             _owned.TryRemove(sessionId, out _);
-            return null;
+            return retainedFlavor;
         }
 
         var flavor = force

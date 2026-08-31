@@ -1117,11 +1117,11 @@ public sealed class AcpSessionManager
 
     /// <summary>
     /// Clear a stale resume by recycling the multiplexing ACP child that holds
-    /// <paramref name="sessionId"/>: kill it (the only way copilot releases a
-    /// loaded session -- <c>session/close</c> is unimplemented and
-    /// <c>session/load</c> won't re-read disk for an already-loaded session),
-    /// spawn a fresh child, and reload the session from disk so current state is
-    /// served. Every OTHER session the child multiplexed is dropped from our
+    /// <paramref name="sessionId"/>: replace the child generation and reload the
+    /// session from disk so current state is served. This is the reliable fallback
+    /// when a close is unavailable or indeterminate and <c>session/load</c> would
+    /// otherwise reuse an already-loaded snapshot. Every OTHER session the child
+    /// multiplexed is dropped from our
     /// routing and its stale lock reaped, so it reads as Dormant and reloads from
     /// disk on next adopt. Refuses (<see cref="RecycleOutcome.Busy"/>) while any
     /// co-hosted session has a turn in flight, so a live turn is never killed.
@@ -1676,9 +1676,7 @@ public sealed class AcpSessionManager
 
     /// <summary>
     /// Detach a session from this agent's ACP child. Calls
-    /// <c>session/close</c> over JSON-RPC (which copilot --acp
-    /// actually rejects with -32601 today, but we issue it anyway in
-    /// case a future copilot adds support) and then sweeps the
+    /// <c>session/close</c> over JSON-RPC and then sweeps the
     /// session directory to remove the agent's
     /// <c>inuse.&lt;acp-pid&gt;.lock</c> file. The lock removal is
     /// the load-bearing step for cooperative handoff: even though
@@ -1716,11 +1714,15 @@ public sealed class AcpSessionManager
             _sessionClient.TryGetValue(sessionId, out client);
             flavor = EffectiveFlavor(sessionId);
             var clientPid = client?.ProcessId;
+            var closeSucceeded = false;
 
             try
             {
                 if (client is not null)
+                {
                     await client.CallAsync("session/close", new JsonObject { ["sessionId"] = sessionId }, ct, timeoutSec: 30);
+                    closeSucceeded = true;
+                }
             }
             catch (Exception ex) { _logger.LogWarning(ex, "session/close failed for {Sid}", sessionId); }
             finally
@@ -1741,13 +1743,14 @@ public sealed class AcpSessionManager
                         _logger.LogWarning(ex, "Failed to remove lock for session {Sid}", sessionId);
                     }
                 }
-                // Keep the residency + flavor record: copilot rejects session/close, so
-                // the child still has this session in memory and would answer a later
-                // session/load with "already loaded" (or serve the frozen pre-detach
-                // snapshot). Remembering who holds it -- and on which flavor -- is what
-                // lets the handback path recycle that child and genuinely re-read disk.
-                // Both are dropped when that child is eventually recycled.
-                RemoveSessionRouting(sessionId, removeFlavor: false, removeConfig: true, removeResidency: false);
+                // A confirmed close releases the child's in-memory session. If the
+                // RPC failed or timed out, retain residency + flavor so handback can
+                // recycle the child before loading the session from disk.
+                RemoveSessionRouting(
+                    sessionId,
+                    removeFlavor: false,
+                    removeConfig: true,
+                    removeResidency: closeSucceeded);
             }
         }
         finally { gate.Release(); }
@@ -1762,7 +1765,8 @@ public sealed class AcpSessionManager
     /// </summary>
     public async Task<AcpFlavor?> ForceDetachAsync(string sessionId, CancellationToken ct)
     {
-        if (!_sessionClient.TryGetValue(sessionId, out var client))
+        if (!_sessionClient.TryGetValue(sessionId, out var client) &&
+            !_resident.TryGetValue(sessionId, out client))
             return EffectiveFlavor(sessionId);
 
         var flavor = EffectiveFlavor(sessionId) ?? AcpFlavor.Default;

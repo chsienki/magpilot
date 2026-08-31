@@ -324,9 +324,17 @@ public static class AgentEndpoints
             catch (FileNotFoundException ex) { return Results.NotFound(new { error = ex.Message }); }
         });
 
-        api.MapPost("/sessions/{id}/detach", async (string id, SessionRegistry reg, CancellationToken ct) =>
+        api.MapPost("/sessions/{id}/detach", async (string id, bool? force, SessionRegistry reg, CancellationToken ct) =>
         {
-            await reg.DetachAsync(id, ct);
+            await reg.DetachAsync(id, ct, force ?? false);
+            if (force != true && reg.IsResident(id))
+            {
+                return Results.Conflict(new
+                {
+                    error = "session/close was not confirmed; retry with force=true to recycle the owning child.",
+                    needsForce = true,
+                });
+            }
             return Results.NoContent();
         });
 

@@ -1264,23 +1264,19 @@ them by breaking them.
   walks `PATH` ourselves and passes the fully-qualified path to
   `ProcessStartInfo`. Don't undo this; it's the same binary, just
   qualified.
-- **`session/close` is NOT implemented** in the current copilot
-  CLI's `--acp` mode -- it returns `-32601 "Method not found"`. So
-  there is no clean way to evict a session from the multiplex
-  child's in-memory map. `session/load` on an already-loaded
-  session returns `"already loaded"` rather than re-reading disk.
+- **`session/close` support is version-dependent.** Copilot CLI 1.0.82
+  advertises and implements it; a successful close evicts the session from the
+  child's in-memory map. Older builds returned `-32601 "Method not found"`,
+  and an interrupted close can still leave residency indeterminate.
+  `session/load` on a session that remains loaded returns `"already loaded"`
+  rather than re-reading disk.
   Practical consequence for `SessionRegistry.ReleaseFromHostAsync`:
-  if the host has appended new events to `events.jsonl` while it
-  drove the session, the agent's multiplex copy is **stale** -- it
-  still holds whatever it knew at acquire-for-host time. So a stale
-  resume cannot be fixed in place. That is why the handback re-attaches
-  through `AcpSessionManager.ReloadFromDiskAsync`, which recycles the
-  child that still has the session resident BEFORE calling
-  `session/load` -- a plain load would answer "already loaded" and keep
-  serving the pre-detach snapshot. `AcpSessionManager.RecycleForStaleAsync`
-  addresses it by killing the multiplexing child (the only way copilot
-  releases a loaded session) and respawning a fresh one that reloads
-  current state from disk; opt-in via `MAGPILOT_STALE_RECYCLE`, gated by
+  if close fails after the host has appended new events to `events.jsonl`, the
+  agent's multiplex copy is **stale**. Handback re-attaches through
+  `AcpSessionManager.ReloadFromDiskAsync`, which recycles a child only when the
+  session remains resident before calling `session/load`.
+  `AcpSessionManager.RecycleForStaleAsync` replaces the child generation and
+  reloads current state from disk; opt-in via `MAGPILOT_STALE_RECYCLE`, gated by
   an in-flight guard so a live turn is never killed. **Empirical (do NOT
   relearn):** two live `copilot --acp` children holding one session hang
   the second's `session/prompt`, but a `copilot --resume` *terminal*
@@ -1909,8 +1905,7 @@ so a forceful take-over succeeds regardless of launcher version
 
 **Agent-side stale-lock cleanup** (`Magpilot.Agent/Acp/AcpSessionManager.cs`):
 `CloseAsync` takes a `string? sessionsRoot` parameter and, after
-the `session/close` call (which copilot --acp rejects with -32601
-today), deletes the agent's
+the `session/close` call, deletes the agent's
 `<sessionsRoot>/<sid>/inuse.<acp-pid>.lock` file. The on-disk lock
 is what OTHER copilot processes (a launcher's interactive child,
 terminal-driven `copilot --resume`, etc.) consult to decide
@@ -1919,10 +1914,10 @@ launcher startup against a session the agent loaded printed
 "session is already in use by another process" and the new copilot
 piled its own lock on top (multi-lock state). `AcpClient.ProcessId`
 exposes `_proc?.Id` so the cleanup code knows which lock filename
-to target. `CloseAsync` drops the route but deliberately KEEPS the
-session's **residency** record (which child still has it in memory) and
-its flavor, because copilot cannot actually unload it. That record is
-what lets the handback path recycle the right child. Every recycle
+to target. A confirmed close drops the session's residency record while
+retaining its flavor for later handoff. A failed or indeterminate close keeps
+both residency and flavor so the handback path can recycle the right child.
+Every recycle
 (`RecycleForStaleAsync`, the turn watchdog, and the handback) goes
 through one helper that invalidates routes AND residency for every
 session the dying child held -- routed or merely resident -- and reaps

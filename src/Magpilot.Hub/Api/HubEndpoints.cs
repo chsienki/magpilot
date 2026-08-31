@@ -307,10 +307,12 @@ public static class HubEndpoints
                 }));
 
         api.MapPost("/agents/{name}/sessions/{id}/detach",
-            (string name, string id, AgentHttpClient http, AgentRegistry reg, CancellationToken ct) =>
+            (string name, string id, bool? force, AgentHttpClient http, AgentRegistry reg, CancellationToken ct) =>
                 Proxy(name, reg, async () =>
                 {
-                    var resp = await http.ClientFor(name).PostAsync($"api/sessions/{id}/detach", null, ct);
+                    var suffix = force == true ? "?force=true" : "";
+                    var resp = await http.ClientFor(name, AgentClientKind.Action)
+                        .PostAsync($"api/sessions/{id}/detach{suffix}", null, ct);
                     return await Forward(resp);
                 }));
 

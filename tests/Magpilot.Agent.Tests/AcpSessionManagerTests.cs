@@ -1345,6 +1345,57 @@ public sealed class AcpSessionManagerTests : IDisposable
     }
 
     [Fact]
+    public async Task Force_detach_recycles_a_session_left_resident_by_failed_close()
+    {
+        const string sid = "force-detach-resident";
+        var disposed = false;
+
+        var oldClient = new FakeAcpClient(
+            Environment.ProcessId,
+            (method, _, _, _) =>
+            {
+                if (method == "session/new")
+                {
+                    CreateSessionLock(sid, Environment.ProcessId);
+                    return Task.FromResult<JsonNode?>(new JsonObject
+                    {
+                        ["sessionId"] = sid,
+                    });
+                }
+
+                Assert.Equal("session/close", method);
+                return Task.FromException<JsonNode?>(
+                    new InvalidOperationException("session/close is unavailable"));
+            },
+            () =>
+            {
+                disposed = true;
+                return ValueTask.CompletedTask;
+            });
+        var freshClient = new FakeAcpClient(
+            Environment.ProcessId,
+            (_, _, _, _) => throw new Xunit.Sdk.XunitException("Fresh child should stay idle"));
+        var manager = NewManager(
+            () => oldClient,
+            async (_, _) =>
+            {
+                await oldClient.DisposeAsync();
+                return freshClient;
+            });
+
+        await manager.NewSessionAsync(_root, AcpFlavor.Default, CancellationToken.None);
+        await manager.CloseAsync(sid, _root, CancellationToken.None);
+        Assert.False(manager.IsAttached(sid));
+        Assert.True(manager.IsResident(sid));
+
+        var flavor = await manager.ForceDetachAsync(sid, CancellationToken.None);
+
+        Assert.NotNull(flavor);
+        Assert.True(disposed);
+        Assert.False(manager.IsResident(sid));
+    }
+
+    [Fact]
     public async Task Owned_config_rejects_a_tuple_that_drifts_after_the_set_is_confirmed()
     {
         const string sid = "owned-drift";
@@ -1656,7 +1707,8 @@ public sealed class AcpSessionManagerTests : IDisposable
                     CreateSessionLock(sid, Environment.ProcessId);
                     return Task.FromResult(Snapshot("old", "high"));
                 case "session/close":
-                    return Task.FromResult<JsonNode?>(new JsonObject());
+                    return Task.FromException<JsonNode?>(
+                        new InvalidOperationException("session/close is unavailable"));
                 default:
                     Interlocked.Increment(ref oldSets);
                     return Task.FromResult(@params!["configId"]!.GetValue<string>() == "model"
@@ -1780,6 +1832,7 @@ public sealed class AcpSessionManagerTests : IDisposable
         Assert.Equal("fast", detachedFlavor.Model);
         Assert.Equal("none", detachedFlavor.ReasoningEffort);
         Assert.False(manager.IsAttached(sid));
+        Assert.False(manager.IsResident(sid));
         Assert.Equal("fast", manager.EffectiveFlavor(sid)!.Model);
 
         await registry.AcquireForHostAsync(
@@ -1972,7 +2025,8 @@ public sealed class AcpSessionManagerTests : IDisposable
                     Interlocked.Increment(ref oldSets);
                     return Task.FromResult(Snapshot("fast"));
                 case "session/close":
-                    return Task.FromResult<JsonNode?>(new JsonObject());
+                    return Task.FromException<JsonNode?>(
+                        new InvalidOperationException("session/close is unavailable"));
                 default:
                     throw new Xunit.Sdk.XunitException($"Unexpected RPC {method}");
             }
@@ -2059,6 +2113,9 @@ public sealed class AcpSessionManagerTests : IDisposable
                 case "session/new":
                     CreateSessionLock(sid, Environment.ProcessId);
                     return Task.FromResult(Snapshot());
+                case "session/load":
+                    CreateSessionLock(sid, Environment.ProcessId);
+                    return Task.FromResult(Snapshot());
                 case "session/set_config_option":
                     currentModel = @params!["value"]!.GetValue<string>();
                     return Task.FromResult(Snapshot());
@@ -2102,6 +2159,7 @@ public sealed class AcpSessionManagerTests : IDisposable
             deadHostPid,
             force: false,
             CancellationToken.None);
+        File.WriteAllText(Path.Combine(_root, sid, "events.jsonl"), "{}\n");
 
         var adopted = await registry.AdoptAsync(
             sid,
