@@ -706,9 +706,10 @@ one re-reads the file before writing).
    SPA tab that took the session over sees the live "terminal took
    over" banner instead of only finding out on its next 409 / refresh.
 6. The agent's `DetachAsync` (called from `acquire-for-host` step 2
-   above) deletes the agent's `inuse.<acp-pid>.lock` from the
-   session directory so the wrapper's interactive copilot child
-   starts cleanly. Without this cleanup, the new copilot prints a
+   above) deletes session locks written by its own ACP process tree. On Linux
+   the platform-binary grandchild, not the spawned Node shim, writes
+   `inuse.<pid>.lock`; descendant matching removes that lock while preserving
+   live foreign holders. Without this cleanup, the new copilot prints a
    "session is already in use by another process" warning and the
    on-disk state ends up in the multi-lock advisory mode documented
    in the SessionScanner gotchas. `acquire-for-host` also snapshots the

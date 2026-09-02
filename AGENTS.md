@@ -1906,17 +1906,14 @@ so a forceful take-over succeeds regardless of launcher version
 **Agent-side stale-lock cleanup** (`Magpilot.Agent/Acp/AcpSessionManager.cs`):
 `CloseAsync` takes a `string? sessionsRoot` parameter and, after
 the `session/close` call, deletes the agent's
-`<sessionsRoot>/<sid>/inuse.<acp-pid>.lock` file. The on-disk lock
-is what OTHER copilot processes (a launcher's interactive child,
-terminal-driven `copilot --resume`, etc.) consult to decide
-whether the session is "in use". Without this cleanup, every
-launcher startup against a session the agent loaded printed
-"session is already in use by another process" and the new copilot
-piled its own lock on top (multi-lock state). `AcpClient.ProcessId`
-exposes `_proc?.Id` so the cleanup code knows which lock filename
-to target. A confirmed close drops the session's residency record while
-retaining its flavor for later handoff. A failed or indeterminate close keeps
-both residency and flavor so the handback path can recycle the right child.
+`<sessionsRoot>/<sid>/inuse.<pid>.lock` files written by its own process
+tree. On Linux the spawned PID is the Node shim, while the platform-binary
+grandchild writes the lock; matching only `AcpClient.ProcessId` leaves a live
+lock after a confirmed close. `ProcessAncestry.IsSelfOrDescendantOf` handles
+both shapes and never removes a live foreign holder's lock. A confirmed close
+drops the session's residency record while retaining its flavor for later
+handoff. A failed or indeterminate close keeps both residency and flavor so the
+handback path can recycle the right child.
 Every recycle
 (`RecycleForStaleAsync`, the turn watchdog, and the handback) goes
 through one helper that invalidates routes AND residency for every
@@ -2306,7 +2303,7 @@ Open items:
 - ~~2026-06-08: cleanup status bar at top to be less confusing~~ -> shipped: extracted `Magpilot.UI/Components/HostName.razor` as the single source of truth for "host name + status indicator". AppBar variant is an outlined transparent pill whose border + dot/spinner/CloudOff colour tracks the live SSE stream state (Connected/Reconnecting/Offline); always visible. Drawer-header variant is plain inline. The redundant cloud icon + the host pill that hid behind a breakpoint are gone.
 - ~~2026-06-08: powershell one-liner that downloads, verifies and runs the installer as an easy bootstrap~~ -> shipped: `scripts/install.ps1` -- fetches version.json from /releases/latest/download/, downloads the installer + .sha256, verifies, runs with UAC elevation. README has the canonical `irm ... | iex` one-liner; instructions have the parameter-passing scriptblock form for `-Silent` / `-Version` / `-Repo` / `-DryRun`. Documented draft + private-repo failure modes alongside the hub-autoupdate ones.
 - ~~2026-06-08: drop 'past' sessions list, replace with 'resume previous' button that opens a filterable/searchable list~~ -> shipped: Past sessions moved out of the always-on session list into an inline "Resume previous" panel toggled by a History icon in the sessions-pane header. Searchable text filter + relative-time labels; renders inline like the new-chat panel (not as a floating dialog) so the UX matches the rest of the SPA.
-- ~~2026-05-26: magpilot: handle disconnects better~~ -> shipped: SPA reacts to `release_requested` (stops stream, shows takeover banner, take-back button); on-open `/state` probe detects pre-existing host ownership; launcher fires release-request before acquire (both spawn paths) so the SPA reacts BEFORE the 409; agent's `CloseAsync` removes its `inuse.<acp-pid>.lock` so launcher's interactive copilot starts cleanly. See "Cooperative single-owner handoff" above.
+- ~~2026-05-26: magpilot: handle disconnects better~~ -> shipped: SPA reacts to `release_requested` (stops stream, shows takeover banner, take-back button); on-open `/state` probe detects pre-existing host ownership; launcher fires release-request before acquire (both spawn paths) so the SPA reacts BEFORE the 409; agent `CloseAsync` removes locks written by its ACP process tree so the launcher's interactive copilot starts cleanly. See "Cooperative single-owner handoff" above.
 - ~~2026-05-26: magpilot: session switching is broken~~ -> shipped: stale-response race fix at every `ListSessionsAsync` call site (capture agent before await, drop response if Agent changed mid-flight); session-switch instant-clear + indeterminate progress bar; on-failure error UI in the drawer instead of misleading "no sessions yet".
 - 2026-06-08: combine heartbeat indicator with a 're-sync' option to recover when UI drifts from agent
 - 2026-06-08: more obvious / interactive 'agent is thinking' indicator beyond the stop button and queue notification
