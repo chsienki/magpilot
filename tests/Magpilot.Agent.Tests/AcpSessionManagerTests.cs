@@ -2424,6 +2424,55 @@ public sealed class AcpSessionManagerTests : IDisposable
     }
 
     [Fact]
+    public async Task Owned_adopt_with_only_model_change_retains_existing_process_scope()
+    {
+        const string sid = "owned-partial-process-scope";
+        var client = new FakeAcpClient(Environment.ProcessId, (method, @params, _, _) =>
+        {
+            if (method == "session/new")
+            {
+                CreateSessionLock(sid, Environment.ProcessId);
+                return Task.FromResult<JsonNode?>(ConfigState(
+                    sid,
+                    SelectOption("model", "Model", "model", "old", ("old", "Old"), ("new", "New"))));
+            }
+
+            Assert.Equal("session/set_config_option", method);
+            Assert.Equal("new", @params?["value"]?.GetValue<string>());
+            return Task.FromResult<JsonNode?>(ConfigState(
+                sid,
+                SelectOption("model", "Model", "model", "new", ("old", "Old"), ("new", "New"))));
+        });
+        var manager = NewManager(() => client);
+        var registry = NewRegistry(manager);
+
+        await registry.CreateAsync(
+            _root,
+            useAgency: false,
+            CancellationToken.None,
+            availableTools: ["phone-only"],
+            disableBuiltinMcps: true,
+            noCustomInstructions: true,
+            copilotHome: Path.Combine(_root, "copilot-phone"));
+
+        var result = await registry.AdoptAsync(
+            sid,
+            force: false,
+            CancellationToken.None,
+            model: "new");
+
+        Assert.Equal(SessionState.Owned, result.State);
+        Assert.False(manager.IsQuarantined(sid));
+        var flavor = manager.EffectiveFlavor(sid);
+        Assert.NotNull(flavor);
+        Assert.Equal("new", flavor.Model);
+        Assert.Equal(["phone-only"], flavor.AvailableTools);
+        Assert.True(flavor.DisableBuiltinMcps);
+        Assert.True(flavor.NoCustomInstructions);
+        Assert.Equal(Path.Combine(_root, "copilot-phone"), flavor.CopilotHome);
+    }
+
+    [Fact]
     public async Task Owned_adopt_rejects_process_scope_change()
     {
         const string sid = "owned-scope";
@@ -2456,6 +2505,50 @@ public sealed class AcpSessionManagerTests : IDisposable
                 disableMcpServers: ["other-scope"]));
 
         Assert.Contains("requires a different ACP child", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("agent")]
+    [InlineData("available-tools")]
+    [InlineData("disable-builtin-mcps")]
+    [InlineData("no-custom-instructions")]
+    [InlineData("copilot-home")]
+    public async Task Owned_adopt_rejects_each_new_process_scope_change(string setting)
+    {
+        const string sid = "owned-new-process-scope";
+        var client = new FakeAcpClient(Environment.ProcessId, (method, _, _, _) =>
+        {
+            Assert.Equal("session/new", method);
+            CreateSessionLock(sid, Environment.ProcessId);
+            return Task.FromResult<JsonNode?>(new JsonObject { ["sessionId"] = sid });
+        });
+        var manager = NewManager(() => client);
+        var registry = NewRegistry(manager);
+        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
+
+        Task<SessionInfo> AdoptAsync() => setting switch
+        {
+            "agent" => registry.AdoptAsync(
+                sid, force: false, CancellationToken.None, agent: "magnus-phone"),
+            "available-tools" => registry.AdoptAsync(
+                sid, force: false, CancellationToken.None, availableTools: ["magnus-phone"]),
+            "disable-builtin-mcps" => registry.AdoptAsync(
+                sid, force: false, CancellationToken.None, disableBuiltinMcps: true),
+            "no-custom-instructions" => registry.AdoptAsync(
+                sid, force: false, CancellationToken.None, noCustomInstructions: true),
+            "copilot-home" => registry.AdoptAsync(
+                sid,
+                force: false,
+                CancellationToken.None,
+                copilotHome: Path.Combine(_root, "copilot-phone")),
+            _ => throw new Xunit.Sdk.XunitException($"Unknown process scope setting {setting}"),
+        };
+
+        var ex = await Assert.ThrowsAsync<SessionConfigurationException>(() =>
+            AdoptAsync());
+
+        Assert.Contains("requires a different ACP child", ex.Message);
+        Assert.False(manager.IsQuarantined(sid));
     }
 
     [Fact]
@@ -2525,7 +2618,11 @@ public sealed class AcpSessionManagerTests : IDisposable
             useAgency: false,
             model: "fast",
             reasoningEffort: "none",
-            disableMcpServers: ["phone-only"]);
+            disableMcpServers: ["phone-only"],
+            availableTools: ["magnus-phone"],
+            disableBuiltinMcps: true,
+            noCustomInstructions: true,
+            copilotHome: Path.Combine(_root, "copilot-phone"));
 
         await manager.NewSessionAsync(_root, requested, CancellationToken.None);
         var outcome = await manager.RecycleForStaleAsync(sid, _ => _root, CancellationToken.None);
@@ -2534,6 +2631,10 @@ public sealed class AcpSessionManagerTests : IDisposable
         Assert.NotNull(recycledFlavor);
         Assert.Equal(requested.Key, recycledFlavor.Key);
         Assert.Equal(["phone-only"], recycledFlavor.DisabledMcpServers);
+        Assert.Equal(["magnus-phone"], recycledFlavor.AvailableTools);
+        Assert.True(recycledFlavor.DisableBuiltinMcps);
+        Assert.True(recycledFlavor.NoCustomInstructions);
+        Assert.Equal(Path.Combine(_root, "copilot-phone"), recycledFlavor.CopilotHome);
         Assert.Equal("fast", recycledFlavor.Model);
         Assert.Equal("none", recycledFlavor.ReasoningEffort);
         Assert.Equal(2, oldSetCount);

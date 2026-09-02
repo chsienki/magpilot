@@ -17,6 +17,7 @@ internal static class AcpSessionConfig
     /// </summary>
     internal readonly record struct AppliedConfig(
         JsonNode? State,
+        string? Agent,
         string? Model,
         string? ReasoningEffort);
 
@@ -41,6 +42,7 @@ internal static class AcpSessionConfig
     internal static async Task<AppliedConfig> ApplyRequestedAsync(
         JsonNode? sessionResult,
         string sessionId,
+        string? agent,
         string? model,
         string? reasoningEffort,
         Func<string, JsonObject, CancellationToken, Task<JsonNode?>> callAsync,
@@ -49,34 +51,71 @@ internal static class AcpSessionConfig
     {
         progress ??= new ApplyProgress();
         var configState = sessionResult;
-        string? priorModelValue = null;
+        var appliedOptions = new List<AppliedOption>();
+        string? appliedAgent = null;
         string? appliedModel = null;
         string? appliedReasoning = null;
 
-        if (!string.IsNullOrWhiteSpace(model))
+        try
         {
-            priorModelValue = GetCurrentSelectValue(
-                configState,
-                category: "model",
-                description: "model",
-                requestedValue: model,
-                IsModelOption);
-            (configState, appliedModel) = await SetSelectOptionAsync(
-                configState,
-                sessionId,
-                requestedValue: model,
-                category: "model",
-                description: "model",
-                IsModelOption,
-                callAsync,
-                progress,
-                ct);
-        }
-
-        if (!string.IsNullOrWhiteSpace(reasoningEffort))
-        {
-            try
+            if (!string.IsNullOrWhiteSpace(agent))
             {
+                var priorAgentValue = GetCurrentSelectValue(
+                    configState,
+                    category: "_agent",
+                    description: "agent",
+                    requestedValue: agent,
+                    IsAgentOption);
+                (configState, appliedAgent) = await SetSelectOptionAsync(
+                    configState,
+                    sessionId,
+                    requestedValue: agent,
+                    category: "_agent",
+                    description: "agent",
+                    IsAgentOption,
+                    callAsync,
+                    progress,
+                    ct);
+                appliedOptions.Add(new AppliedOption(
+                    priorAgentValue,
+                    "_agent",
+                    "agent rollback",
+                    IsAgentOption));
+            }
+
+            if (!string.IsNullOrWhiteSpace(model))
+            {
+                var priorModelValue = GetCurrentSelectValue(
+                    configState,
+                    category: "model",
+                    description: "model",
+                    requestedValue: model,
+                    IsModelOption);
+                (configState, appliedModel) = await SetSelectOptionAsync(
+                    configState,
+                    sessionId,
+                    requestedValue: model,
+                    category: "model",
+                    description: "model",
+                    IsModelOption,
+                    callAsync,
+                    progress,
+                    ct);
+                appliedOptions.Add(new AppliedOption(
+                    priorModelValue,
+                    "model",
+                    "model rollback",
+                    IsModelOption));
+            }
+
+            if (!string.IsNullOrWhiteSpace(reasoningEffort))
+            {
+                var priorReasoningValue = GetCurrentSelectValue(
+                    configState,
+                    category: "thought_level",
+                    description: "reasoning effort",
+                    requestedValue: reasoningEffort,
+                    IsReasoningOption);
                 (configState, appliedReasoning) = await SetSelectOptionAsync(
                     configState,
                     sessionId,
@@ -87,55 +126,78 @@ internal static class AcpSessionConfig
                     callAsync,
                     progress,
                     ct);
+                appliedOptions.Add(new AppliedOption(
+                    priorReasoningValue,
+                    "thought_level",
+                    "reasoning effort rollback",
+                    IsReasoningOption));
             }
-            catch (Exception applyException) when (appliedModel is not null && priorModelValue is not null)
+        }
+        catch (Exception applyException) when (appliedOptions.Count > 0)
+        {
+            // A later setting failed after one or more earlier settings were
+            // confirmed. Restore those confirmed settings in reverse order. If
+            // the failed setting itself was in flight, successful earlier
+            // rollbacks do not prove its state, so preserve the indeterminate
+            // flag after cleanup.
+            var failedSettingIndeterminate = progress.Indeterminate;
+            var rollbackFailures = new List<Exception>();
+            foreach (var applied in appliedOptions.AsEnumerable().Reverse())
             {
-                // Whether the reasoning attempt already mutated the child. A
-                // successful model rollback proves nothing about the reasoning
-                // option, so this must survive the rollback's own confirmation.
-                var reasoningIndeterminate = progress.Indeterminate;
+                if (applied.PriorValue is null)
+                {
+                    rollbackFailures.Add(new SessionConfigurationException(
+                        $"ACP did not report a prior value for {applied.Description}; it cannot be restored."));
+                    continue;
+                }
+
                 try
                 {
-                    // The caller's cancellation token may be what interrupted the
-                    // reasoning update. Rollback is compensating cleanup, so give
-                    // it an independent token and restore the exact prior value id
-                    // before surfacing the original failure.
                     (configState, _) = await SetSelectOptionAsync(
                         configState,
                         sessionId,
-                        requestedValue: priorModelValue,
-                        category: "model",
-                        description: "model rollback",
-                        IsModelOption,
+                        requestedValue: applied.PriorValue,
+                        category: applied.Category,
+                        description: applied.Description,
+                        applied.MatchesOption,
                         callAsync,
                         progress,
                         CancellationToken.None);
                 }
                 catch (Exception rollbackException)
                 {
-                    // Rollback failed too: the child may now be on the requested
-                    // model, the prior one, or neither. Say so explicitly -- the
-                    // manager quarantines the session on this signal rather than
-                    // keep serving a route whose config it cannot vouch for.
-                    throw new SessionConfigurationException(
-                        $"{applyException.Message} Restoring prior model value '{priorModelValue}' also failed: " +
-                        $"{rollbackException.Message} Root cause: {rollbackException.GetBaseException().Message}",
-                        new AggregateException(applyException, rollbackException))
-                    {
-                        LeavesSessionIndeterminate = true,
-                    };
+                    rollbackFailures.Add(rollbackException);
                 }
-
-                if (reasoningIndeterminate)
-                    progress.EnterMutation();
-
-                ExceptionDispatchInfo.Capture(applyException).Throw();
-                throw;
             }
+
+            if (failedSettingIndeterminate)
+                progress.EnterMutation();
+
+            if (rollbackFailures.Count > 0)
+            {
+                var rootCauses = string.Join(
+                    "; ",
+                    rollbackFailures.Select(static failure => failure.GetBaseException().Message));
+                throw new SessionConfigurationException(
+                    $"{applyException.Message} Restoring prior configuration also failed: {rootCauses}",
+                    new AggregateException([applyException, .. rollbackFailures]))
+                {
+                    LeavesSessionIndeterminate = true,
+                };
+            }
+
+            ExceptionDispatchInfo.Capture(applyException).Throw();
+            throw;
         }
 
-        return new AppliedConfig(configState, appliedModel, appliedReasoning);
+        return new AppliedConfig(configState, appliedAgent, appliedModel, appliedReasoning);
     }
+
+    private sealed record AppliedOption(
+        string? PriorValue,
+        string Category,
+        string Description,
+        Func<JsonObject, bool> MatchesOption);
 
     private static async Task<(JsonNode? State, string Applied)> SetSelectOptionAsync(
         JsonNode? configState,
@@ -261,13 +323,23 @@ internal static class AcpSessionConfig
                ?.Value;
     }
 
-    internal static (string? Model, string? ReasoningEffort) ReadCurrentValues(JsonArray options)
+    internal static (string? Agent, string? Model, string? ReasoningEffort) ReadCurrentValues(JsonArray options)
     {
+        var agent = FindOption(options, "_agent", IsAgentOption);
         var model = FindOption(options, "model", IsModelOption);
         var reasoning = FindOption(options, "thought_level", IsReasoningOption);
         return (
+            CurrentStringValue(agent),
             CurrentStringValue(model),
             CurrentStringValue(reasoning));
+    }
+
+    private static bool IsAgentOption(JsonObject option)
+    {
+        if (string.Equals(option["category"]?.GetValue<string>(), "_agent", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return IsNamed(option, "agent");
     }
 
     private static bool IsModelOption(JsonObject option)

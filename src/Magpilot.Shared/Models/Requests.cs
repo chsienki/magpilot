@@ -7,9 +7,23 @@ public sealed record NewSessionRequest(
     bool UseAgency = false,
     string? Model = null,
     string? ReasoningEffort = null,
-    string[]? DisableMcpServers = null);
+    string[]? DisableMcpServers = null,
+    string? Agent = null,
+    string[]? AvailableTools = null,
+    bool DisableBuiltinMcps = false,
+    bool NoCustomInstructions = false,
+    string? CopilotHome = null);
 public sealed record PromptRequest(string Text, string? Source = null);
-public sealed record AdoptRequest(bool Force = false, string? Model = null, string? ReasoningEffort = null, string[]? DisableMcpServers = null);
+public sealed record AdoptRequest(
+    bool Force = false,
+    string? Model = null,
+    string? ReasoningEffort = null,
+    string[]? DisableMcpServers = null,
+    string? Agent = null,
+    string[]? AvailableTools = null,
+    bool? DisableBuiltinMcps = null,
+    bool? NoCustomInstructions = null,
+    string? CopilotHome = null);
 public sealed record ApprovalResponse(string OptionId);
 
 public sealed record SessionDetails(SessionInfo Info, string? AcpSessionId);

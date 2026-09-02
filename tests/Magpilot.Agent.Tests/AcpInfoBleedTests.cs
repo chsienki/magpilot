@@ -20,6 +20,7 @@ public sealed class AcpInfoBleedTests
     // Negative: real prose that happens to open with "Info: " -> keep.
     [InlineData("Info: the build succeeded and all tests pass.", false)]
     [InlineData("Info: 3 files changed.", false)]
+    [InlineData("Info: Disabled tools can be re-enabled in settings.", false)]
     [InlineData("Information about the deployment follows.", false)]
     // Negative: not an Info notice at all -> keep.
     [InlineData(@"Here is C:\Users\me\notes.txt for reference.", false)]
@@ -29,5 +30,18 @@ public sealed class AcpInfoBleedTests
     public void IsInfoPathBleed_matches_only_bare_path_notices(string text, bool expected)
     {
         Assert.Equal(expected, AcpSessionManager.IsInfoPathBleed(text));
+    }
+
+    [Theory]
+    [InlineData("Info: Disabled tools:\n- shell\n- web", true, true)]
+    [InlineData("Info: Disabled tools:\n- shell\n- web", false, false)]
+    [InlineData("Info: Disabled tools:\n- shell\nThis is expected.", true, false)]
+    [InlineData("Info: Disabled tools:", true, false)]
+    public void IsInfoPathBleed_matches_disabled_tool_catalog_only_for_filtered_sessions(
+        string text,
+        bool toolFiltered,
+        bool expected)
+    {
+        Assert.Equal(expected, AcpSessionManager.IsInfoPathBleed(text, toolFiltered));
     }
 }

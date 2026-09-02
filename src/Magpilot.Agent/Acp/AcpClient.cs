@@ -16,6 +16,7 @@ public class AcpClient : IAsyncDisposable
     private readonly ILogger<AcpClient> _logger;
     private readonly string _exe;
     private readonly string _args;
+    private readonly string? _copilotHome;
     private Process? _proc;
     private AcpBinaryWatch? _binaryWatch;
     private int _nextId;
@@ -40,11 +41,16 @@ public class AcpClient : IAsyncDisposable
     /// </summary>
     public virtual bool PublishesOrderedConfigState => true;
 
-    public AcpClient(ILogger<AcpClient> logger, string? exe = null, string? args = null)
+    public AcpClient(
+        ILogger<AcpClient> logger,
+        string? exe = null,
+        string? args = null,
+        string? copilotHome = null)
     {
         _logger = logger;
         _exe = exe ?? (OperatingSystem.IsWindows() ? "copilot.exe" : "copilot");
         _args = args ?? "--acp --allow-all-tools";
+        _copilotHome = copilotHome;
     }
 
     /// <summary>
@@ -117,6 +123,8 @@ public class AcpClient : IAsyncDisposable
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
         };
+        if (_copilotHome is not null)
+            psi.Environment["COPILOT_HOME"] = _copilotHome;
         _proc = Process.Start(psi) ?? throw new InvalidOperationException($"Failed to start {resolvedExe}");
         _logger.LogInformation("Started {Exe} {Args} pid={Pid}", resolvedExe, fullArgs, _proc.Id);
 
@@ -258,7 +266,8 @@ public class AcpClient : IAsyncDisposable
                 ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             if (string.IsNullOrEmpty(home)) return "";
 
-            var settingsPath = Path.Combine(home, ".copilot", "settings.json");
+            var copilotHome = _copilotHome ?? Path.Combine(home, ".copilot");
+            var settingsPath = Path.Combine(copilotHome, "settings.json");
             if (!File.Exists(settingsPath)) return "";
 
             using var fs = File.OpenRead(settingsPath);
@@ -280,7 +289,7 @@ public class AcpClient : IAsyncDisposable
             // gets skills loaded.
             var args = new StringBuilder();
             int loaded = 0;
-            var pluginsRoot = Path.Combine(home, ".copilot", "installed-plugins");
+            var pluginsRoot = Path.Combine(copilotHome, "installed-plugins");
 
             if (root["enabledPlugins"] is JsonObject enabled)
             {

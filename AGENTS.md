@@ -1244,6 +1244,12 @@ them by breaking them.
   * `"sessionUpdate":"tool_call_update"` with `"status":"in_progress"|"completed"|"failed"` -- subsequent updates.
   
   `AcpSessionManager.HandleUpdate` maps `tool_call -> ToolCallStart`, `tool_call_update -> ToolCallEnd` (for completed/failed) or `ToolCallProgress` (otherwise). **This silently broke for ~weeks before 2026-05-18**: the original switch was wired to the suffix variants, every tool_call was discarded as unknown, the SPA's live stream had no block delimiter for built-in tools (bash, etc.) so multi-step assistant responses concatenated into one bubble, and the WhatsApp sidecar's per-response flush trigger fired only on `thought_delta` (which doesn't always interleave). Fixed by mapping the correct kinds; if you ever see "live stream is one bubble but refresh shows N bubbles", suspect this regressed.
+- **Copilot 1.0.82 ACP leaks internal `Info:` notices as assistant chunks.**
+  `--available-tools` emits the complete disabled-tool catalog before the first
+  real model event, and file operations can emit `Info: <absolute-path>`.
+  `AcpSessionManager.IsInfoPathBleed` drops those exact standalone shapes before
+  SSE publication so browser/phone clients never render or speak them. Keep the
+  matcher narrow: ordinary prose beginning `Info:` must survive.
 - ACP streams thoughts and assistant content as **separate** updates:
   `agent_message_chunk` -> `MessageDelta`, `agent_thought_chunk` ->
   `ThoughtDelta`. Both are mapped in `HandleUpdate`. The UI renders
@@ -1318,8 +1324,8 @@ them by breaking them.
   `MAGPILOT_TURN_STALL_SECONDS` (default 90) is treated as wedged -- the
   watchdog fails the turn (publishes an `ErrorEvent` so the caller stops
   spinning) and recycles the child holding it (respawn + `session/load`
-  on the session's **own flavor**, preserving process-scoped MCP exclusions
-  and reapplying that session's stored model/reasoning config). A live-but-slow
+  on the session's **own flavor**, preserving every process-scoped setting
+  and reapplying that session's stored agent/model/reasoning config). A live-but-slow
   turn keeps emitting updates, which resets its clock, and a turn
   **waiting on a tool it invoked** (a long shell command, a slow MCP
   call -- silent between the tool's pending and completed updates) is
@@ -1395,52 +1401,63 @@ anything talking to the agent's HTTP API) can route into a long-lived
 conversation instead of spawning a throwaway one.
 
 - `POST /api/sessions` accepts an optional `name` to create one.
-- **`POST /api/sessions` + `/adopt` accept optional `model`,
-  `reasoningEffort`, and `disableMcpServers`.** Model/reasoning are
-  session-scoped ACP config, so differently pinned sessions still share the
-  default multiplexed child. Only process-scoped settings such as
-  `disableMcpServers` create a distinct
-  `copilot --acp --allow-all-tools --disable-mcp-server <S>...` flavor/child;
-  a scoped child never shares a process with the full-tool one.
+- **`POST /api/sessions` + `/adopt` accept generic session/process
+  configuration.** `model`, `reasoningEffort`, and `agent` are selected through
+  advertised ACP `configOptions`; the custom-agent name is also passed at
+  process startup because Copilot 1.0.82 advertises the `_agent` option only
+  when launched with `--agent <name>`. Process-scoped
+  `disableMcpServers`, `availableTools`, `disableBuiltinMcps`,
+  `noCustomInstructions`, and `copilotHome` create a distinct
+  `AcpFlavor`/child. A restricted child never shares a process with the
+  full-tool default. `availableTools` emits one
+  `--available-tools=<selector>` per validated selector;
+  `disableBuiltinMcps` and `noCustomInstructions` map to their same-named CLI
+  flags; `copilotHome` is supplied through the child's `COPILOT_HOME`
+  environment variable and is included in flavor identity without being put on
+  the command line.
   `AcpFlavor.ForModel`/`Resolve` validate the input and split session config
   from process scope. After BOTH `session/new` and `session/load`,
-  `AcpSessionConfig` discovers the semantic model/reasoning selectors from the
-  response's `configOptions`, maps the requested display name or value to the
-  advertised value id, calls `session/set_config_option`, and verifies the
-  returned complete config state. Never hard-code a CLI config id: ACP
-  categories are preferred, with id/name heuristics only because categories are
-  optional. A requested   option/value that is missing, rejected, or not confirmed must fail explicitly
+  `AcpSessionConfig` discovers the semantic agent/model/reasoning selectors
+  from the response's `configOptions`, maps the requested display name or value
+  to the advertised value id, calls `session/set_config_option`, and verifies
+  the returned complete config state. Agent is applied before model and
+  reasoning because selecting a custom agent can change both its model and tool
+  policy. Never hard-code a CLI config id: ACP categories are preferred, with
+  id/name heuristics only because categories are optional. A requested
+  option/value that is missing, rejected, or not confirmed must fail explicitly
   (agent HTTP 502), never fall back silently; unsupported-value errors list the
-  values the CLI actually advertised. Apply model first and use that RPC's
-  returned `configOptions` to discover reasoning, because changing models can
-  change the available reasoning levels. If reasoning then fails, restore the
-  prior model before surfacing the error (and report rollback failure too).
+  values the CLI actually advertised. Each later option uses the prior RPC's
+  returned `configOptions`. If a later setting fails, restore every earlier
+  confirmed setting in reverse order before surfacing the error (and report
+  rollback failure too).
   Inputs use generic safe-token validation -- invalid -> 400; advertised
   `configOptions`, not a model-specific hard-coded list, decide support.
-  `disableMcpServers`
-  drops named MCP servers from that flavor's tool surface: fewer tool schemas
-  re-sent every turn (faster first token) and a smaller blast radius for a fast
-  model that would otherwise fumble tools it should delegate. ACP persists the
-  selected session config, but the agent's process/tool flavor routing is NOT
-  persisted: a caller wanting the same MCP isolation after restart must
-  re-supply it on every adopt (a bootstrap that re-adopts each boot does).
+  Tool restrictions mean fewer schemas are re-sent every turn (faster first
+  token) and a smaller blast radius for a fast model that should delegate.
+  `AcpClient.BuildPluginDirArgs` reads settings/plugins from the selected
+  `copilotHome`, not always `~/.copilot`, so an isolated config root stays
+  isolated. ACP persists selected session config, but process flavor routing is
+  not in Copilot's session files: Magpilot persists the complete flavor during
+  host handoff, and API clients must re-supply it when adopting an unrelated
+  dormant session.
   Adopting an already-Owned session actively applies/verifies requested
-  model/reasoning against the latest config state captured from setup/set
+  agent/model/reasoning against the latest config state captured from setup/set
   responses and `config_option_update` notifications. Every attach/configure
   operation for one session is serialised on a per-session gate, so two
   concurrent adopts cannot interleave their `set_config_option` calls or their
   rollbacks. Before the session is released for traffic the WHOLE tuple
-  (process scope + model + reasoning) is re-verified against the newest
-  snapshot when model/reasoning was explicitly requested or an existing
+  (process scope + agent + model + reasoning) is re-verified against the newest
+  snapshot when session config was explicitly requested or an existing
   verified expectation is being retained -- a set response that confirmed a
   value is not enough, because a later notification can move it again. ACP
   `configOptions` itself is optional, so an ordinary unpinned new/load with no
-  requested or retained model/reasoning can become usable without a snapshot;
+  requested or retained agent/model/reasoning can become usable without a snapshot;
   pinned dimensions remain fail-closed. Explicitly pinned dimensions remain
   expected after success (using ACP's canonical value ids), and a later
   mismatching notification re-quarantines the route. Shared-child recycle
-  refuses while any co-hosted session is configuring. An in-place request that changes
-  `disableMcpServers` fails explicitly because that requires another child.
+  refuses while any co-hosted session is configuring. An in-place request that
+  changes any process-scoped setting fails explicitly because it requires
+  another child.
 - **A session whose configuration cannot be applied AND verified is
   quarantined, not detached.** Copilot cannot unload a session, so removing our
   routing would strand it: the retry's `session/load` would only be told it is
@@ -1764,8 +1781,8 @@ Wire contract this code base now exposes:
   different live external holder requires explicit force and confirmed
   eviction. Then `DetachAsync` + `HostOwnership.Set`. `DetachAsync` captures the
   session's effective flavor under the same per-session gate that excludes
-  concurrent configuration (process/tool scope + the model and reasoning the
-  child last confirmed) and stores it in the ownership entry as
+  concurrent configuration (process/tool/config-home scope plus the agent,
+  model, and reasoning the child last confirmed) and stores it in the ownership entry as
   `HostSessionFlavor`, which is persisted with the rest of the map so it
   survives an agent restart. Returns refreshed state.
 - **`POST /api/sessions/{id}/release`** -- body `ReleaseFromHostBody
@@ -1774,7 +1791,7 @@ Wire contract this code base now exposes:
   first; then re-attaches via
   `ReloadFromDiskAsync` -- recycle the child still holding the session,
   then `session/load` on a fresh one, then re-apply and verify the
-  recorded model/reasoning -- UNLESS a live foreign holder still remains,
+  recorded agent/model/reasoning -- UNLESS a live foreign holder still remains,
   in which case it declines to adopt and retains host ownership for a later
   retry. The
   session comes back on the flavor it left on, not on the default; a

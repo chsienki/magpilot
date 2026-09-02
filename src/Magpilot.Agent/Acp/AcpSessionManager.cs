@@ -301,9 +301,9 @@ public sealed class AcpSessionManager
 
     /// <summary>
     /// The flavor a session is currently attached under -- process scope plus the
-    /// model/reasoning last confirmed by the child. Used by the handoff path so a
-    /// session handed to a launcher and later handed back comes back on the same
-    /// child flavor and the same session configuration.
+    /// agent/model/reasoning last confirmed by the child. Used by the handoff path
+    /// so a session handed to a launcher and later handed back comes back on the
+    /// same child flavor and the same session configuration.
     /// </summary>
     public AcpFlavor? EffectiveFlavor(string sessionId)
     {
@@ -368,7 +368,13 @@ public sealed class AcpSessionManager
             // never advertises a partially configured session.
             await AttachRoutingAsync(sid, client, flavor);
             Quarantine(sid, "its configuration has not been applied yet.");
-            await ConfigureAttachedAsync(sid, client, res, flavor, ct);
+            await ConfigureAttachedAsync(
+                sid,
+                client,
+                res,
+                flavor,
+                processScopeSpecified: true,
+                ct: ct);
             onAttached?.Invoke(sid);
         }
         finally { gate.Release(); }
@@ -453,7 +459,13 @@ public sealed class AcpSessionManager
 
         await AttachRoutingAsync(sessionId, client, flavor);
         Quarantine(sessionId, "its configuration has not been applied yet.");
-        await ConfigureAttachedAsync(sessionId, client, res, flavor, ct);
+        await ConfigureAttachedAsync(
+            sessionId,
+            client,
+            res,
+            flavor,
+            processScopeSpecified: true,
+            ct: ct);
         onAttached?.Invoke(sessionId);
     }
 
@@ -535,18 +547,18 @@ public sealed class AcpSessionManager
                     $"Session {sessionId} is marked Owned but has no ACP routing state.");
             }
 
-            if (processScopeSpecified && !SameMcpScope(
-                    loadedFlavor.DisabledMcpServers,
-                    requested.DisabledMcpServers))
+            if (processScopeSpecified && !SameProcessScope(loadedFlavor, requested))
             {
                 throw new SessionConfigurationException(
-                    $"Session {sessionId} is already loaded with disabled MCP servers " +
-                    $"{FormatMcpScope(loadedFlavor.DisabledMcpServers)}; requested " +
-                    $"{FormatMcpScope(requested.DisabledMcpServers)} requires a different ACP child. " +
-                    "Detach and reload the session to change process-scoped MCP settings.");
+                    $"Session {sessionId} is already loaded with process scope " +
+                    $"{FormatProcessScope(loadedFlavor)}; requested {FormatProcessScope(requested)} " +
+                    "requires a different ACP child. Detach and reload the session to change " +
+                    "process-scoped settings.");
             }
 
-            if (requested.Model is null && requested.ReasoningEffort is null)
+            if (requested.Agent is null &&
+                requested.Model is null &&
+                requested.ReasoningEffort is null)
             {
                 // Nothing to re-verify. A quarantined session stays quarantined:
                 // we cannot vouch for its live configuration without being told
@@ -555,7 +567,7 @@ public sealed class AcpSessionManager
                     return;
                 throw new SessionConfigurationException(
                     $"Session {sessionId} is quarantined because its configuration could not be verified; " +
-                    "re-adopt it supplying the intended model/reasoning so it can be re-applied and confirmed.");
+                    "re-adopt it supplying the intended agent/model/reasoning so it can be re-applied and confirmed.");
             }
 
             if (!_sessionConfig.TryGetValue(sessionId, out var config))
@@ -566,14 +578,20 @@ public sealed class AcpSessionManager
             }
 
             var state = new JsonObject { ["configOptions"] = config.Options.DeepClone() };
-            await ConfigureAttachedAsync(sessionId, client, state, requested, ct);
+            await ConfigureAttachedAsync(
+                sessionId,
+                client,
+                state,
+                requested,
+                processScopeSpecified,
+                ct);
         }
         finally { gate.Release(); }
     }
 
     /// <summary>
-    /// Apply the requested model/reasoning to an already-routed session and clear
-    /// its quarantine only once the resulting configuration verifies end to end.
+    /// Apply the requested agent/model/reasoning to an already-routed session and
+    /// clear its quarantine only once the resulting configuration verifies end to end.
     /// Any failure leaves the route in place -- the child still holds the session
     /// -- but keeps it quarantined when the child's state is (or may be)
     /// something other than what we would advertise. A caller cancellation that
@@ -585,12 +603,19 @@ public sealed class AcpSessionManager
         AcpClient client,
         JsonNode? configState,
         AcpFlavor requested,
+        bool processScopeSpecified,
         CancellationToken ct)
     {
         await BeginConfigurationAsync(sessionId, client);
         try
         {
-            await ConfigureAttachedCoreAsync(sessionId, client, configState, requested, ct);
+            await ConfigureAttachedCoreAsync(
+                sessionId,
+                client,
+                configState,
+                requested,
+                processScopeSpecified,
+                ct);
         }
         finally
         {
@@ -603,14 +628,18 @@ public sealed class AcpSessionManager
         AcpClient client,
         JsonNode? configState,
         AcpFlavor requested,
+        bool processScopeSpecified,
         CancellationToken ct)
     {
         var progress = new AcpSessionConfig.ApplyProgress();
         var wasQuarantined = IsQuarantined(sessionId);
         _expectedConfig.TryGetValue(sessionId, out var previousExpected);
-        if (requested.Model is not null || requested.ReasoningEffort is not null)
+        if (requested.Agent is not null ||
+            requested.Model is not null ||
+            requested.ReasoningEffort is not null)
         {
             _expectedConfig[sessionId] = new ExpectedSessionConfig(
+                requested.Agent ?? previousExpected?.Agent,
                 requested.Model ?? previousExpected?.Model,
                 requested.ReasoningEffort ?? previousExpected?.ReasoningEffort);
             Quarantine(sessionId, "a configuration update is in progress.");
@@ -628,6 +657,7 @@ public sealed class AcpSessionManager
             var applied = await AcpSessionConfig.ApplyRequestedAsync(
                 applyState,
                 sessionId,
+                requested.Agent,
                 requested.Model,
                 requested.ReasoningEffort,
                 async (method, @params, token) =>
@@ -639,7 +669,12 @@ public sealed class AcpSessionManager
                 },
                 ct,
                 progress);
-            VerifyAttachedConfiguration(sessionId, requested, applied, previousExpected);
+            VerifyAttachedConfiguration(
+                sessionId,
+                requested,
+                applied,
+                previousExpected,
+                processScopeSpecified);
         }
         catch (Exception ex)
         {
@@ -668,6 +703,7 @@ public sealed class AcpSessionManager
                 {
                     if (previousExpected is null ||
                         (_sessionConfig.TryGetValue(sessionId, out var current) &&
+                         MatchesExpected(previousExpected.Agent, current.Agent) &&
                          MatchesExpected(previousExpected.Model, current.Model) &&
                          MatchesExpected(previousExpected.ReasoningEffort, current.ReasoningEffort)))
                     {
@@ -677,7 +713,7 @@ public sealed class AcpSessionManager
                     {
                         Quarantine(
                             sessionId,
-                            "the verified model/reasoning tuple changed while the rejected update was being checked.");
+                            "the verified agent/model/reasoning tuple changed while the rejected update was being checked.");
                     }
                 }
             }
@@ -721,8 +757,8 @@ public sealed class AcpSessionManager
     }
 
     /// <summary>
-    /// Re-check the whole tuple -- process scope, model, reasoning -- against the
-    /// newest snapshot we hold, which includes any config_option_update that
+    /// Re-check the whole tuple -- process scope, agent, model, reasoning --
+    /// against the newest snapshot we hold, which includes any config_option_update that
     /// arrived while the set calls were in flight. A set response that confirmed
     /// a value is not enough on its own: a later notification can move it again,
     /// and serving a session on a configuration the caller did not ask for is the
@@ -732,7 +768,8 @@ public sealed class AcpSessionManager
         string sessionId,
         AcpFlavor requested,
         AcpSessionConfig.AppliedConfig applied,
-        ExpectedSessionConfig? previousExpected)
+        ExpectedSessionConfig? previousExpected,
+        bool processScopeSpecified)
     {
         lock (_configStateLock)
         {
@@ -746,24 +783,25 @@ public sealed class AcpSessionManager
                 };
             }
 
-            if (!SameMcpScope(processFlavor.DisabledMcpServers, requested.DisabledMcpServers) &&
-                requested.DisabledMcpServers is { Count: > 0 })
+            if (processScopeSpecified && !SameProcessScope(processFlavor, requested))
             {
                 throw new SessionConfigurationException(
-                    $"Session {sessionId} ended up on disabled MCP servers " +
-                    $"{FormatMcpScope(processFlavor.DisabledMcpServers)} rather than the requested " +
-                    $"{FormatMcpScope(requested.DisabledMcpServers)}.")
+                    $"Session {sessionId} ended up on process scope {FormatProcessScope(processFlavor)} " +
+                    $"rather than the requested {FormatProcessScope(requested)}.")
                 {
                     LeavesSessionIndeterminate = true,
                 };
             }
 
             var canonicalExpected = new ExpectedSessionConfig(
+                requested.Agent is null ? previousExpected?.Agent : applied.Agent,
                 requested.Model is null ? previousExpected?.Model : applied.Model,
                 requested.ReasoningEffort is null ? previousExpected?.ReasoningEffort : applied.ReasoningEffort);
             var requiresConfigState =
+                requested.Agent is not null ||
                 requested.Model is not null ||
                 requested.ReasoningEffort is not null ||
+                canonicalExpected.Agent is not null ||
                 canonicalExpected.Model is not null ||
                 canonicalExpected.ReasoningEffort is not null;
             if (requiresConfigState)
@@ -778,10 +816,13 @@ public sealed class AcpSessionManager
                     };
                 }
 
+                VerifyValue(sessionId, "agent", canonicalExpected.Agent, effective.Agent);
                 VerifyValue(sessionId, "model", canonicalExpected.Model, effective.Model);
                 VerifyValue(sessionId, "reasoning effort", canonicalExpected.ReasoningEffort, effective.ReasoningEffort);
             }
-            if (canonicalExpected.Model is null && canonicalExpected.ReasoningEffort is null)
+            if (canonicalExpected.Agent is null &&
+                canonicalExpected.Model is null &&
+                canonicalExpected.ReasoningEffort is null)
                 _expectedConfig.TryRemove(sessionId, out _);
             else
                 _expectedConfig[sessionId] = canonicalExpected;
@@ -896,20 +937,22 @@ public sealed class AcpSessionManager
             return null;
         var snapshot = (JsonArray)options.DeepClone();
         var current = AcpSessionConfig.ReadCurrentValues(snapshot);
-        return new SessionConfigSnapshot(snapshot, current.Model, current.ReasoningEffort);
+        return new SessionConfigSnapshot(snapshot, current.Agent, current.Model, current.ReasoningEffort);
     }
 
     private void StoreConfigSnapshotLocked(string sessionId, SessionConfigSnapshot snapshot)
     {
         _sessionConfig[sessionId] = snapshot;
         if (_expectedConfig.TryGetValue(sessionId, out var expected) &&
-            (!MatchesExpected(expected.Model, snapshot.Model) ||
+            (!MatchesExpected(expected.Agent, snapshot.Agent) ||
+             !MatchesExpected(expected.Model, snapshot.Model) ||
              !MatchesExpected(expected.ReasoningEffort, snapshot.ReasoningEffort)))
         {
             Quarantine(
                 sessionId,
-                $"the child reported model/reasoning '{snapshot.Model ?? "(none)"}'/" +
-                $"'{snapshot.ReasoningEffort ?? "(none)"}' instead of the verified requested tuple.");
+                $"the child reported agent/model/reasoning '{snapshot.Agent ?? "(none)"}'/" +
+                $"'{snapshot.Model ?? "(none)"}'/'{snapshot.ReasoningEffort ?? "(none)"}' " +
+                "instead of the verified requested tuple.");
         }
     }
 
@@ -942,10 +985,12 @@ public sealed class AcpSessionManager
 
     private sealed record SessionConfigSnapshot(
         JsonArray Options,
+        string? Agent,
         string? Model,
         string? ReasoningEffort);
 
     private sealed record ExpectedSessionConfig(
+        string? Agent,
         string? Model,
         string? ReasoningEffort);
 
@@ -1105,15 +1150,30 @@ public sealed class AcpSessionManager
             ct) is not null;
     }
 
-    private static string FormatMcpScope(IReadOnlyList<string>? servers) =>
-        servers is null || servers.Count == 0
-            ? "(none)"
-            : $"[{string.Join(", ", servers)}]";
+    private static string FormatProcessScope(AcpFlavor flavor) =>
+        $"disabledMcp=[{string.Join(", ", flavor.DisabledMcpServers ?? [])}], " +
+        $"agent={flavor.Agent ?? "(none)"}, " +
+        $"availableTools=[{string.Join(", ", flavor.AvailableTools ?? [])}], " +
+        $"disableBuiltinMcps={flavor.DisableBuiltinMcps}, " +
+        $"noCustomInstructions={flavor.NoCustomInstructions}, " +
+        $"copilotHome={flavor.CopilotHome ?? "(default)"}";
 
-    private static bool SameMcpScope(
-        IReadOnlyList<string>? left,
-        IReadOnlyList<string>? right) =>
-        (left ?? []).SequenceEqual(right ?? [], StringComparer.OrdinalIgnoreCase);
+    private static bool SameProcessScope(AcpFlavor left, AcpFlavor right) =>
+        (left.DisabledMcpServers ?? []).SequenceEqual(
+            right.DisabledMcpServers ?? [],
+            StringComparer.OrdinalIgnoreCase)
+        && string.Equals(left.Agent, right.Agent, StringComparison.OrdinalIgnoreCase)
+        && (left.AvailableTools ?? []).SequenceEqual(
+            right.AvailableTools ?? [],
+            StringComparer.OrdinalIgnoreCase)
+        && left.DisableBuiltinMcps == right.DisableBuiltinMcps
+        && left.NoCustomInstructions == right.NoCustomInstructions
+        && string.Equals(
+            left.CopilotHome,
+            right.CopilotHome,
+            OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal);
 
     /// <summary>
     /// Clear a stale resume by recycling the multiplexing ACP child that holds
@@ -1925,13 +1985,17 @@ public sealed class AcpSessionManager
             return;
         }
 
-        // Copilot CLI leaks file-operation notices ("Info: <abs-path>") into the
-        // agent message stream as standalone agent_message_chunks; forwarded as
-        // assistant text they garble the reply bubble. Drop them as a client-side
-        // guard -- the root cause is the CLI's ACP output, not the model.
-        if (evt is AssistantDelta ad && IsInfoPathBleed(ad.Text))
+        // Copilot CLI leaks internal notices into the agent message stream as
+        // standalone agent_message_chunks; forwarded as assistant text they
+        // garble the reply bubble (and phone TTS). Drop the known notice shapes
+        // as a client-side guard -- the root cause is the CLI's ACP output, not
+        // the model.
+        var toolFiltered =
+            _sessionFlavor.TryGetValue(sessionId, out var flavor) &&
+            flavor.AvailableTools is { Count: > 0 };
+        if (evt is AssistantDelta ad && IsInfoPathBleed(ad.Text, toolFiltered))
         {
-            _logger.LogDebug("Dropped Info: path notice bled into agent_message_chunk sid={Sid} text={Text}",
+            _logger.LogDebug("Dropped Copilot Info notice bled into agent_message_chunk sid={Sid} text={Text}",
                 sessionId, ad.Text);
             return;
         }
@@ -1943,11 +2007,27 @@ public sealed class AcpSessionManager
             ch.Writer.TryWrite(evt);
     }
 
-    internal static bool IsInfoPathBleed(string text)
+    internal static bool IsInfoPathBleed(string text, bool toolFiltered = false)
     {
-        // Fires only on a standalone "Info: <path>" notice, never on prose that
-        // merely contains the word "Info". Path shapes: "Info: <drive>:\..." or
-        // "Info: <drive>:/..." (Windows) and "Info: /..." (Unix).
+        // `--available-tools` emits its filtered catalog as a standalone ACP
+        // assistant chunk. It is CLI diagnostics, not model output, and can be
+        // thousands of spoken characters on a constrained client.
+        const string disabledToolsPrefix = "Info: Disabled tools:\n";
+        if (toolFiltered && text.StartsWith(disabledToolsPrefix, StringComparison.Ordinal))
+        {
+            var lines = text[disabledToolsPrefix.Length..]
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            if (lines.Length > 0 &&
+                lines.All(static line => line.TrimEnd('\r').StartsWith("- ", StringComparison.Ordinal)))
+            {
+                return true;
+            }
+        }
+
+        // Also drop standalone "Info: <path>" file-operation notices, never
+        // prose that merely contains the word "Info". Path shapes:
+        // "Info: <drive>:\..." or "Info: <drive>:/..." (Windows) and
+        // "Info: /..." (Unix).
         if (!text.StartsWith("Info: ", StringComparison.Ordinal)) return false;
         if (text.Length < 8) return false;
         var rest = text.AsSpan(6); // skip "Info: "

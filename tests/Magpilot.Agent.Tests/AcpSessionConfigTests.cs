@@ -7,6 +7,54 @@ namespace Magpilot.Agent.Tests;
 public sealed class AcpSessionConfigTests
 {
     [Fact]
+    public async Task ApplyRequestedAsync_pins_agent_before_model_and_reasoning()
+    {
+        var calls = new List<JsonObject>();
+        var initial = SessionResult(
+            SelectOption("selected-agent", "Agent", "_agent", "default", ("default", "Default"), ("phone", "magnus-phone")),
+            SelectOption("selected-model", "Model", "model", "default", ("default", "Default"), ("fast", "gpt-5.6-sol-fast")),
+            SelectOption("thinking", "Reasoning effort", "thought_level", "high", ("none", "None"), ("high", "High")));
+
+        var applied = await AcpSessionConfig.ApplyRequestedAsync(
+            initial,
+            "session-123",
+            "magnus-phone",
+            "gpt-5.6-sol-fast",
+            "none",
+            (method, @params, _) =>
+            {
+                Assert.Equal("session/set_config_option", method);
+                calls.Add((JsonObject)@params.DeepClone());
+                return Task.FromResult<JsonNode?>(calls.Count switch
+                {
+                    1 => SessionResult(
+                        SelectOption("selected-agent", "Agent", "_agent", "phone", ("default", "Default"), ("phone", "magnus-phone")),
+                        SelectOption("selected-model", "Model", "model", "default", ("default", "Default"), ("fast", "gpt-5.6-sol-fast")),
+                        SelectOption("thinking", "Reasoning effort", "thought_level", "high", ("none", "None"), ("high", "High"))),
+                    2 => SessionResult(
+                        SelectOption("selected-agent", "Agent", "_agent", "phone", ("default", "Default"), ("phone", "magnus-phone")),
+                        SelectOption("selected-model", "Model", "model", "fast", ("default", "Default"), ("fast", "gpt-5.6-sol-fast")),
+                        SelectOption("thinking", "Reasoning effort", "thought_level", "high", ("none", "None"), ("high", "High"))),
+                    3 => SessionResult(
+                        SelectOption("selected-agent", "Agent", "_agent", "phone", ("default", "Default"), ("phone", "magnus-phone")),
+                        SelectOption("selected-model", "Model", "model", "fast", ("default", "Default"), ("fast", "gpt-5.6-sol-fast")),
+                        SelectOption("thinking", "Reasoning effort", "thought_level", "none", ("none", "None"), ("high", "High"))),
+                    _ => throw new Xunit.Sdk.XunitException("Unexpected RPC"),
+                });
+            },
+            CancellationToken.None);
+
+        Assert.Collection(
+            calls,
+            call => Assert.Equal(("selected-agent", "phone"), ConfigSelection(call)),
+            call => Assert.Equal(("selected-model", "fast"), ConfigSelection(call)),
+            call => Assert.Equal(("thinking", "none"), ConfigSelection(call)));
+        Assert.Equal("phone", applied.Agent);
+        Assert.Equal("fast", applied.Model);
+        Assert.Equal("none", applied.ReasoningEffort);
+    }
+
+    [Fact]
     public async Task ApplyRequestedAsync_pins_model_then_uses_updated_options_for_reasoning()
     {
         var calls = new List<JsonObject>();
@@ -16,6 +64,7 @@ public sealed class AcpSessionConfigTests
         await AcpSessionConfig.ApplyRequestedAsync(
             initial,
             "session-123",
+            null,
             "claude-opus-4.8",
             "none",
             (method, @params, _) =>
@@ -59,6 +108,7 @@ public sealed class AcpSessionConfigTests
         await AcpSessionConfig.ApplyRequestedAsync(
             initial,
             "session-123",
+            null,
             "gpt-5.6-sol-fast",
             "minimal",
             (method, @params, _) =>
@@ -89,6 +139,7 @@ public sealed class AcpSessionConfigTests
         await AcpSessionConfig.ApplyRequestedAsync(
             initial,
             "session-123",
+            null,
             "claude-opus-4.8",
             null,
             (_, @params, _) =>
@@ -112,6 +163,7 @@ public sealed class AcpSessionConfigTests
             "session-123",
             null,
             null,
+            null,
             (_, _, _) => throw new Xunit.Sdk.XunitException("RPC should not be called"),
             CancellationToken.None);
     }
@@ -124,6 +176,7 @@ public sealed class AcpSessionConfigTests
                 SessionResult(
                     SelectOption("mode", "Mode", "mode", "ask", ("ask", "Ask"))),
                 "session-123",
+                null,
                 "claude-opus-4.8",
                 null,
                 (_, _, _) => throw new Xunit.Sdk.XunitException("RPC should not be called"),
@@ -143,6 +196,7 @@ public sealed class AcpSessionConfigTests
                 initial,
                 "session-123",
                 null,
+                null,
                 "minimal",
                 (_, _, _) => throw new Xunit.Sdk.XunitException("RPC should not be called"),
                 CancellationToken.None));
@@ -161,6 +215,7 @@ public sealed class AcpSessionConfigTests
             AcpSessionConfig.ApplyRequestedAsync(
                 initial,
                 "session-123",
+                null,
                 "claude-opus-4.8",
                 null,
                 (_, _, _) => Task.FromResult<JsonNode?>(SessionResult(
@@ -186,6 +241,7 @@ public sealed class AcpSessionConfigTests
         await AcpSessionConfig.ApplyRequestedAsync(
             initial,
             "session-123",
+            null,
             "gpt-5.6-sol-fast",
             null,
             (_, @params, _) =>
@@ -221,6 +277,7 @@ public sealed class AcpSessionConfigTests
         await AcpSessionConfig.ApplyRequestedAsync(
             initial,
             "session-123",
+            null,
             "claude-opus-4.8",
             null,
             (_, @params, _) =>
@@ -241,10 +298,11 @@ public sealed class AcpSessionConfigTests
     }
 
     [Fact]
-    public async Task ApplyRequestedAsync_rolls_model_back_when_reasoning_fails()
+    public async Task ApplyRequestedAsync_rolls_model_and_agent_back_in_reverse_order_when_reasoning_fails()
     {
         var calls = new List<JsonObject>();
         var initial = SessionResult(
+            SelectOption("agent", "Agent", "_agent", "default", ("default", "Default"), ("phone", "magnus-phone")),
             SelectOption("model", "Model", "model", "old", ("old", "Old"), ("new", "New")),
             SelectOption("thinking", "Reasoning", "thought_level", "high", ("none", "None"), ("high", "High")));
 
@@ -252,6 +310,7 @@ public sealed class AcpSessionConfigTests
             AcpSessionConfig.ApplyRequestedAsync(
                 initial,
                 "session-123",
+                "magnus-phone",
                 "new",
                 "none",
                 (_, @params, _) =>
@@ -260,10 +319,20 @@ public sealed class AcpSessionConfigTests
                     return calls.Count switch
                     {
                         1 => Task.FromResult<JsonNode?>(SessionResult(
+                            SelectOption("agent", "Agent", "_agent", "phone", ("default", "Default"), ("phone", "magnus-phone")),
+                            SelectOption("model", "Model", "model", "old", ("old", "Old"), ("new", "New")),
+                            SelectOption("thinking", "Reasoning", "thought_level", "high", ("none", "None"), ("high", "High")))),
+                        2 => Task.FromResult<JsonNode?>(SessionResult(
+                            SelectOption("agent", "Agent", "_agent", "phone", ("default", "Default"), ("phone", "magnus-phone")),
                             SelectOption("model", "Model", "model", "new", ("old", "Old"), ("new", "New")),
                             SelectOption("thinking", "Reasoning", "thought_level", "high", ("none", "None"), ("high", "High")))),
-                        2 => Task.FromException<JsonNode?>(new InvalidOperationException("reasoning rejected")),
-                        3 => Task.FromResult<JsonNode?>(SessionResult(
+                        3 => Task.FromException<JsonNode?>(new InvalidOperationException("reasoning rejected")),
+                        4 => Task.FromResult<JsonNode?>(SessionResult(
+                            SelectOption("agent", "Agent", "_agent", "phone", ("default", "Default"), ("phone", "magnus-phone")),
+                            SelectOption("model", "Model", "model", "old", ("old", "Old"), ("new", "New")),
+                            SelectOption("thinking", "Reasoning", "thought_level", "high", ("none", "None"), ("high", "High")))),
+                        5 => Task.FromResult<JsonNode?>(SessionResult(
+                            SelectOption("agent", "Agent", "_agent", "default", ("default", "Default"), ("phone", "magnus-phone")),
                             SelectOption("model", "Model", "model", "old", ("old", "Old"), ("new", "New")),
                             SelectOption("thinking", "Reasoning", "thought_level", "high", ("none", "None"), ("high", "High")))),
                         _ => throw new Xunit.Sdk.XunitException("Unexpected RPC"),
@@ -274,9 +343,11 @@ public sealed class AcpSessionConfigTests
         Assert.Contains("failed to pin reasoning effort", ex.Message);
         Assert.Collection(
             calls,
-            call => Assert.Equal("new", call["value"]?.GetValue<string>()),
-            call => Assert.Equal("none", call["value"]?.GetValue<string>()),
-            call => Assert.Equal("old", call["value"]?.GetValue<string>()));
+            call => Assert.Equal(("agent", "phone"), ConfigSelection(call)),
+            call => Assert.Equal(("model", "new"), ConfigSelection(call)),
+            call => Assert.Equal(("thinking", "none"), ConfigSelection(call)),
+            call => Assert.Equal(("model", "old"), ConfigSelection(call)),
+            call => Assert.Equal(("agent", "default"), ConfigSelection(call)));
     }
 
     [Fact]
@@ -291,6 +362,7 @@ public sealed class AcpSessionConfigTests
             AcpSessionConfig.ApplyRequestedAsync(
                 initial,
                 "session-123",
+                null,
                 "new",
                 "none",
                 (_, _, _) =>
@@ -308,7 +380,7 @@ public sealed class AcpSessionConfigTests
                 },
                 CancellationToken.None));
 
-        Assert.Contains("Restoring prior model value 'old' also failed", ex.Message);
+        Assert.Contains("Restoring prior configuration also failed", ex.Message);
         Assert.Contains("rollback rejected", ex.Message);
     }
 
@@ -321,6 +393,7 @@ public sealed class AcpSessionConfigTests
             AcpSessionConfig.ApplyRequestedAsync(
                 SessionResult(SelectOption("model", "Model", "model", "old", ("old", "Old"))),
                 "session-123",
+                null,
                 "new",
                 null,
                 (_, _, _) => throw new Xunit.Sdk.XunitException("RPC should not be called"),
@@ -345,6 +418,7 @@ public sealed class AcpSessionConfigTests
             AcpSessionConfig.ApplyRequestedAsync(
                 initial,
                 "session-123",
+                null,
                 "new",
                 "none",
                 (_, _, _) =>
@@ -380,6 +454,7 @@ public sealed class AcpSessionConfigTests
         var applied = await AcpSessionConfig.ApplyRequestedAsync(
             initial,
             "session-123",
+            null,
             "claude-opus-4.8",
             "none",
             (_, @params, _) => Task.FromResult<JsonNode?>(SessionResult(
@@ -405,6 +480,9 @@ public sealed class AcpSessionConfigTests
             ["sessionId"] = "session-123",
             ["configOptions"] = new JsonArray(configOptions.Cast<JsonNode?>().ToArray()),
         };
+
+    private static (string? ConfigId, string? Value) ConfigSelection(JsonObject call) =>
+        (call["configId"]?.GetValue<string>(), call["value"]?.GetValue<string>());
 
     private static JsonObject SelectOption(
         string id,

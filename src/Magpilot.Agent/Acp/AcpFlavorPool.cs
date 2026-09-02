@@ -147,14 +147,62 @@ public sealed class AcpFlavorPool(ILoggerFactory loggerFactory, ILogger<AcpFlavo
 
     private async Task<AcpClient> StartFreshAsync(AcpFlavor flavor, CancellationToken ct)
     {
+        if (flavor.CopilotHome is not null && !Directory.Exists(flavor.CopilotHome))
+        {
+            throw new ArgumentException(
+                $"Copilot home '{flavor.CopilotHome}' does not exist or is not ready.",
+                nameof(AcpFlavor.CopilotHome));
+        }
+        if (flavor.CopilotHome is not null)
+            ValidateCopilotHomeLayout(flavor);
+
         log.LogInformation("Spawning ACP child for flavor {Flavor}: {Exe} {Args}",
             flavor.Key, flavor.Exe, flavor.Args);
-        var client = new AcpClient(loggerFactory.CreateLogger<AcpClient>(), flavor.Exe, flavor.Args);
+        var client = new AcpClient(
+            loggerFactory.CreateLogger<AcpClient>(),
+            flavor.Exe,
+            flavor.Args,
+            flavor.CopilotHome);
         client.OnSessionUpdate += FanoutSessionUpdate;
         client.OnConfigStateObserved += FanoutConfigStateObserved;
         client.OnRequest += FanoutRequest;
         await client.StartAsync(ct);
         return client;
+    }
+
+    private static void ValidateCopilotHomeLayout(AcpFlavor flavor)
+    {
+        var copilotHome = flavor.CopilotHome!;
+        var sessionStatePath = Path.Combine(copilotHome, "session-state");
+        var sessionState = new DirectoryInfo(sessionStatePath);
+        var target = sessionState.Exists
+            ? sessionState.ResolveLinkTarget(returnFinalTarget: true)
+            : null;
+        var scannerRoot = Path.GetFullPath(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".copilot",
+            "session-state"));
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        if (target is null ||
+            !string.Equals(
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(target.FullName)),
+                Path.TrimEndingDirectorySeparator(scannerRoot),
+                comparison))
+        {
+            throw new ArgumentException(
+                $"Copilot home '{copilotHome}' must link session-state to '{scannerRoot}'.",
+                nameof(AcpFlavor.CopilotHome));
+        }
+
+        if (flavor.Agent is not null &&
+            !Directory.Exists(Path.Combine(copilotHome, "agents")))
+        {
+            throw new ArgumentException(
+                $"Copilot home '{copilotHome}' has no agents directory for '{flavor.Agent}'.",
+                nameof(AcpFlavor.CopilotHome));
+        }
     }
 
     private void FanoutSessionUpdate(string sid, System.Text.Json.Nodes.JsonNode? update) =>

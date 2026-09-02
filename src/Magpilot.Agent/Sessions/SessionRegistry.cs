@@ -74,10 +74,32 @@ public sealed class SessionRegistry
         return gate;
     }
 
-    public async Task<SessionInfo> CreateAsync(string? cwd, bool useAgency, CancellationToken ct, string? name = null, string? model = null, string? reasoningEffort = null, string[]? disableMcpServers = null)
+    public async Task<SessionInfo> CreateAsync(
+        string? cwd,
+        bool useAgency,
+        CancellationToken ct,
+        string? name = null,
+        string? model = null,
+        string? reasoningEffort = null,
+        string[]? disableMcpServers = null,
+        string? agent = null,
+        string[]? availableTools = null,
+        bool disableBuiltinMcps = false,
+        bool noCustomInstructions = false,
+        string? copilotHome = null)
     {
+        AcpFlavor.ValidateAvailableToolsRequest(availableTools);
         cwd ??= Environment.CurrentDirectory;
-        var flavor = AcpFlavor.Resolve(useAgency, model, reasoningEffort, disableMcpServers);
+        var flavor = AcpFlavor.Resolve(
+            useAgency,
+            model,
+            reasoningEffort,
+            disableMcpServers,
+            agent,
+            availableTools,
+            disableBuiltinMcps,
+            noCustomInstructions,
+            copilotHome);
         // AcpSessionManager invokes onAttached only after the complete requested
         // configuration has been applied and verified. A failed configure may
         // leave a quarantined route for retry, but it is not advertised as Owned.
@@ -140,21 +162,56 @@ public sealed class SessionRegistry
     /// <summary>
     /// Adopt: if the session is held by another process, kill it (force=true required),
     /// then session/load it into our ACP child.
-    /// Callers may re-supply model/reasoning/tool-scope settings to restore the
-    /// same process scope and re-apply persisted ACP session configuration after
-    /// the load. Process flavor routing itself is not persisted on disk.
+    /// Callers may re-supply agent/model/reasoning/process-scope settings to
+    /// restore the same child behavior and re-apply persisted ACP session
+    /// configuration after the load. Process flavor routing itself is not
+    /// persisted in Copilot's session files.
     /// </summary>
-    public async Task<SessionInfo> AdoptAsync(string sessionId, bool force, CancellationToken ct, string? model = null, string? reasoningEffort = null, string[]? disableMcpServers = null)
+    public async Task<SessionInfo> AdoptAsync(
+        string sessionId,
+        bool force,
+        CancellationToken ct,
+        string? model = null,
+        string? reasoningEffort = null,
+        string[]? disableMcpServers = null,
+        string? agent = null,
+        string[]? availableTools = null,
+        bool? disableBuiltinMcps = null,
+        bool? noCustomInstructions = null,
+        string? copilotHome = null)
     {
+        AcpFlavor.ValidateAvailableToolsRequest(availableTools);
         var gate = await AcquireLifecycleGateAsync(sessionId, ct);
         try
         {
-            return await AdoptCoreAsync(sessionId, force, ct, model, reasoningEffort, disableMcpServers);
+            return await AdoptCoreAsync(
+                sessionId,
+                force,
+                ct,
+                model,
+                reasoningEffort,
+                disableMcpServers,
+                agent,
+                availableTools,
+                disableBuiltinMcps,
+                noCustomInstructions,
+                copilotHome);
         }
         finally { gate.Release(); }
     }
 
-    private async Task<SessionInfo> AdoptCoreAsync(string sessionId, bool force, CancellationToken ct, string? model, string? reasoningEffort, string[]? disableMcpServers)
+    private async Task<SessionInfo> AdoptCoreAsync(
+        string sessionId,
+        bool force,
+        CancellationToken ct,
+        string? model,
+        string? reasoningEffort,
+        string[]? disableMcpServers,
+        string? agent,
+        string[]? availableTools,
+        bool? disableBuiltinMcps,
+        bool? noCustomInstructions,
+        string? copilotHome)
     {
         var info = _scanner.Get(sessionId, Owned)
             ?? throw new FileNotFoundException($"Session {sessionId} not on disk");
@@ -167,7 +224,19 @@ public sealed class SessionRegistry
             useAgency: false,
             model,
             reasoningEffort,
-            disableMcpServers);
+            disableMcpServers,
+            agent,
+            availableTools,
+            disableBuiltinMcps ?? false,
+            noCustomInstructions ?? false,
+            copilotHome);
+        var processScopeSpecified =
+            disableMcpServers is not null ||
+            agent is not null ||
+            availableTools is not null ||
+            disableBuiltinMcps is not null ||
+            noCustomInstructions is not null ||
+            copilotHome is not null;
 
         // Contention guard. Advisory inuse.<pid>.lock files let two live
         // processes attach to the same session; a resume can then be served
@@ -195,7 +264,7 @@ public sealed class SessionRegistry
             await _acp.ApplyOwnedConfigurationAsync(
                 sessionId,
                 requestedFlavor,
-                processScopeSpecified: disableMcpServers is not null,
+                processScopeSpecified,
                 ct);
             _owned.TryAdd(sessionId, 0);
             return CompleteAdopt(sessionId, WithYolo(_scanner.Get(sessionId, Owned) ?? info)!);
@@ -215,7 +284,12 @@ public sealed class SessionRegistry
                     Describe(retainedFlavor)!.UseAgency,
                     model ?? retainedFlavor.Model,
                     reasoningEffort ?? retainedFlavor.ReasoningEffort,
-                    disableMcpServers ?? retainedFlavor.DisabledMcpServers);
+                    disableMcpServers ?? retainedFlavor.DisabledMcpServers,
+                    agent ?? retainedFlavor.Agent,
+                    availableTools ?? retainedFlavor.AvailableTools,
+                    disableBuiltinMcps ?? retainedFlavor.DisableBuiltinMcps,
+                    noCustomInstructions ?? retainedFlavor.NoCustomInstructions,
+                    copilotHome ?? retainedFlavor.CopilotHome);
             _logger.LogWarning(
                 "Session {Sid} was invalidated with its co-hosted ACP child; re-attaching it from disk",
                 sessionId);
@@ -243,7 +317,12 @@ public sealed class SessionRegistry
                     Describe(retainedFlavor)!.UseAgency,
                     model ?? retainedFlavor.Model,
                     reasoningEffort ?? retainedFlavor.ReasoningEffort,
-                    disableMcpServers ?? retainedFlavor.DisabledMcpServers);
+                    disableMcpServers ?? retainedFlavor.DisabledMcpServers,
+                    agent ?? retainedFlavor.Agent,
+                    availableTools ?? retainedFlavor.AvailableTools,
+                    disableBuiltinMcps ?? retainedFlavor.DisableBuiltinMcps,
+                    noCustomInstructions ?? retainedFlavor.NoCustomInstructions,
+                    copilotHome ?? retainedFlavor.CopilotHome);
             await _acp.ReloadFromDiskAsync(
                 sessionId,
                 info.Cwd ?? Environment.CurrentDirectory,
@@ -316,7 +395,7 @@ public sealed class SessionRegistry
             await _acp.ApplyOwnedConfigurationAsync(
                 sessionId,
                 requestedFlavor,
-                processScopeSpecified: disableMcpServers is not null,
+                processScopeSpecified,
                 ct);
             return CompleteAdopt(sessionId, WithYolo(_scanner.Get(sessionId, Owned) ?? info)!);
         }
@@ -717,7 +796,12 @@ public sealed class SessionRegistry
                     || flavor.Key.StartsWith(AcpFlavor.Agency.Key + ":", StringComparison.Ordinal),
                 Model: flavor.Model,
                 ReasoningEffort: flavor.ReasoningEffort,
-                DisabledMcpServers: flavor.DisabledMcpServers?.ToArray());
+                DisabledMcpServers: flavor.DisabledMcpServers?.ToArray(),
+                Agent: flavor.Agent,
+                AvailableTools: flavor.AvailableTools?.ToArray(),
+                DisableBuiltinMcps: flavor.DisableBuiltinMcps,
+                NoCustomInstructions: flavor.NoCustomInstructions,
+                CopilotHome: flavor.CopilotHome);
 
     private static AcpFlavor? ResolveFlavor(HostSessionFlavor? recorded) =>
         recorded is null
@@ -726,7 +810,12 @@ public sealed class SessionRegistry
                 recorded.UseAgency,
                 recorded.Model,
                 recorded.ReasoningEffort,
-                recorded.DisabledMcpServers);
+                recorded.DisabledMcpServers,
+                recorded.Agent,
+                recorded.AvailableTools,
+                recorded.DisableBuiltinMcps,
+                recorded.NoCustomInstructions,
+                recorded.CopilotHome);
 
     private LastEventInfo? TryReadLastEvent(string sessionId)
     {

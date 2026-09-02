@@ -52,7 +52,12 @@ public sealed class HostOwnershipTests : IDisposable
             UseAgency: false,
             Model: "example-model",
             ReasoningEffort: "low",
-            DisabledMcpServers: ["example-server"]);
+            DisabledMcpServers: ["example-server"],
+            Agent: "magnus-phone",
+            AvailableTools: ["magnus-phone", "server(tool_name)"],
+            DisableBuiltinMcps: true,
+            NoCustomInstructions: true,
+            CopilotHome: Path.Combine(Path.GetTempPath(), "copilot-phone"));
         New().Set(sid, Environment.ProcessId, flavor);
 
         var reloaded = New();
@@ -65,6 +70,11 @@ public sealed class HostOwnershipTests : IDisposable
             Assert.Equal(flavor.Model, entry.Flavor.Model);
             Assert.Equal(flavor.ReasoningEffort, entry.Flavor.ReasoningEffort);
             Assert.Equal(flavor.DisabledMcpServers, entry.Flavor.DisabledMcpServers);
+            Assert.Equal(flavor.Agent, entry.Flavor.Agent);
+            Assert.Equal(flavor.AvailableTools, entry.Flavor.AvailableTools);
+            Assert.Equal(flavor.DisableBuiltinMcps, entry.Flavor.DisableBuiltinMcps);
+            Assert.Equal(flavor.NoCustomInstructions, entry.Flavor.NoCustomInstructions);
+            Assert.Equal(flavor.CopilotHome, entry.Flavor.CopilotHome);
         }
         finally
         {

@@ -81,7 +81,19 @@ public static class AgentEndpoints
             SessionInfo info;
             try
             {
-                info = await reg.CreateAsync(req.Cwd, req.UseAgency, ct, name: req.Name, model: req.Model, reasoningEffort: req.ReasoningEffort, disableMcpServers: req.DisableMcpServers);
+                info = await reg.CreateAsync(
+                    req.Cwd,
+                    req.UseAgency,
+                    ct,
+                    name: req.Name,
+                    model: req.Model,
+                    reasoningEffort: req.ReasoningEffort,
+                    disableMcpServers: req.DisableMcpServers,
+                    agent: req.Agent,
+                    availableTools: req.AvailableTools,
+                    disableBuiltinMcps: req.DisableBuiltinMcps,
+                    noCustomInstructions: req.NoCustomInstructions,
+                    copilotHome: req.CopilotHome);
             }
             catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
             catch (SessionConfigurationException ex)
@@ -306,7 +318,18 @@ public static class AgentEndpoints
         {
             try
             {
-                var info = await reg.AdoptAsync(id, req.Force, ct, req.Model, req.ReasoningEffort, req.DisableMcpServers);
+                var info = await reg.AdoptAsync(
+                    id,
+                    req.Force,
+                    ct,
+                    req.Model,
+                    req.ReasoningEffort,
+                    req.DisableMcpServers,
+                    req.Agent,
+                    req.AvailableTools,
+                    req.DisableBuiltinMcps,
+                    req.NoCustomInstructions,
+                    req.CopilotHome);
                 return Results.Ok(info);
             }
             catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }

@@ -261,7 +261,12 @@ public sealed record HostSessionFlavor(
     bool UseAgency = false,
     string? Model = null,
     string? ReasoningEffort = null,
-    string[]? DisabledMcpServers = null);
+    string[]? DisabledMcpServers = null,
+    string? Agent = null,
+    string[]? AvailableTools = null,
+    bool DisableBuiltinMcps = false,
+    bool NoCustomInstructions = false,
+    string? CopilotHome = null);
 
 public readonly record struct HostOwnerEntry(
     int HostPid,
