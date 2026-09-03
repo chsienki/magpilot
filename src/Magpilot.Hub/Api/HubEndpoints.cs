@@ -291,10 +291,12 @@ public static class HubEndpoints
                 }));
 
         api.MapGet("/agents/{name}/sessions/{id}/history",
-            (string name, string id, AgentHttpClient http, AgentRegistry reg, CancellationToken ct) =>
+            (string name, string id, AgentHttpClient http, AgentRegistry reg, HttpContext ctx, CancellationToken ct) =>
                 Proxy(name, reg, async () =>
                 {
-                    var resp = await http.ClientFor(name).GetAsync($"api/sessions/{id}/history", ct);
+                    var resp = await http.ClientFor(name).GetAsync(
+                        BuildAgentHistoryPath(id, ctx.Request.QueryString),
+                        ct);
                     return await Forward(resp);
                 }));
 
@@ -459,6 +461,9 @@ public static class HubEndpoints
         var body = await resp.Content.ReadAsStringAsync();
         return Results.Content(body, resp.Content.Headers.ContentType?.MediaType ?? "application/json", statusCode: (int)resp.StatusCode);
     }
+
+    internal static string BuildAgentHistoryPath(string sessionId, QueryString queryString) =>
+        $"api/sessions/{sessionId}/history{queryString.ToUriComponent()}";
 
     /// <summary>
     /// Wraps a per-agent proxy call so that transport failures (timeout, refused,

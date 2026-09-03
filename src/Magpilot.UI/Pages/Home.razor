@@ -3265,15 +3265,31 @@
     private async Task HandleLoadOlder()
     {
         if (Agent is null || SessionId is null || !_hasMore || _chatView is null) return;
+        var requestedBefore = _oldestCursor;
         var snapshot = await _chatView.SnapshotScrollAsync();
         try
         {
             var page = await Hub.GetHistoryAsync(
                 Agent, SessionId,
-                before: _oldestCursor, limit: 50);
+                before: requestedBefore, limit: 50);
             if (page is null || page.Entries.Count == 0)
             {
                 _hasMore = false;
+                return;
+            }
+            if (page.OldestCursor >= requestedBefore)
+            {
+                _hasMore = false;
+                HubLog.LogWarning(
+                    "History pagination returned a non-advancing cursor; stopping demand-load.",
+                    category: nameof(Home),
+                    sessionId: SessionId,
+                    extra: new
+                    {
+                        agent = Agent,
+                        requestedBefore,
+                        returnedCursor = page.OldestCursor,
+                    });
                 return;
             }
             var collapsed = CollapseLegacyToolEntries(page.Entries).ToList();

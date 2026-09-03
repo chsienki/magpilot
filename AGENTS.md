@@ -1683,6 +1683,10 @@ Dictionary<sessionKey, List<ChatMessage>>`). On switch, three branches:
 
 The SPA is the only producer of new visible messages while the user
 is connected, so the cache is safe as last-word for `Owned`.
+The hub history proxy must preserve the caller's `tail`, `before`, and
+`limit` query string when forwarding to the agent. Demand-load also rejects a
+non-advancing `OldestCursor`; otherwise a broken or stale proxy can prepend the
+same newest page forever as the user scrolls upward.
 When the agent restarts, sessions the agent itself drove become
 Dormant/Locked and get a fresh `session/load` on next visit;
 sessions a `magpilot` launcher is driving stay Host-owned because
