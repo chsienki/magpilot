@@ -9,9 +9,10 @@ namespace Magpilot.Host;
 /// Implements <c>magpilot --magpilot-update</c>: ask the local agent for
 /// the latest known release, download the matching installer from GitHub
 /// Releases, validate its SHA256 against the published <c>.sha256</c>
-/// asset, and launch it silently. Inno Setup's
-/// <c>CloseApplications=force</c> handles the launcher-exe-in-use case
-/// and our own scheduled-task agent stop/restart.
+/// asset, and launch it silently. This process exits promptly so it does not
+/// block replacement of its own executable. Other long-running launcher
+/// instances can still leave a partial install; per-launcher update detection
+/// keeps offering the release until the installed launcher catches up.
 ///
 /// <para>
 /// Exit codes:

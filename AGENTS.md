@@ -481,7 +481,7 @@ Endpoints added by the packaging work:
 | Endpoint | Auth | Purpose |
 |---|---|---|
 | `GET /api/version` (agent) | none | Agent's own `{version, protocolVersion}` |
-| `GET /api/version/latest` (agent) | none | Hub-reported latest, cached locally |
+| `GET /api/version/latest?from=X.Y.Z` (agent) | none | Hub-reported latest metadata, cached locally; computes `updateAvailable` for the requesting launcher |
 | `GET /api/agent-version?from=X.Y.Z` (hub) | cookie or bearer | Hub's view of latest release; computes `updateAvailable` for the caller |
 
 The agent's version endpoints are deliberately **unauthenticated** so
@@ -490,7 +490,9 @@ the launcher can show its banner without `MAGPILOT_AGENT_TOKEN` set.
 `UpdateAvailable` bit: `/api/version/latest` recomputes it from the launcher's
 `from` value. Agent and launcher binaries can diverge after an interrupted or
 partial installer run; comparing only the agent version would falsely report
-an older launcher as current and make `--magpilot-update` a no-op.
+an older launcher as current and make `--magpilot-update` a no-op. Both the hub
+and agent cache use `Versioning.IsUpdateAvailable`; any new update surface must
+reuse that helper rather than introduce another version comparison.
 
 Publishing a GitHub release makes it eligible for discovery; the deployed hub
 is the authority local agents poll. `ReleaseTracker` refreshes immediately on
@@ -622,10 +624,11 @@ child.
 - `installer/{install-task,uninstall-task,firewall}.ps1` (helpers).
 - Components: `Magpilot Agent`, `Magpilot Launcher`. Tasks: PATH,
   scheduled task at user logon, firewall rules.
-- Custom Settings page collects hub URL + agent token + public URL,
-  writes them to `%ProgramFiles%\Magpilot\config\magpilot.env`. On
-  upgrade (silent or interactive) the existing file is read and values
-  are pre-populated, so `magpilot --magpilot-update` preserves them.
+- The wizard collects no hub URL or tokens. Once files and the scheduled task
+  are installed, it launches `magpilot --magpilot-pair` in a visible console;
+  approval writes the hub URL, minted per-agent token, and hub bearer to
+  `%ProgramFiles%\Magpilot\config\magpilot.env`. Upgrades preserve the existing
+  file, so they do not require re-pairing.
 - The agent runs as a **scheduled task at user logon** (NOT SYSTEM),
   so `~/.copilot/` is reachable. Task name: `MagpilotAgent`.
 - `install-task.ps1` resolves which user to register the task for via

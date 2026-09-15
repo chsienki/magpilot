@@ -35,6 +35,27 @@ latest installer and runs it with `/SILENT`. Existing `magpilot.env`
 keys (hub URL + agent token) survive the silent re-install untouched,
 so an upgrade does NOT require re-pairing.
 
+### Partial upgrade detection
+
+The agent and launcher are separate installed binaries and must be checked
+independently. Long-running `magpilot` sessions can keep the Native AOT
+launcher image mapped while the installer successfully replaces the agent,
+leaving a newer agent beside an older launcher:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:5099/api/version
+(Get-Item 'C:\Program Files\Magpilot\bin\magpilot.exe').VersionInfo.ProductVersion
+```
+
+Agents from v0.1.34 onward cache release metadata and recompute
+`updateAvailable` from the launcher's `/api/version/latest?from=<version>`
+query, so this split keeps offering the installer instead of falsely reporting
+"up to date." Close the remaining launcher sessions and rerun the update, or
+repair without interrupting them by renaming the installed executable to a
+timestamped backup and copying the new `magpilot.exe` into its original path;
+running processes continue from the mapped backup while new sessions load the
+replacement.
+
 ## Building locally
 
 You need Inno Setup 6 installed (e.g. `winget install JRSoftware.InnoSetup`).
