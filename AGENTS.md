@@ -540,10 +540,10 @@ What happens at spawn (helpers: `TerminalColor.cs` / `TerminalThemeConfig.cs`
    fg/bg on the real terminal at startup and resets them (`OSC 104/110/111`)
    on exit. This recolours copilot's base-16 (`default`) theme output;
    truecolor themes emit fixed RGB and are unaffected. Shape:
-   `{ "palette": { "0": "#1e1e1e", "4": "#3b8eea" }, "foreground": "#d4d4d4", "background": "#1e1e1e", "thinking": "#7c8a8a", "inputBand": "#073642" }`.
+   `{ "palette": { "0": "#1e1e1e", "4": "#3b8eea" }, "foreground": "#d4d4d4", "background": "#1e1e1e", "thinking": "#7c8a8a", "inputBand": "#073642", "legacyDefaultColors": true }`.
 3. **GitHub theme flag.** `COPILOT_GITHUB_THEME=1` is set by default so the
    GitHub colour mode is a pickable option in copilot's own `/theme`.
-4. **Byte-stream rewrites (`AnsiColorRewriter`, PTY paths only).** Two things
+4. **Byte-stream rewrites (`AnsiColorRewriter`, PTY paths only).** Three things
    copilot renders that the palette can't reach, each opt-in via a theme-file
    key:
    - `"thinking"`: copilot draws reasoning text with the terminal's **faint**
@@ -552,14 +552,24 @@ What happens at spawn (helpers: `TerminalColor.cs` / `TerminalThemeConfig.cs`
      `38;2;R;G;B` (the thinking colour at full intensity) and SGR `22` into
      `22;39`. This decouples the reasoning colour from the foreground.
    - `"inputBand"`: copilot's composer surface (`backgroundSecondary`) is a
-     fixed grey `#202020` from copilot's own ramp, not the terminal palette.
-     It appears as a background (the fill) and as a foreground (the halfblock
-     box edges), so the rewriter retargets **both** `48;2;32;32;32` and
-     `38;2;32;32;32` to the input-band colour. Only `#202020` is matched, so
-     diff / selection / link colours are untouched (`#202020` is too dark to
-     ever be real text). The rewriter is an incremental SGR parser that
-     survives escapes split across read buffers; it's careful to skip the
-     literal `2`/`5` inside `38;2;...` / `38;5;...` selectors.
+     fixed grey from copilot's own ramp, not the terminal palette. It appears
+     as a background (the fill) and as a foreground (the halfblock box edges),
+     so the rewriter retargets **both** the `48;2` and `38;2` forms to the
+     input-band colour. Known copilot TUI revisions emit either a near-black
+     `#202020` (`32;32;32`) or near-white `#e3e3e4` (`227;227;228`), so both
+     are matched (the `SurfaceColors` set in `AnsiColorRewriter`). Only
+     those exact greys are matched, so diff / selection / link colours are
+     untouched. The rewriter is an incremental SGR parser that survives
+     escapes split across read buffers; it's careful to skip the literal
+     `2`/`5` inside `38;2;...` / `38;5;...` selectors.
+   - `"legacyDefaultColors": true`: current copilot releases derive a dim
+     truecolor ramp for the Base-16 theme. The rewriter retargets the known
+     settled-frame token colours to the values emitted by the classic default
+     theme, preserving the current renderer/layout while restoring the
+     brighter cyan, magenta, green, blue, and neutral hierarchy. The map is
+     selector-aware, so the selected tab's blue background becomes cyan while
+     the same source blue used as foreground becomes the classic magenta
+     heading colour.
 5. **Banner tag (`BannerTagInjector`, PTY paths only).** copilot opens a
    session with `Copilot v<ver> uses AI.` drawn in a fixed grey; the injector
    watches for the stable `uses AI.` phrase and appends the magpilot version
@@ -570,7 +580,10 @@ What happens at spawn (helpers: `TerminalColor.cs` / `TerminalThemeConfig.cs`
    inherits the banner grey. On by default; `MAGPILOT_TERM_BANNER_TAG`
    overrides the text (inserted verbatim) or suppresses it
    (`0`/`off`/`false`/`none`/empty). Unlike the colour rewrites it is **not**
-   theme-file-gated -- it's branding, not theming.
+   normally theme-file-gated -- it's branding, not theming. The exception is
+   `"legacyDefaultColors": true`, which suppresses injection because current
+   copilot animates and redraws the welcome card; inserting bytes after its
+   layout pass causes wrapped/duplicated animation frames.
 
 `COLORTERM=truecolor` is also forced (has been) so the child emits 24-bit RGB
 instead of downgrading to bright-16 under an empty ConPTY `COLORTERM`.

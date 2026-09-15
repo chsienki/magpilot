@@ -28,11 +28,13 @@ internal sealed record TerminalThemeConfig(
     Rgb? Foreground,
     Rgb? BackgroundColor,
     Rgb? Thinking,
-    Rgb? InputBand)
+    Rgb? InputBand,
+    bool LegacyDefaultColors)
 {
     public static TerminalThemeConfig Default { get; } =
         new(BackgroundMode.Auto, EnableGithubTheme: true,
-            new Dictionary<int, Rgb>(), Foreground: null, BackgroundColor: null, Thinking: null, InputBand: null);
+            new Dictionary<int, Rgb>(), Foreground: null, BackgroundColor: null, Thinking: null,
+            InputBand: null, LegacyDefaultColors: false);
 
     public bool HasPaletteOverrides =>
         Palette.Count > 0 || Foreground is not null || BackgroundColor is not null;
@@ -52,8 +54,9 @@ internal sealed record TerminalThemeConfig(
             _ => true,
         };
 
-        var (palette, fg, bg, thinking, inputBand) = LoadPalette();
-        return new TerminalThemeConfig(background, enableGithub, palette, fg, bg, thinking, inputBand);
+        var (palette, fg, bg, thinking, inputBand, legacyDefaultColors) = LoadPalette();
+        return new TerminalThemeConfig(
+            background, enableGithub, palette, fg, bg, thinking, inputBand, legacyDefaultColors);
     }
 
     // A theme file supplies palette / fg / bg / thinking / input-band
@@ -61,10 +64,10 @@ internal sealed record TerminalThemeConfig(
     //   MAGPILOT_TERM_THEME_FILE  -> an explicit path (handy in dev)
     //   MAGPILOT_TERM_THEME=<name> -> <install>/config/themes/<name>.json
     // Absent or unreadable => no overrides (copilot's own theme stands).
-    private static (IReadOnlyDictionary<int, Rgb>, Rgb?, Rgb?, Rgb?, Rgb?) LoadPalette()
+    private static (IReadOnlyDictionary<int, Rgb>, Rgb?, Rgb?, Rgb?, Rgb?, bool) LoadPalette()
     {
         var empty = ((IReadOnlyDictionary<int, Rgb>)new Dictionary<int, Rgb>(),
-            (Rgb?)null, (Rgb?)null, (Rgb?)null, (Rgb?)null);
+            (Rgb?)null, (Rgb?)null, (Rgb?)null, (Rgb?)null, false);
 
         var path = InstallConfig.ResolveValue("MAGPILOT_TERM_THEME_FILE");
         if (string.IsNullOrEmpty(path))
@@ -91,10 +94,11 @@ internal sealed record TerminalThemeConfig(
     /// <summary>Parse a theme JSON document into palette + fg/bg/thinking/
     /// input-band overrides. Split out from file I/O so it can be
     /// unit-tested directly.</summary>
-    public static (IReadOnlyDictionary<int, Rgb>, Rgb?, Rgb?, Rgb?, Rgb?) ParseThemeJson(string json)
+    public static (IReadOnlyDictionary<int, Rgb>, Rgb?, Rgb?, Rgb?, Rgb?, bool) ParseThemeJson(string json)
     {
         var palette = new Dictionary<int, Rgb>();
         Rgb? fg = null, bg = null, thinking = null, inputBand = null;
+        var legacyDefaultColors = false;
 
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -128,7 +132,11 @@ internal sealed record TerminalThemeConfig(
             TryParseColor(ib.GetString(), out var ibColour))
             inputBand = ibColour;
 
-        return (palette, fg, bg, thinking, inputBand);
+        if (root.TryGetProperty("legacyDefaultColors", out var legacy) &&
+            legacy.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            legacyDefaultColors = legacy.GetBoolean();
+
+        return (palette, fg, bg, thinking, inputBand, legacyDefaultColors);
     }
 
     // Accept "#rrggbb" or bare "rrggbb".

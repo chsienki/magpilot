@@ -4,7 +4,7 @@ namespace Magpilot.Host;
 
 /// <summary>
 /// Rewrites specific colours in copilot's output as it streams past, so the
-/// launcher can fix things the terminal palette can't reach. Two rewrites,
+/// launcher can fix things the terminal palette can't reach. Three rewrites,
 /// both optional:
 ///
 /// <list type="bullet">
@@ -15,12 +15,20 @@ namespace Magpilot.Host;
 ///   <c>38;2;R;G;B</c> (set that colour at full intensity) and SGR <c>22</c>
 ///   (faint off) becomes <c>22;39</c> (also restore the default fg).</item>
 ///   <item><b>Input-band remap.</b> copilot's composer surface is its
-///   <c>backgroundSecondary</c>, a fixed grey (<c>#202020</c>) from copilot's
-///   own ramp that isn't derived from the terminal palette. It shows up both
-///   as a background (the fill) and as a foreground (the ▀/▄ half-block box
-///   edges). When an input-band colour is configured, both forms of
-///   <c>#202020</c> are retargeted to it. Only <c>#202020</c> is matched, so
-///   diff / selection / link colours are left alone.</item>
+///   <c>backgroundSecondary</c>, a fixed grey from copilot's own ramp that
+///   isn't derived from the terminal palette. It shows up both as a
+///   background (the fill) and as a foreground (the half-block box edges).
+///   Known copilot TUI revisions emit either a near-black <c>#202020</c> or
+///   a near-white <c>#e3e3e4</c>; both are matched (see
+///   <c>SurfaceColors</c>)
+///   and, when an input-band colour is configured, retargeted to it. Only
+///   those exact greys are matched, so diff / selection / link colours are
+///   left alone.</item>
+///   <item><b>Legacy default colours.</b> copilot's Base-16 theme derives a
+///   dim truecolor ramp in current releases. When compatibility is enabled,
+///   the known settled-frame colours are retargeted to the corresponding
+///   values emitted by the classic default theme while preserving the current
+///   renderer and layout.</item>
 /// </list>
 ///
 /// <para>The filter is incremental: an escape split across read buffers is
@@ -31,27 +39,70 @@ internal sealed class AnsiColorRewriter
 {
     private const byte Esc = 0x1b;
 
-    // copilot's base-16 backgroundSecondary (the composer band), emitted as a
-    // truecolor background set. Matching this exact value keeps the remap
-    // off diff / selection / link backgrounds, which use other colours.
-    private static readonly string[] BandFrom = ["32", "32", "32"]; // #202020
+    // copilot's composer surface (its `backgroundSecondary`), emitted as a
+    // truecolor set. Known copilot TUI revisions emit either a near-black or
+    // near-white grey, so both are matched and retargeted to the input-band
+    // colour. Matching only these exact values keeps the
+    // remap off diff / selection / link colours, which use other RGB.
+    private static readonly string[][] SurfaceColors =
+    [
+        ["32", "32", "32"],     // #202020 -- dark composer surface
+        ["227", "227", "228"],  // #e3e3e4 -- light composer surface
+    ];
+
+    private static bool IsSurfaceColor(string[] sub) =>
+        sub.Length == 3 && Array.Exists(SurfaceColors,
+            f => f[0] == sub[0] && f[1] == sub[1] && f[2] == sub[2]);
+
+    private static string[]? LegacyDefaultColor(string selector, string[] sub)
+    {
+        if (sub.Length != 3) return null;
+
+        return (selector, sub[0], sub[1], sub[2]) switch
+        {
+            // Selected tab: blue/white -> cyan/black.
+            ("48", "58", "150", "221") => ["97", "214", "214"],
+            ("48", "59", "120", "255") => ["97", "214", "214"],
+            ("48", "9", "105", "218") => ["97", "214", "214"],
+            ("38", "255", "255", "255") => ["12", "12", "12"],
+
+            // Accent families used by headings, status, the mascot, and tips.
+            ("38", "58", "150", "221") => ["188", "68", "167"],
+            ("38", "0", "55", "218") => ["59", "120", "255"],
+            ("38", "9", "105", "218") => ["59", "120", "255"],
+            ("38", "19", "161", "14") => ["22", "198", "12"],
+            ("38", "136", "23", "152") => ["188", "68", "167"],
+            ("38", "180", "0", "158") => ["188", "68", "167"],
+
+            // Neutral ramp used by tabs, body text, borders, and the footer.
+            ("38", "52", "56", "60") => ["134", "134", "134"],
+            ("38", "97", "100", "104") => ["134", "134", "134"],
+            ("38", "122", "124", "128") => ["112", "112", "112"],
+            ("38", "147", "149", "152") => ["134", "134", "134"],
+            ("38", "177", "186", "196") => ["134", "134", "134"],
+            ("38", "145", "152", "161") => ["112", "112", "112"],
+            _ => null,
+        };
+    }
 
     private enum State { Normal, AfterEsc, InCsi }
 
     private readonly string? _setForeground;  // "38;2;R;G;B" for thinking, or null
     private readonly string[]? _bandTo;       // input-band target [r,g,b], or null
+    private readonly bool _legacyDefaultColors;
     private readonly List<byte> _seq = new(16);
     private State _state = State.Normal;
 
-    public AnsiColorRewriter(Rgb? thinking, Rgb? inputBand)
+    public AnsiColorRewriter(Rgb? thinking, Rgb? inputBand, bool legacyDefaultColors = false)
     {
         _setForeground = thinking is { } t ? $"38;2;{t.R};{t.G};{t.B}" : null;
         _bandTo = inputBand is { } b ? [b.R.ToString(), b.G.ToString(), b.B.ToString()] : null;
+        _legacyDefaultColors = legacyDefaultColors;
     }
 
     /// <summary>True if at least one rewrite is configured (otherwise the
     /// caller should skip constructing a rewriter at all).</summary>
-    public bool IsActive => _setForeground is not null || _bandTo is not null;
+    public bool IsActive => _setForeground is not null || _bandTo is not null || _legacyDefaultColors;
 
     /// <summary>Transform one chunk of copilot output. Partial escape
     /// sequences are carried over to the next call.</summary>
@@ -129,11 +180,12 @@ internal sealed class AnsiColorRewriter
 
             // Extended colour selector: 38/48 ; (2 ; r ; g ; b) | (5 ; n).
             // Copy it verbatim (so an inner "2"/"5" is never read as faint),
-            // except retarget copilot's surface grey (#202020) when an
-            // input-band colour is configured. It appears as a background
-            // (the composer fill) AND as a foreground (the ▀/▄ half-block
-            // box edges), so both the 48 and 38 forms are remapped; #202020
-            // is far too dark to be real text, so it's only ever decoration.
+            // except retarget copilot's surface grey (see SurfaceColors) when
+            // an input-band colour is configured. It appears as a background
+            // (the composer fill) AND as a foreground (the half-block box
+            // edges), so both the 48 and 38 forms are remapped; the surface
+            // greys are too dark/too light to be real text, so they're only
+            // ever chrome.
             if (t is "38" or "48")
             {
                 result.Add(t);
@@ -146,9 +198,11 @@ internal sealed class AnsiColorRewriter
                     for (var k = 0; k < sub.Length; k++)
                         sub[k] = tokens[i + 2 + k];
 
-                    if (mode == "2" && _bandTo is not null && sub.Length == 3 &&
-                        sub[0] == BandFrom[0] && sub[1] == BandFrom[1] && sub[2] == BandFrom[2])
+                    if (mode == "2" && _bandTo is not null && IsSurfaceColor(sub))
                         result.AddRange(_bandTo);
+                    else if (mode == "2" && _legacyDefaultColors &&
+                             LegacyDefaultColor(t, sub) is { } legacy)
+                        result.AddRange(legacy);
                     else
                         result.AddRange(sub);
 

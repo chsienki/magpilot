@@ -28,6 +28,9 @@ public class AnsiColorRewriterTests
     private static string RewriteBand(params string[] chunks)
         => Rewrite(new AnsiColorRewriter(null, Band), chunks);
 
+    private static string RewriteLegacy(params string[] chunks)
+        => Rewrite(new AnsiColorRewriter(null, null, legacyDefaultColors: true), chunks);
+
     // --- faint -> thinking colour ---
 
     [Fact]
@@ -62,11 +65,33 @@ public class AnsiColorRewriterTests
         => Assert.Equal($"\x1b[48;2;{BandTo}m", RewriteBand("\x1b[48;2;32;32;32m"));
 
     [Fact]
+    public void Near_white_surface_background_is_retargeted()
+        => Assert.Equal($"\x1b[48;2;{BandTo}m", RewriteBand("\x1b[48;2;227;227;228m"));
+
+    [Fact]
+    public void New_near_white_surface_foreground_is_retargeted()   // the redesigned box edges
+        => Assert.Equal($"\x1b[38;2;{BandTo}m", RewriteBand("\x1b[38;2;227;227;228m"));
+
+    [Fact]
     public void Other_backgrounds_are_untouched()
         => Assert.Equal("\x1b[48;2;10;20;30m", RewriteBand("\x1b[48;2;10;20;30m"));
 
+    [Theory]
+    [InlineData("48;2;58;150;221", "48;2;97;214;214")]
+    [InlineData("38;2;255;255;255", "38;2;12;12;12")]
+    [InlineData("38;2;58;150;221", "38;2;188;68;167")]
+    [InlineData("38;2;19;161;14", "38;2;22;198;12")]
+    [InlineData("38;2;97;100;104", "38;2;134;134;134")]
+    [InlineData("38;2;122;124;128", "38;2;112;112;112")]
+    public void Legacy_default_colours_are_retargeted(string source, string target)
+        => Assert.Equal($"\x1b[{target}m", RewriteLegacy($"\x1b[{source}m"));
+
     [Fact]
-    public void Foreground_matching_band_source_is_also_remapped()   // the ▀/▄ box edges
+    public void Legacy_default_remap_preserves_unknown_truecolor()
+        => Assert.Equal("\x1b[38;2;1;2;3m", RewriteLegacy("\x1b[38;2;1;2;3m"));
+
+    [Fact]
+    public void Foreground_matching_band_source_is_also_remapped()   // the half-block box edges
         => Assert.Equal($"\x1b[38;2;{BandTo}m", RewriteBand("\x1b[38;2;32;32;32m"));
 
     [Fact]
@@ -106,6 +131,7 @@ public class AnsiColorRewriterTests
     {
         Assert.True(new AnsiColorRewriter(Thinking, null).IsActive);
         Assert.True(new AnsiColorRewriter(null, Band).IsActive);
+        Assert.True(new AnsiColorRewriter(null, null, legacyDefaultColors: true).IsActive);
         Assert.False(new AnsiColorRewriter(null, null).IsActive);
     }
 }

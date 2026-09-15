@@ -26,7 +26,12 @@ public sealed class PtyHost : IAsyncDisposable
     private readonly TaskCompletionSource _exited = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<int> _exitCode = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    private PtyHost(IPtyConnection conn, RawConsoleMode raw, bool resetColorsOnDispose, AnsiColorRewriter? rewriter, BannerTagInjector? banner)
+    private PtyHost(
+        IPtyConnection conn,
+        RawConsoleMode raw,
+        bool resetColorsOnDispose,
+        AnsiColorRewriter? rewriter,
+        BannerTagInjector? banner)
     {
         _conn = conn;
         _raw  = raw;
@@ -107,13 +112,17 @@ public sealed class PtyHost : IAsyncDisposable
         // faint, unreadable on dark backgrounds and not palette-fixable),
         // and copilot's fixed composer-band background -> the input-band
         // colour (it's baked into copilot's theme, not the terminal palette).
-        var rewriter = theme.Thinking is not null || theme.InputBand is not null
-            ? new AnsiColorRewriter(theme.Thinking, theme.InputBand)
+        var rewriter = theme.Thinking is not null || theme.InputBand is not null || theme.LegacyDefaultColors
+            ? new AnsiColorRewriter(theme.Thinking, theme.InputBand, theme.LegacyDefaultColors)
             : null;
 
-        // Brand copilot's startup banner with the magpilot version. On by
-        // default; MAGPILOT_TERM_BANNER_TAG overrides the text or suppresses it.
-        var banner = ResolveBannerTag() is { } tag ? new BannerTagInjector(tag) : null;
+        // Brand copilot's startup banner with the magpilot version. The
+        // compatibility theme disables this because current copilot animates
+        // and redraws the welcome card; inserting bytes after layout causes
+        // wrapped/duplicated animation frames.
+        var banner = !theme.LegacyDefaultColors && ResolveBannerTag() is { } tag
+            ? new BannerTagInjector(tag)
+            : null;
 
         var options = new PtyOptions
         {
@@ -178,8 +187,8 @@ public sealed class PtyHost : IAsyncDisposable
                         await dump.WriteAsync(buf.AsMemory(0, n), _cts.Token);
                         await dump.FlushAsync(_cts.Token);
                     }
-                    // Banner tag first (matches copilot's raw "uses AI."),
-                    // then colour rewrites. The injected tag is plain text,
+                    // Banner injection matches copilot's raw "uses AI.",
+                    // then colour rewrites run last. The injected tag is plain text,
                     // so the SGR rewriter passes it through untouched.
                     ReadOnlyMemory<byte> outMem = buf.AsMemory(0, n);
                     if (_banner is not null)
@@ -191,8 +200,11 @@ public sealed class PtyHost : IAsyncDisposable
                         await dumpPost.WriteAsync(outMem, _cts.Token);
                         await dumpPost.FlushAsync(_cts.Token);
                     }
-                    await stdout.WriteAsync(outMem, _cts.Token);
-                    await stdout.FlushAsync(_cts.Token);
+                    if (outMem.Length > 0)
+                    {
+                        await stdout.WriteAsync(outMem, _cts.Token);
+                        await stdout.FlushAsync(_cts.Token);
+                    }
                 }
             }
             catch (OperationCanceledException) { }

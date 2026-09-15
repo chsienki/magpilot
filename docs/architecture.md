@@ -241,6 +241,13 @@ binary stays as it is. The launcher:
    currently subscribed sees the SSE event and stops driving BEFORE
    ownership flips. Without this courtesy the SPA only learns about
    the takeover when its NEXT `/messages` POST returns 409.
+7. On PTY paths, applies the configured terminal palette to the outer
+   terminal. The same output pipeline can rewrite copilot's fixed
+   composer-surface greys, faint reasoning text, and current Base-16-derived
+   truecolor tokens when the theme configures `inputBand`, `thinking`, or
+   `legacyDefaultColors`. Compatibility mode suppresses startup-banner
+   injection because copilot's animated welcome card cannot account for text
+   inserted after its layout pass.
 
 All launcher-side diagnostics that fire while copilot is rendering
 its TUI (SSE-subscribe failures, post-spawn detection timeouts,
@@ -269,6 +276,10 @@ or a `System.Net.Http.Json` call without a `JsonTypeInfo<T>` compiles
 but throws `NotSupportedException` at runtime under AOT;
 `HostJsonContractTests` pins the wire shapes so a naming-policy slip is
 caught in CI rather than in the field.
+
+Because application code is embedded in the Native AOT executable, local
+launcher hotpatches must replace `magpilot.exe`; copying a managed
+`magpilot.dll` beside it has no effect.
 
 ## Auth model
 
