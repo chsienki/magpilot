@@ -20,8 +20,8 @@ public static class AgentEndpoints
         // launcher's banner path doesn't need MAGPILOT_AGENT_TOKEN set.
         routes.MapGet("/api/version", () =>
             new VersionInfo(Versioning.AssemblyVersion, Versioning.ProtocolVersion));
-        routes.MapGet("/api/version/latest", (LatestVersionCache cache) =>
-            cache.Get());
+        routes.MapGet("/api/version/latest", (LatestVersionCache cache, string? from) =>
+            cache.Get(from));
 
         var api = routes.MapGroup("/api").RequireAuthorization();
 

@@ -20,18 +20,30 @@ internal static class UpdateBanner
             var baseUrl = (InstallConfig.ResolveValue("MAGPILOT_AGENT_URL")
                 ?? "http://127.0.0.1:5099").TrimEnd('/');
             using var http = new HttpClient { Timeout = TimeSpan.FromMilliseconds(500) };
-            var info = await http.GetFromJsonAsync($"{baseUrl}/api/version/latest", HostWebJsonContext.Default.LatestVersionInfo);
-            if (info is null) return;
-            if (info.UpdateAvailable && !string.IsNullOrEmpty(info.LatestVersion))
-            {
-                Console.Error.WriteLine(
-                    $"magpilot: {info.LatestVersion} available (current: {Versioning.AssemblyVersion}). " +
-                    "run `magpilot --magpilot-update` to install.");
-            }
+            await MaybePrintAsync(http, Console.Error, baseUrl, Versioning.AssemblyVersion);
         }
         catch
         {
             // Silent: this banner is opportunistic, not contractual.
+        }
+    }
+
+    internal static async Task MaybePrintAsync(
+        HttpClient http,
+        TextWriter error,
+        string baseUrl,
+        string currentVersion)
+    {
+        var from = Uri.EscapeDataString(currentVersion);
+        var info = await http.GetFromJsonAsync(
+            $"{baseUrl.TrimEnd('/')}/api/version/latest?from={from}",
+            HostWebJsonContext.Default.LatestVersionInfo);
+        if (info is null) return;
+        if (info.UpdateAvailable && !string.IsNullOrEmpty(info.LatestVersion))
+        {
+            error.WriteLine(
+                $"magpilot: {info.LatestVersion} available (current: {currentVersion}). " +
+                "run `magpilot --magpilot-update` to install.");
         }
     }
 }

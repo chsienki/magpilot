@@ -7,9 +7,10 @@ namespace Magpilot.Agent.Update;
 /// <summary>
 /// Background service that polls the hub's <c>/api/agent-version</c>
 /// endpoint every 15 minutes (after a 30s startup delay so the hub has
-/// time to come up if both are launched together) and writes the result
-/// into <see cref="LatestVersionCache"/>. The launcher reads from the
-/// cache on every invocation via the agent's <c>/api/version/latest</c>.
+/// time to come up if both are launched together) and writes the release
+/// metadata into <see cref="LatestVersionCache"/>. The launcher reads from
+/// the cache on every invocation via the agent's
+/// <c>/api/version/latest?from=&lt;launcher-version&gt;</c>.
 ///
 /// <para>
 /// No-op when <c>MAGPILOT_HUB_URL</c> or <c>MAGPILOT_HUB_BEARER</c> are
@@ -19,10 +20,11 @@ namespace Magpilot.Agent.Update;
 /// </para>
 ///
 /// <para>
-/// The <c>?from=</c> query param tells the hub our current version so it
-/// can compute <c>UpdateAvailable</c> for us specifically -- we don't
-/// have to make that call locally and risk version-comparison drift
-/// between agent and hub.
+/// The poll's <c>?from=</c> query reports the agent version for logging and
+/// compatibility with the hub contract. The cache discards that caller-specific
+/// <c>UpdateAvailable</c> bit and recomputes it when a launcher supplies its own
+/// version. This matters when an interrupted install updates the agent and
+/// leaves the launcher behind.
 /// </para>
 /// </summary>
 public sealed class UpdatePoller(

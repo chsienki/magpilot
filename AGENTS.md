@@ -463,13 +463,14 @@ short version that matters for AI agents working on this repo:
 GitHub Releases <--(every 1h)-- Hub.ReleaseTracker --> ReleaseCache
                                                           |
               GET /api/agent-version?from=<ver>           |
-   Agent.UpdatePoller (every 15min) <-----<--<--<--<--<--+
+   Agent.UpdatePoller (every 15min; caches release metadata)
             |
             v
        LatestVersionCache
             |
             v
-   GET /api/version/latest (NO auth) <----- magpilot launcher
+   GET /api/version/latest?from=<launcher-ver> (NO auth)
+                                            <----- magpilot launcher
                                             (every invocation: 500ms timeout,
                                              prints banner if updateAvailable;
                                              also drives --magpilot-update)
@@ -485,6 +486,11 @@ Endpoints added by the packaging work:
 
 The agent's version endpoints are deliberately **unauthenticated** so
 the launcher can show its banner without `MAGPILOT_AGENT_TOKEN` set.
+`LatestVersionCache` does not preserve the hub's caller-specific
+`UpdateAvailable` bit: `/api/version/latest` recomputes it from the launcher's
+`from` value. Agent and launcher binaries can diverge after an interrupted or
+partial installer run; comparing only the agent version would falsely report
+an older launcher as current and make `--magpilot-update` a no-op.
 
 Publishing a GitHub release makes it eligible for discovery; the deployed hub
 is the authority local agents poll. `ReleaseTracker` refreshes immediately on

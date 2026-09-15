@@ -30,6 +30,12 @@ public static class Versioning
 {
     public const int ProtocolVersion = 1;
 
+    public static bool IsUpdateAvailable(string? currentVersion, string? latestVersion) =>
+        !string.IsNullOrEmpty(currentVersion) &&
+        Version.TryParse(currentVersion, out var current) &&
+        Version.TryParse(latestVersion, out var latest) &&
+        latest > current;
+
     public static string AssemblyVersion
     {
         get
@@ -60,8 +66,8 @@ public sealed record VersionInfo(
 ///
 /// <para>
 /// <see cref="UpdateAvailable"/> is computed against the requesting
-/// component's current version when known; otherwise it's a raw
-/// "is there a newer release in GitHub" answer.
+/// component's current version. It is <see langword="false"/> when the
+/// caller omits or supplies an invalid version.
 /// </para>
 /// </summary>
 public sealed record LatestVersionInfo(

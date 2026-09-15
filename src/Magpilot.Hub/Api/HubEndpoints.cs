@@ -209,15 +209,10 @@ public static class HubEndpoints
                     UpdateAvailable: false));
             }
 
-            var updateAvailable = false;
-            if (!string.IsNullOrEmpty(from)
-                && Version.TryParse(from, out var fromV)
-                && Version.TryParse(cached.LatestVersion, out var latestV))
+            return Results.Ok(cached with
             {
-                updateAvailable = latestV > fromV;
-            }
-
-            return Results.Ok(cached with { UpdateAvailable = updateAvailable });
+                UpdateAvailable = Versioning.IsUpdateAvailable(from, cached.LatestVersion),
+            });
         });
 
         // Main agent list, scoped per-user. An infra bearer (preflight,
