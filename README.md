@@ -139,7 +139,6 @@ dotnet run --project src/Magpilot.Agent
 
 # Run the hub (in another terminal)
 $env:MAGPILOT_HUB_BEARER  = "dev-bearer"
-$env:MAGPILOT_AGENT_TOKEN = "dev-token"
 $env:MAGPILOT_DEV_BYPASS_AUTH = "true"
 $env:ASPNETCORE_URLS       = "http://localhost:7088"
 dotnet run --project src/Magpilot.Hub
@@ -163,7 +162,7 @@ elevation when it needs it):
 irm https://raw.githubusercontent.com/chsienki/magpilot/main/scripts/install.ps1 | iex
 ```
 
-That downloads the latest signed installer from
+That downloads the latest installer from
 [Releases](https://github.com/chsienki/magpilot/releases), verifies its
 SHA256 against the matching `.sha256` asset, and runs it. The wizard
 just collects target directory + scheduled-task settings -- no

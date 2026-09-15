@@ -432,7 +432,7 @@ with the installed agent" above.
 | `MAGPILOT_TERM_BACKGROUND` | magpilot launcher (optional) | `auto` (default), `dark`, or `light`. Controls the `COLORFGBG` hint the launcher passes to copilot so its TUI themes for the right background. See "Terminal theming" below. |
 | `MAGPILOT_TERM_ENABLE_GITHUB_THEME` | magpilot launcher (optional) | `1` (default) / `0`. When on, sets `COPILOT_GITHUB_THEME=1` for the child so copilot's GitHub colour mode is selectable in its own `/theme` picker. |
 | `MAGPILOT_TERM_THEME` / `MAGPILOT_TERM_THEME_FILE` | magpilot launcher (optional) | Name of a palette file at `<install>\config\themes\<name>.json`, or an explicit path. Enables ANSI-palette colour overrides. See "Terminal theming" below. |
-| `MAGPILOT_TERM_BANNER_TAG` | magpilot launcher (optional) | Text appended after copilot's `uses AI.` startup banner. Default `(Magpilot v<version>)`; set a custom string (inserted verbatim, so include your own leading space) or `0`/`off`/`false`/`none`/empty to suppress. PTY paths only. See "Terminal theming" below. |
+| `MAGPILOT_TERM_BANNER_TAG` | magpilot launcher (optional) | Text appended after copilot's `uses AI.` startup banner. Default `(Magpilot v<version>)`; set a custom string (inserted verbatim, so include your own leading space) or `0`/`off`/`false`/`none`/empty to suppress. PTY paths only. A theme with `legacyDefaultColors=true` suppresses the tag because copilot's animated welcome-card redraw cannot account for inserted text. See "Terminal theming" below. |
 
 ## Windows packaging + autoupdate
 
@@ -485,6 +485,16 @@ Endpoints added by the packaging work:
 
 The agent's version endpoints are deliberately **unauthenticated** so
 the launcher can show its banner without `MAGPILOT_AGENT_TOKEN` set.
+
+Publishing a GitHub release makes it eligible for discovery; the deployed hub
+is the authority local agents poll. `ReleaseTracker` refreshes immediately on
+hub startup and hourly thereafter, then each agent refreshes its local cache
+every 15 minutes after a 30-second startup delay. A tag also publishes the hub
+`:latest` image, so letting watchtower recreate the hub (or forcing
+`docker compose pull hub && docker compose up -d hub`) both deploys the release
+and removes the possible one-hour discovery wait. Verify
+`/api/agent-version?from=<old-version>` before expecting launchers to offer the
+installer.
 
 ### Launcher subcommands
 
@@ -1218,7 +1228,11 @@ When making a release:
 2. Commit ("bump VERSION to X.Y.Z" is a fine message).
 3. `git tag vX.Y.Z`, `git push --tags`.
 4. Wait for the Action; review the draft release; publish it.
-5. On the dev machine: `magpilot --magpilot-update` to test.
+5. Let watchtower deploy the tag's `:latest` hub image, or force
+   `docker compose pull hub && docker compose up -d hub`; verify the hub's
+   authenticated `/api/agent-version?from=<old-version>` reports the release.
+6. Wait for the agent's next 15-minute poll (or restart it), then run
+   `magpilot --magpilot-update` on the dev machine to test.
 
 ## Architectural rules and gotchas
 

@@ -45,8 +45,8 @@ $ver = (Get-Content VERSION).Trim()
 
 dotnet publish src\Magpilot.Agent -c Release -r win-x64 --self-contained `
     -p:PublishSingleFile=false -o publish\agent
-dotnet publish src\Magpilot.Host -c Release -r win-x64 --self-contained `
-    -p:PublishSingleFile=false -o publish\bin
+dotnet publish src\Magpilot.Host\Magpilot.Host.csproj -c Release -r win-x64 `
+    -o publish\bin
 
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
     /DAppVersion=$ver /DPublishDir="$PWD\publish" installer\magpilot.iss
@@ -55,9 +55,11 @@ dotnet publish src\Magpilot.Host -c Release -r win-x64 --self-contained `
 ls installer\installer-output\magpilot-setup-$ver.exe
 ```
 
-`PublishSingleFile=false` is required because Pty.Net needs `os64\conpty.dll`
-(and `OpenConsole.exe`) physically next to `magpilot.exe`; SingleFile would
-extract them per-run and slow startup.
+`Magpilot.Host` has `PublishAot=true`, so its publish produces one native
+`magpilot.exe`; Pty.Net's `os64\conpty.dll` and `OpenConsole.exe` remain
+physical neighbors copied by the project. The executable embeds the launcher
+code: a local hotpatch must replace `magpilot.exe`. Copying a managed
+`magpilot.dll` beside the installed executable has no effect.
 
 ## Files
 

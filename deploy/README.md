@@ -60,6 +60,16 @@ If you've just published and don't want to wait for the next poll:
 ssh proxmox "pct exec 102 -- bash -c 'cd /srv/magpilot && docker compose pull hub && docker compose up -d hub'"
 ```
 
+The deployed hub is the update-discovery authority for local agents. It polls
+GitHub Releases immediately at startup and hourly thereafter; recreating it
+after publishing removes the possible one-hour delay before
+`/api/agent-version` advertises the release. Agents cache that answer on their
+own 15-minute poll. Verify the hub before expecting a client update prompt:
+
+```powershell
+ssh proxmox "pct exec 102 -- curl -fsS -H 'Authorization: Bearer <hub-bearer>' 'http://127.0.0.1:7088/api/agent-version?from=<old-version>'"
+```
+
 ### Pinning to a specific version
 
 For staging or rollback, edit `/srv/magpilot/docker-compose.yml` to
