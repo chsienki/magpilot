@@ -142,7 +142,7 @@ src/
     CopilotLocator.cs              <- finds the real copilot binary while
                                       avoiding the wrapper itself
     PtyHost.cs                     <- spawns copilot in a real PTY via
-                                      sch.pty.net; bidirectional pump;
+                                      Porta.Pty; bidirectional pump;
                                       ShutdownGracefullyAsync writes /exit\r
                                       to the PTY master before falling back
                                       to PTY.Kill.
@@ -197,6 +197,11 @@ docs/architecture.md   <- topology + the agent HTTP contract. Read before
                           touching SSE / quick-prompt / pinned sessions.
 spikes/acp-smoke/      <- standalone ACP smoke test (Node.js)
 scripts/build-hub.ps1  <- publishes Web SPA -> copies into Hub/wwwroot
+scripts/capture-tui-matrix.ps1 <- interactive black-box TUI characterization
+                                  runner; captures controlled hint combinations.
+scripts/probe-terminal-paths.ps1 <- compares Node TTY capabilities + terminal
+                                    query replies direct vs nested ConPTY.
+tools/tui-matrix/      <- capture renderer + offline xterm.js theme lab.
 scripts/test-shim-phase1.sh <- bash acceptance test for the four shim endpoints.
                                Honors TEST_HOST_PID env override (MSYS2 bash's $$
                                is an internal PID the Win32 process table can't see).
@@ -433,6 +438,10 @@ with the installed agent" above.
 | `MAGPILOT_TERM_ENABLE_GITHUB_THEME` | magpilot launcher (optional) | `1` (default) / `0`. When on, sets `COPILOT_GITHUB_THEME=1` for the child so copilot's GitHub colour mode is selectable in its own `/theme` picker. |
 | `MAGPILOT_TERM_THEME` / `MAGPILOT_TERM_THEME_FILE` | magpilot launcher (optional) | Name of a palette file at `<install>\config\themes\<name>.json`, or an explicit path. Enables ANSI-palette colour overrides. See "Terminal theming" below. |
 | `MAGPILOT_TERM_BANNER_TAG` | magpilot launcher (optional) | Text appended after copilot's `uses AI.` startup banner. Default `(Magpilot v<version>)`; set a custom string (inserted verbatim, so include your own leading space) or `0`/`off`/`false`/`none`/empty to suppress. PTY paths only. A theme with `legacyDefaultColors=true` suppresses the tag because copilot's animated welcome-card redraw cannot account for inserted text. See "Terminal theming" below. |
+| `MAGPILOT_TERM_DUMP` / `MAGPILOT_TERM_DUMP_POST` | magpilot launcher diagnostics (optional) | Raw pre-rewrite and final post-rewrite ANSI capture paths. Setting either forces PTY passthrough for an agentless `--magpilot-tui-options=none` run so the baseline remains capturable. |
+| `MAGPILOT_TERM_DUMP_MS` | magpilot launcher diagnostics (optional) | Positive capture duration in milliseconds, measured from Copilot's first output byte rather than process spawn. Dumps close when the duration elapses while Copilot continues running, preserving the settled welcome screen before `/exit` cleanup. Unset means capture until exit. |
+| `MAGPILOT_TERM_MANIFEST` | magpilot launcher diagnostics (optional) | JSON manifest path recording enabled options, resolved child hints, terminal dimensions, detected background, and which palette/rewrite/banner stages activated. |
+| `MAGPILOT_CONPTY` | magpilot launcher (optional) | `app-local` (default) maps to Porta.Pty's out-of-band `conpty.dll` + `OpenConsole.exe`; `system`/`inbox` selects Windows' in-box `kernel32!CreatePseudoConsole`. Manifests record the actual `oob`/`inbox` choice. |
 
 ## Windows packaging + autoupdate
 
@@ -512,6 +521,8 @@ installer.
 | `magpilot --magpilot-update` | Download + run the latest installer silently (validates SHA256 against the GitHub release asset) |
 | `magpilot --magpilot-pair=<bundle>` | Pair the agent with a hub. `<bundle>` is copied from the hub's `/admin/enroll` page; the launcher decodes it, upserts the three keys into `magpilot.env`, and bounces the installed scheduled task. |
 | `magpilot --magpilot-agency` | Wrap the interactive session in Microsoft's `agency` CLI (`agency copilot`) so it runs with agency's curated MCP servers + tooling. Copilot still runs underneath, so the session is agent-coordinated + hub-visible; a fresh (no-sid) agency session may register late because the PTY child is `agency`, not `copilot` (see `CopilotLaunch` / `AgencyLocator`). |
+| `magpilot --magpilot-no-tui-changes` | Disable every launcher-owned TUI mutation: no background probe, no default `TERM`/`COLORTERM`, no setting or overriding `COLORFGBG`/`COPILOT_GITHUB_THEME`, no palette OSC, no output colour rewrite, and no injected banner. Inherited variables remain untouched, matching raw Copilot. Agent-coordinated sessions still require the PTY for ownership detection and graceful handoff; agentless passthrough direct-execs for raw-Copilot parity. |
+| `magpilot --magpilot-tui-options=<list>` | Positive allowlist of launcher-owned TUI mutations: `term`, `truecolor`, `background`, `github-theme`, `palette`, `thinking`, `input-band`, `legacy-colors`, `banner`; `rewrite` is a group alias for all three rewrite stages. Also accepts `all` (default) and `none`. `--magpilot-no-tui-changes` is an alias for `none`; specifying both is an error. |
 | `magpilot --magpilot-help` | Wrapper-only flag help |
 
 The banner check fires on **every** non-help, non-skip-check invocation
@@ -536,6 +547,44 @@ Three launch paths, with different reach:
   env + OSC theming only -- copilot owns the TTY directly, so there's no
   stream for the launcher to rewrite. (`TerminalTheming.cs` is the shared
   env+OSC applier for all paths.)
+
+`--magpilot-no-tui-changes` bypasses all of those launcher-owned changes.
+On an agent-coordinated launch the PTY remains because post-spawn ownership
+detection and graceful `/exit` handoff depend on it, but the child receives
+the inherited environment unchanged: Magpilot does not probe the background,
+default `TERM`/`COLORTERM`, set or override
+`COLORFGBG`/`COPILOT_GITHUB_THEME`, apply a palette, rewrite output bytes, or
+inject its banner tag. When there is no agent coordination (including
+`--magpilot-skip-check`), the flag skips the PTY and direct-execs Copilot,
+matching a raw `copilot` launch. Operational launcher messages such as
+ownership prompts and handoff notices are not TUI mutations and remain
+visible.
+
+For controlled characterization, `--magpilot-tui-options=<list>` gates each
+stage independently:
+
+| Option | PTY behavior | Direct-exec behavior |
+|---|---|---|
+| `term` | Defaults a missing `TERM` to `xterm-256color` | No change; the real terminal environment is inherited directly |
+| `truecolor` | Defaults a missing `COLORTERM` to `truecolor` | No change; the real terminal environment is inherited directly |
+| `background` | Applies an explicit dark/light pin or probes OSC 11 and sets `COLORFGBG` | Applies only an explicit dark/light `COLORFGBG` pin; Copilot can perform its own OSC 11 probe |
+| `github-theme` | Sets `COPILOT_GITHUB_THEME=1` when enabled by config | Same |
+| `palette` | Applies and later resets theme OSC 4/10/11 overrides | Same |
+| `thinking` | Replaces every faint (`SGR 2`) span with the configured thinking colour | No effect because Copilot owns the output stream |
+| `input-band` | Retargets Copilot's known fixed composer-surface truecolors | No effect because Copilot owns the output stream |
+| `legacy-colors` | Retargets the known Base-16-derived truecolor ramp to classic defaults | No effect because Copilot owns the output stream |
+| `banner` | Enables startup-banner injection unless compatibility mode suppresses it | No effect because Copilot owns the output stream |
+
+`all` preserves the launcher's established behavior. `none` preserves the
+child's inherited environment and output. Duplicate option lists, unknown
+values, `all`/`none` combined with another value, and mixing the explicit list
+with `--magpilot-no-tui-changes` fail before launch.
+
+`rewrite` remains accepted as a convenience alias for
+`thinking,input-band,legacy-colors`. Keep the atomic names available for
+diagnostics and user control: Copilot uses faint styling for welcome-card
+borders and composer separators as well as reasoning, so the `thinking`
+rewrite changes UI chrome even when no reasoning is visible.
 
 What happens at spawn (helpers: `TerminalColor.cs` / `TerminalThemeConfig.cs`
 / `TerminalBackgroundProbe.cs` / `AnsiColorRewriter.cs`):
@@ -611,6 +660,118 @@ instead of downgrading to bright-16 under an empty ConPTY `COLORTERM`.
 `MAGPILOT_TERM_DUMP_POST=<path>` tees what actually reaches the terminal
 (post-rewrite). Both are in the PtyHost output pump. Parse them for `48;2;` /
 `38;2;` sequences to find the exact colours copilot emits for an element.
+`MAGPILOT_TERM_DUMP_MS=<milliseconds>` closes both captures after a fixed
+settling window without stopping Copilot. `MAGPILOT_TERM_MANIFEST=<path>`
+records the exact resolved child hints, active transformation stages, shell
+markers (`MSYSTEM`, `SHELL`, `TERM_PROGRAM`, `WT_SESSION`), and .NET's
+stdin/stdout redirection view. Git Bash/MSYS and PowerShell runs are distinct
+experiments even when their explicit option lists match.
+
+The repeatable black-box workflow is `scripts/capture-tui-matrix.ps1`, with
+normalized screen rendering under `tools/tui-matrix/`:
+
+```pwsh
+npm ci --prefix .\tools\tui-matrix
+.\scripts\capture-tui-matrix.ps1 -Phase Hints -ListCases
+.\scripts\capture-tui-matrix.ps1 -Phase Hints
+.\scripts\capture-tui-matrix.ps1 -Phase Rendering
+```
+
+The hint phase generates the full 16 combinations of `term`, `truecolor`,
+`background`, and `github-theme`, plus forced dark/light background cases.
+The rendering phase isolates palette, thinking, input-band, legacy-color, and
+banner behavior. Each case
+gets a manifest, raw/post ANSI capture, normalized raw and post screen
+snapshots, a raw-vs-post diff that isolates Magpilot processing, and a
+row-level post-screen diff against the `none` baseline. See
+`tools/tui-matrix/README.md` for output interpretation.
+The `Transport` phase disables visual transformations and compares Porta.Pty's
+current app-local ConPTY with Windows' in-box implementation.
+
+Theme resolution for the matrix is explicit `-ThemeFile`, then the invoking
+shell's `MAGPILOT_TERM_THEME_FILE`/`MAGPILOT_TERM_THEME`, then the installed
+`magpilot.env`. This order is load-bearing for Git Bash users who export an
+absolute theme file in shell startup rather than storing it in the installer
+config. Manifests include the resolved palette, foreground/background,
+thinking/input-band colours, and `legacyDefaultColors` so the renderer can
+resolve ANSI palette indices to the colours the outer terminal actually used.
+
+The offline editor lives in the same tool:
+
+```pwsh
+npm run editor --prefix .\tools\tui-matrix
+# open http://127.0.0.1:5178
+```
+
+It discovers capture manifests/raw ANSI, renders them with xterm.js, exposes
+foreground/background + all 16 palette slots + thinking/input-band/legacy
+controls, inspects clicked cells, and exports theme JSON. Its semantic rewrite
+engine mirrors `AnsiColorRewriter` and is covered by Node tests. Keep it
+offline; making it own a live PTY would duplicate input, resize, clipboard,
+mouse, query-response, and handoff responsibilities already owned by
+`PtyHost`.
+
+The PTY-none baseline is not a raw direct-exec baseline. Under Git Bash,
+agentless `--magpilot-no-tui-changes` direct-execs Copilot and retains its
+richer composer bar; forcing PTY capture removes that bar even when every
+explicit TUI option is disabled. None of `TERM`, `COLORTERM`, `COLORFGBG`, or
+`COPILOT_GITHUB_THEME` restores it. Captured Copilot startup output queries all
+16 palette slots (`OSC 4;<index>;?`) and terminal modes including synchronized
+output (`CSI ? 2026 $ p`), keyboard protocol (`CSI ? u`), and `CSI ? 996 n`.
+The direct-vs-nested probe identifies the exact failure:
+
+- Node's `isTTY`, `214x59` size, color depth (`24`), and 16/256/truecolor
+  support are identical.
+- Mode replies are identical (`DECTCEM`, alternate-scroll, and synchronized
+  output; `CSI ? 2026 ; 2 $ y` reports sync output reset in both paths).
+- Direct palette/foreground/background probing returns 472 bytes containing
+  all 18 complete OSC replies. Through ConPTY the child receives only five
+  malformed bytes (`575 ESC \`).
+- Direct primary device attributes are
+  `CSI ? 61;4;6;7;14;21;22;23;24;28;32;42;52 c`; ConPTY substitutes the
+  minimal `CSI ? 1;0 c`. Secondary DA and pixel/cell dimensions match.
+
+The initial composer investigation exposed an obsolete PTY dependency:
+`sch.pty.net 0.3.36-pre` bundled app-local ConPTY binaries from January 2022.
+Microsoft added OSC 4/10/11 query handling in
+https://github.com/microsoft/terminal/pull/17729 in August 2024.
+
+`Magpilot.Host` and `Magpilot.Host.Tests` target `net10.0` and use maintained
+`Porta.Pty` 2.2.2. The rest of Magpilot remains on `net9.0`; a .NET 10 SDK
+builds both. Porta.Pty preserves the existing API shape, supports Native AOT,
+answers/filters the out-of-band startup DA1 handshake, and exposes runtime
+selection between current app-local OpenConsole and Windows' in-box ConPTY.
+`MAGPILOT_CONPTY=app-local|system` maps to its
+`PORTAPTY_CONPTY=oob|inbox` selector before the first PTY is created.
+
+**Output-drain invariant:** Windows spawns set `PtyOptions.UseAsyncIo=true`.
+Porta.Pty then closes the pseudoconsole before raising `ProcessExited`, allowing
+the output stream to drain buffered bytes through EOF. `PtyHost.DisposeAsync`
+must await its output pump before disposing the connection or restoring the
+outer terminal. Cancelling that pump at child exit truncates Copilot's final
+mouse/keyboard/synchronized-output reset sequences: the shell prompt returns,
+but the terminal no longer accepts normal input. Input/resize cancellation is
+separate; the output pump reads to EOF.
+
+The Native AOT launcher payload contains `magpilot.exe`, `conpty.dll`, and
+matching `x64/OpenConsole.exe` + `arm64/OpenConsole.exe`. Do not restore
+Pty.Net's `os64/` binaries.
+
+With Porta.Pty correctly staging OpenConsole beside its own `conpty.dll`, the
+out-of-band path matches direct Git Bash exactly in the probe: 472-byte
+OSC palette/foreground/background reply, full DA, mode reports, TTY flags,
+dimensions, console modes, and code pages. `MAGPILOT_CONPTY=system` produces
+the reduced/missing query results and remains diagnostic-only. App-local/oob
+is the default.
+
+`scripts/probe-terminal-paths.ps1` performs that diagnosis without involving
+Copilot: the same Node probe runs directly in the invoking terminal and as a
+child of `PtyHost` with all TUI changes disabled. It records Node's TTY/color
+capabilities, a child-launched Win32 console-mode snapshot (including
+`ENABLE_VIRTUAL_TERMINAL_INPUT`), plus raw replies to the palette,
+foreground/background, device, window-size, synchronized-output,
+keyboard-protocol, and terminal-status queries in
+`tools/tui-matrix/captures/terminal-probe-*/comparison.json`.
 
 Pure logic (OSC parsing, luminance, sequence generation, theme-file parsing,
 the SGR rewriter) is unit-tested in `tests/Magpilot.Host.Tests` (not in
@@ -2186,11 +2347,11 @@ config; do NOT enable Caching in the NPM UI.
 
 ## Style and conventions
 
-- Target framework: `net9.0` for everything. C# language version: latest.
+- Target framework: `net10.0` for `Magpilot.Host` and its tests; `net9.0` for
+  Agent, Hub, Shared, Web, UI, and their tests. C# language version: latest.
 - File-scoped namespaces, primary constructors, pattern matching, `var`
   when type is obvious, collection expressions, raw string literals.
-- xUnit for tests (none yet — when you add them, follow AAA and use
-  `Fact`/`Theory`).
+- xUnit for tests; follow AAA and use `Fact`/`Theory`.
 - ASCII only in source comments and string literals (PowerShell-side
   encoding can mangle non-ASCII characters in commit pipelines).
 - Keep DTOs in `Magpilot.Shared`. The SSE wire format

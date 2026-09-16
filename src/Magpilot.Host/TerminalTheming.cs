@@ -23,11 +23,16 @@ internal static class TerminalTheming
     /// pin) or null to leave <c>COLORFGBG</c> unset -- appropriate when
     /// copilot can detect the background itself.
     /// </summary>
-    public static void PopulateChildEnv(IDictionary<string, string> env, TerminalThemeConfig theme, bool? isDark)
+    public static void PopulateChildEnv(
+        IDictionary<string, string> env,
+        TerminalThemeConfig theme,
+        bool? isDark,
+        bool applyBackgroundHint = true,
+        bool applyGithubTheme = true)
     {
-        if (isDark is { } dark)
+        if (applyBackgroundHint && isDark is { } dark)
             env["COLORFGBG"] = TerminalColor.ColorFgBg(dark);
-        if (theme.EnableGithubTheme)
+        if (applyGithubTheme && theme.EnableGithubTheme)
             env["COPILOT_GITHUB_THEME"] = "1";
     }
 

@@ -46,7 +46,9 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '9.0.x'
+          dotnet-version: |
+            9.0.x
+            10.0.x
 
       - name: Read version
         id: version
@@ -66,8 +68,8 @@ jobs:
       # Launcher: Native AOT (PublishAot=true lives in Magpilot.Host.csproj).
       # ilc produces a single native magpilot.exe (no coreclr.dll / deps.json,
       # no JIT warmup) which matters because the launcher runs on every
-      # `magpilot` invocation. Pty.Net's os64\conpty.dll + OpenConsole.exe are
-      # still copied physically beside the exe by the csproj's <None> items.
+      # `magpilot` invocation. The launcher targets .NET 10; Porta.Pty supplies
+      # current app-local ConPTY and remains Native AOT-compatible.
       # windows-latest ships the VC++ build tools ilc's link step needs.
       - name: Publish Magpilot.Host launcher (win-x64, Native AOT)
         run: >
@@ -144,9 +146,9 @@ jobs:
         run: |
           PREV_TAG=$(git tag --sort=-v:refname | grep '^v' | sed -n '2p')
           if [ -n "$PREV_TAG" ]; then
-            CHANGES=$(git log --pretty=format:"- %s" "$PREV_TAG..${{ github.ref_name }}" | grep -v "^- bump VERSION" || true)
+            CHANGES=$(git log --pretty=format:"- %s" "$PREV_TAG..${{ github.ref_name }}" | grep -vi "^- bump VERSION" || true)
           else
-            CHANGES=$(git log --pretty=format:"- %s" "${{ github.ref_name }}" | grep -v "^- bump VERSION" || true)
+            CHANGES=$(git log --pretty=format:"- %s" "${{ github.ref_name }}" | grep -vi "^- bump VERSION" || true)
           fi
           {
             echo "## What's new"

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Magpilot Theme Lab</title>
+  <link rel="stylesheet" href="/node_modules/@xterm/xterm/css/xterm.css">
+  <link rel="stylesheet" href="/editor.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Magpilot Theme Lab</h1>
+      <p>Replay a captured Copilot screen, inspect shared selectors, and export a theme.</p>
+    </div>
+    <div class="toolbar">
+      <label>
+        Capture
+        <select id="capture"></select>
+      </label>
+      <button id="capture-theme" type="button">Use capture theme</button>
+      <label class="file-button">
+        Load theme JSON
+        <input id="theme-file" type="file" accept=".json,application/json">
+      </label>
+      <button id="export-theme" type="button">Export theme JSON</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="preview-panel">
+      <div id="terminal-wrap">
+        <div id="terminal"></div>
+        <div id="cell-highlight" hidden></div>
+      </div>
+      <div id="status">Loading captures...</div>
+    </section>
+
+    <aside>
+      <section>
+        <h2>Base colors</h2>
+        <div id="base-colors" class="control-grid"></div>
+      </section>
+
+      <section>
+        <h2>Preview renderer</h2>
+        <label class="toggle-row">
+          <input id="bold-bright" type="checkbox" checked>
+          <span>
+            <strong>Bold uses bright palette slots</strong>
+            <small>Matches xterm.js and Windows Terminal's usual intense-text behavior.</small>
+          </span>
+        </label>
+        <label class="setting-row">
+          <span>
+            <strong>Minimum contrast</strong>
+            <small>1 means no automatic color correction.</small>
+          </span>
+          <select id="minimum-contrast">
+            <option value="1">1 (exact colors)</option>
+            <option value="4.5">4.5 (AA)</option>
+            <option value="7">7 (AAA)</option>
+          </select>
+        </label>
+        <p class="renderer-note">
+          xterm.js uses the requested RGB values, but font rasterization and
+          faint-text blending are not pixel-identical to Windows Terminal.
+        </p>
+      </section>
+
+      <section>
+        <h2>ANSI palette</h2>
+        <p class="hint">Slots 5 and 13 are normal and bright magenta.</p>
+        <div id="palette" class="palette-grid"></div>
+      </section>
+
+      <section>
+        <h2>Semantic rewrites</h2>
+        <div id="semantic-colors" class="control-grid"></div>
+        <label class="toggle-row">
+          <input id="legacy-colors" type="checkbox">
+          <span>
+            <strong>Legacy default colors</strong>
+            <small id="legacy-description">Retarget known Copilot truecolor tokens to the classic hierarchy.</small>
+          </span>
+        </label>
+      </section>
+
+      <section>
+        <h2>Cell inspector</h2>
+        <div id="inspector" class="inspector empty">
+          Click a character or surface in the terminal preview.
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <script type="module" src="/editor.mjs"></script>
+</body>
+</html>

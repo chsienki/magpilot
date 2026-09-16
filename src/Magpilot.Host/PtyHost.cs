@@ -1,5 +1,5 @@
 using Magpilot.Shared;
-using Pty.Net;
+using Porta.Pty;
 
 namespace Magpilot.Host;
 
@@ -22,22 +22,26 @@ public sealed class PtyHost : IAsyncDisposable
     private readonly bool _resetColorsOnDispose;
     private readonly AnsiColorRewriter? _rewriter;
     private readonly BannerTagInjector? _banner;
+    private readonly TimeSpan? _dumpDuration;
     private readonly CancellationTokenSource _cts = new();
     private readonly TaskCompletionSource _exited = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<int> _exitCode = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private Task _outputPump = Task.CompletedTask;
 
     private PtyHost(
         IPtyConnection conn,
         RawConsoleMode raw,
         bool resetColorsOnDispose,
         AnsiColorRewriter? rewriter,
-        BannerTagInjector? banner)
+        BannerTagInjector? banner,
+        TimeSpan? dumpDuration)
     {
         _conn = conn;
         _raw  = raw;
         _resetColorsOnDispose = resetColorsOnDispose;
         _rewriter = rewriter;
         _banner = banner;
+        _dumpDuration = dumpDuration;
         _conn.ProcessExited += (_, e) =>
         {
             _exitCode.TrySetResult(e.ExitCode);
@@ -53,10 +57,23 @@ public sealed class PtyHost : IAsyncDisposable
     /// Caller must dispose to clean up the PTY and restore the parent
     /// terminal mode.
     /// </summary>
-    public static async Task<PtyHost> SpawnAsync(string copilotPath, IReadOnlyList<string> argv, string cwd, CancellationToken ct = default)
+    public static async Task<PtyHost> SpawnAsync(
+        string copilotPath,
+        IReadOnlyList<string> argv,
+        string cwd,
+        LauncherTuiOptions tuiOptions = LauncherTuiOptions.All,
+        CancellationToken ct = default)
     {
+        var conPtyImplementation = ConPtySelector.Configure();
         var (cols, rows) = TryGetWindowSize();
-        var theme = TerminalThemeConfig.Load();
+        var dumpDuration = TerminalDiagnostics.ResolveDumpDuration();
+        var needsTheme = (tuiOptions &
+            (LauncherTuiOptions.Background |
+             LauncherTuiOptions.GithubTheme |
+             LauncherTuiOptions.Palette |
+             LauncherTuiOptions.Rewrite |
+             LauncherTuiOptions.Banner)) != 0;
+        var theme = needsTheme ? TerminalThemeConfig.Load() : null;
 
         // Raw mode must be on before we probe the terminal (so its OSC 11
         // reply arrives unbuffered) and before the pumps start (so nothing
@@ -70,20 +87,20 @@ public sealed class PtyHost : IAsyncDisposable
         // terminal directly) and pass the answer down via COLORFGBG, which
         // copilot reads as its documented dark/light fallback. An explicit
         // config value skips the probe.
-        bool? isDark = TerminalTheming.PinnedBackground(theme)
-            ?? (TerminalBackgroundProbe.DetectBackground(TimeSpan.FromMilliseconds(250)) is { } bg
-                ? TerminalColor.IsDark(bg)
-                : null);
+        var resetColorsOnDispose = false;
+        AnsiColorRewriter? rewriter = null;
+        BannerTagInjector? banner = null;
+        Rgb? thinking = null;
+        Rgb? inputBand = null;
+        var legacyColors = false;
+        Rgb? detectedBackground = null;
+        bool? isDark = null;
 
-        // Apply any configured palette overrides to the real terminal. These
-        // recolour copilot's ANSI-indexed output (its base-16 "default"
-        // theme); truecolor themes emit fixed RGB and are unaffected. Reset
-        // on dispose so we never leave the user's terminal recoloured.
-        var resetColorsOnDispose = TerminalTheming.ApplyPalette(theme);
-
-        var env = new Dictionary<string, string>(StringComparer.Ordinal)
+        var env = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (tuiOptions.Includes(LauncherTuiOptions.Term))
+            env["TERM"] = Environment.GetEnvironmentVariable("TERM") ?? "xterm-256color";
+        if (tuiOptions.Includes(LauncherTuiOptions.TrueColor))
         {
-            ["TERM"] = Environment.GetEnvironmentVariable("TERM") ?? "xterm-256color",
             // Hint truecolor support so the child uses themed 24-bit RGB
             // sequences instead of falling back to ANSI 16-color bright
             // variants. Most modern terminals (Windows Terminal, alacritty,
@@ -94,35 +111,79 @@ public sealed class PtyHost : IAsyncDisposable
             // theme then renders saturated/wrong. If the parent process
             // already has COLORTERM set we honour it; otherwise force
             // truecolor as the safe default.
-            ["COLORTERM"] = Environment.GetEnvironmentVariable("COLORTERM") ?? "truecolor",
-        };
+            env["COLORTERM"] = Environment.GetEnvironmentVariable("COLORTERM") ?? "truecolor";
+        }
+
         // Mix in our env so the child inherits the user's PATH, USERPROFILE etc.
         foreach (System.Collections.DictionaryEntry kv in Environment.GetEnvironmentVariables())
             env[(string)kv.Key] = (string?)kv.Value ?? "";
 
-        // Our computed hints win over inherited env: the probe reflects the
-        // actual terminal (more reliable than a stale inherited COLORFGBG),
-        // and the github-theme flag is a deliberate opt-in that exposes
-        // copilot's GitHub colour mode in its own /theme picker.
-        TerminalTheming.PopulateChildEnv(env, theme, isDark);
+        if (theme is not null)
+        {
+            if (tuiOptions.Includes(LauncherTuiOptions.Background))
+            {
+                isDark = TerminalTheming.PinnedBackground(theme)
+                    ?? ((detectedBackground =
+                            TerminalBackgroundProbe.DetectBackground(TimeSpan.FromMilliseconds(250))) is { } bg
+                            ? TerminalColor.IsDark(bg)
+                            : null);
+            }
 
-        // If the theme configures a "thinking" colour or an "inputBand"
-        // colour, rewrite copilot's output byte stream to honour them:
-        // faint (SGR 2) -> the thinking colour (copilot renders reasoning
-        // faint, unreadable on dark backgrounds and not palette-fixable),
-        // and copilot's fixed composer-band background -> the input-band
-        // colour (it's baked into copilot's theme, not the terminal palette).
-        var rewriter = theme.Thinking is not null || theme.InputBand is not null || theme.LegacyDefaultColors
-            ? new AnsiColorRewriter(theme.Thinking, theme.InputBand, theme.LegacyDefaultColors)
-            : null;
+            // Apply any configured palette overrides to the real terminal.
+            // Reset on dispose so we never leave the terminal recoloured.
+            if (tuiOptions.Includes(LauncherTuiOptions.Palette))
+                resetColorsOnDispose = TerminalTheming.ApplyPalette(theme);
 
-        // Brand copilot's startup banner with the magpilot version. The
-        // compatibility theme disables this because current copilot animates
-        // and redraws the welcome card; inserting bytes after layout causes
-        // wrapped/duplicated animation frames.
-        var banner = !theme.LegacyDefaultColors && ResolveBannerTag() is { } tag
-            ? new BannerTagInjector(tag)
-            : null;
+            // Our computed hints win over inherited env: the probe reflects
+            // the actual terminal, and the GitHub-theme flag exposes that
+            // colour mode in copilot's own /theme picker.
+            TerminalTheming.PopulateChildEnv(
+                env,
+                theme,
+                isDark,
+                applyBackgroundHint: tuiOptions.Includes(LauncherTuiOptions.Background),
+                applyGithubTheme: tuiOptions.Includes(LauncherTuiOptions.GithubTheme));
+
+            // Theme-file-only rewrites for output that cannot be controlled
+            // through the terminal palette.
+            thinking = tuiOptions.Includes(LauncherTuiOptions.Thinking)
+                ? theme.Thinking
+                : null;
+            inputBand = tuiOptions.Includes(LauncherTuiOptions.InputBand)
+                ? theme.InputBand
+                : null;
+            legacyColors = tuiOptions.Includes(LauncherTuiOptions.LegacyColors) &&
+                theme.LegacyDefaultColors;
+            rewriter = thinking is not null || inputBand is not null || legacyColors
+                ? new AnsiColorRewriter(thinking, inputBand, legacyColors)
+                : null;
+
+            // Brand copilot's startup banner with the Magpilot version.
+            // Compatibility mode disables this because the welcome card
+            // animation cannot account for bytes inserted after layout.
+            banner = tuiOptions.Includes(LauncherTuiOptions.Banner) &&
+                !theme.LegacyDefaultColors &&
+                ResolveBannerTag() is { } tag
+                ? new BannerTagInjector(tag)
+                : null;
+        }
+
+        TerminalDiagnostics.WriteManifest(
+            "pty",
+            tuiOptions,
+            conPtyImplementation,
+            cols,
+            rows,
+            key => env.TryGetValue(key, out var value) ? value : null,
+            theme,
+            detectedBackground,
+            isDark,
+            resetColorsOnDispose,
+            thinking is not null,
+            inputBand is not null,
+            legacyColors,
+            banner is not null,
+            dumpDuration);
 
         var options = new PtyOptions
         {
@@ -133,11 +194,21 @@ public sealed class PtyHost : IAsyncDisposable
             App = copilotPath,
             CommandLine = argv.ToArray(),
             Environment = env,
+            // Porta.Pty closes the pseudoconsole before raising ProcessExited
+            // on this path, allowing the output stream to drain buffered
+            // terminal reset sequences through EOF.
+            UseAsyncIo = OperatingSystem.IsWindows(),
         };
 
         var conn = await PtyProvider.SpawnAsync(options, ct);
 
-        var host = new PtyHost(conn, raw, resetColorsOnDispose, rewriter, banner);
+        var host = new PtyHost(
+            conn,
+            raw,
+            resetColorsOnDispose,
+            rewriter,
+            banner,
+            dumpDuration);
         host.StartPumps();
         host.StartResizeWatcher();
         return host;
@@ -161,7 +232,7 @@ public sealed class PtyHost : IAsyncDisposable
     private void StartPumps()
     {
         // Output pump: PTY -> stdout
-        _ = Task.Run(async () =>
+        _outputPump = Task.Run(async () =>
         {
             var stdout = Console.OpenStandardOutput();
             var buf = new byte[4096];
@@ -170,49 +241,74 @@ public sealed class PtyHost : IAsyncDisposable
             // reaches the terminal (post-rewrite). For inspecting escape
             // sequences when tuning the theme.
             Stream? dump = null, dumpPost = null;
+            System.Diagnostics.Stopwatch? dumpTimer = null;
             var dumpPath = Environment.GetEnvironmentVariable("MAGPILOT_TERM_DUMP");
             if (!string.IsNullOrEmpty(dumpPath))
                 try { dump = File.Create(dumpPath); } catch { /* diagnostics are best-effort */ }
             var dumpPostPath = Environment.GetEnvironmentVariable("MAGPILOT_TERM_DUMP_POST");
             if (!string.IsNullOrEmpty(dumpPostPath))
                 try { dumpPost = File.Create(dumpPostPath); } catch { /* diagnostics are best-effort */ }
-            try
+
+            async ValueTask CloseDumpsAsync()
             {
-                while (!_cts.IsCancellationRequested)
+                if (dump is not null)
                 {
-                    var n = await _conn.ReaderStream.ReadAsync(buf.AsMemory(), _cts.Token);
-                    if (n <= 0) break;
-                    if (dump is not null)
-                    {
-                        await dump.WriteAsync(buf.AsMemory(0, n), _cts.Token);
-                        await dump.FlushAsync(_cts.Token);
-                    }
-                    // Banner injection matches copilot's raw "uses AI.",
-                    // then colour rewrites run last. The injected tag is plain text,
-                    // so the SGR rewriter passes it through untouched.
-                    ReadOnlyMemory<byte> outMem = buf.AsMemory(0, n);
-                    if (_banner is not null)
-                        outMem = _banner.Transform(outMem.Span);
-                    if (_rewriter is not null)
-                        outMem = _rewriter.Transform(outMem.Span);
-                    if (dumpPost is not null)
-                    {
-                        await dumpPost.WriteAsync(outMem, _cts.Token);
-                        await dumpPost.FlushAsync(_cts.Token);
-                    }
-                    if (outMem.Length > 0)
-                    {
-                        await stdout.WriteAsync(outMem, _cts.Token);
-                        await stdout.FlushAsync(_cts.Token);
-                    }
+                    await dump.DisposeAsync();
+                    dump = null;
+                }
+                if (dumpPost is not null)
+                {
+                    await dumpPost.DisposeAsync();
+                    dumpPost = null;
                 }
             }
-            catch (OperationCanceledException) { }
+
+            async ValueTask WriteVisibleOutputAsync(
+                ReadOnlyMemory<byte> output,
+                CancellationToken cancellationToken)
+            {
+                if (_banner is not null)
+                    output = _banner.Transform(output.Span);
+                if (_rewriter is not null)
+                    output = _rewriter.Transform(output.Span);
+                if (dumpPost is not null)
+                {
+                    await dumpPost.WriteAsync(output, cancellationToken);
+                    await dumpPost.FlushAsync(cancellationToken);
+                }
+                if (output.Length > 0)
+                {
+                    await stdout.WriteAsync(output, cancellationToken);
+                    await stdout.FlushAsync(cancellationToken);
+                }
+            }
+
+            try
+            {
+                while (true)
+                {
+                    var n = await _conn.ReaderStream.ReadAsync(buf.AsMemory());
+                    if (n <= 0) break;
+                    if (_dumpDuration is { } duration)
+                    {
+                        dumpTimer ??= System.Diagnostics.Stopwatch.StartNew();
+                        if (dumpTimer.Elapsed >= duration)
+                            await CloseDumpsAsync();
+                    }
+                    if (dump is not null)
+                    {
+                        await dump.WriteAsync(buf.AsMemory(0, n));
+                        await dump.FlushAsync();
+                    }
+
+                    ReadOnlyMemory<byte> outMem = buf.AsMemory(0, n);
+                    await WriteVisibleOutputAsync(outMem, CancellationToken.None);
+                }
+            }
             catch (Exception) { /* pty closed */ }
             finally
             {
-                if (dump is not null) await dump.DisposeAsync();
-                if (dumpPost is not null) await dumpPost.DisposeAsync();
+                await CloseDumpsAsync();
             }
         });
 
@@ -311,8 +407,13 @@ public sealed class PtyHost : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _cts.Cancel();
-        try { _conn.Kill(); } catch { }
-        try { await _exited.Task.WaitAsync(TimeSpan.FromSeconds(1)); } catch { }
+        if (!_exited.Task.IsCompleted)
+        {
+            try { _conn.Kill(); } catch { }
+            try { await _exited.Task.WaitAsync(TimeSpan.FromSeconds(1)); } catch { }
+        }
+        try { await _outputPump.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
+        try { _conn.Dispose(); } catch { }
         // Undo any palette overrides we pushed to the real terminal so the
         // user's shell isn't left recoloured after copilot exits.
         if (_resetColorsOnDispose)

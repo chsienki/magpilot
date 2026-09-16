@@ -15,6 +15,8 @@ public sealed record WrapperOptions(
     bool NoTake,
     /// <summary>Skip the agent state-check entirely; exec real copilot as a transparent passthrough. Wins over every other flag.</summary>
     bool SkipCheck,
+    /// <summary>The launcher-owned terminal mutations enabled for this invocation.</summary>
+    LauncherTuiOptions TuiOptions,
     /// <summary>On web preemption, exit immediately instead of sitting on the "press enter to take it back" prompt.</summary>
     bool ExitOnHandoff,
     /// <summary>Don't spawn copilot; print agent reachability + sessions + their owners, then exit.</summary>
@@ -33,19 +35,26 @@ public sealed record WrapperOptions(
     string? Claim,
     /// <summary>Wrap copilot in Microsoft's <c>agency</c> CLI (<c>agency copilot</c>) so the interactive session runs with agency's curated MCP servers + tooling.</summary>
     bool Agency,
+    /// <summary>Diagnostic helper: write the current Win32 console modes to this JSON path and exit.</summary>
+    string? ConsoleModeSnapshot,
     /// <summary>Argv with all <c>--magpilot-*</c> flags stripped, ready to forward to the real copilot binary.</summary>
     IReadOnlyList<string> ForwardArgs)
 {
+    public bool NoTuiChanges => TuiOptions == LauncherTuiOptions.None;
+
     public static WrapperOptions Parse(string[] argv)
     {
         var take = false; var force = false; var noTake = false;
-        var skipCheck = false; var exitOnHandoff = false;
+        var skipCheck = false; var noTuiChanges = false; var exitOnHandoff = false;
+        var tuiOptions = LauncherTuiOptions.All;
+        var tuiOptionsSpecified = false;
         var status = false; var help = false;
         var version = false; var update = false;
         string? pair = null;
         var pairDiscover = false;
         string? claim = null;
         var agency = false;
+        string? consoleModeSnapshot = null;
         var forward = new List<string>(argv.Length);
 
         foreach (var a in argv)
@@ -59,6 +68,7 @@ public sealed record WrapperOptions(
                 case "--magpilot-force":           force = true; break;
                 case "--magpilot-no-take":         noTake = true; break;
                 case "--magpilot-skip-check":      skipCheck = true; break;
+                case "--magpilot-no-tui-changes":  noTuiChanges = true; break;
                 case "--magpilot-exit-on-handoff": exitOnHandoff = true; break;
                 case "--magpilot-status":          status = true; break;
                 case "--magpilot-help":            help = true; break;
@@ -67,6 +77,19 @@ public sealed record WrapperOptions(
                 case "--magpilot-pair":            pairDiscover = true; break;
                 case "--magpilot-agency":          agency = true; break;
                 default:
+                    if (a.StartsWith("--magpilot-console-mode-snapshot=", StringComparison.Ordinal))
+                    {
+                        consoleModeSnapshot = a["--magpilot-console-mode-snapshot=".Length..];
+                        break;
+                    }
+                    if (a.StartsWith("--magpilot-tui-options=", StringComparison.Ordinal))
+                    {
+                        if (tuiOptionsSpecified)
+                            throw new ArgumentException("--magpilot-tui-options may only be specified once.");
+                        tuiOptions = LauncherTuiOptionSet.Parse(a["--magpilot-tui-options=".Length..]);
+                        tuiOptionsSpecified = true;
+                        break;
+                    }
                     if (a.StartsWith("--magpilot-claim=", StringComparison.Ordinal))
                     {
                         claim = a["--magpilot-claim=".Length..];
@@ -87,8 +110,13 @@ public sealed record WrapperOptions(
         if (force) take = true;
         if (take && noTake)
             throw new ArgumentException("Contradictory flags: --magpilot-take (or --magpilot-force) and --magpilot-no-take both set.");
+        if (noTuiChanges && tuiOptionsSpecified)
+            throw new ArgumentException(
+                "Contradictory flags: --magpilot-no-tui-changes and --magpilot-tui-options both set.");
+        if (noTuiChanges)
+            tuiOptions = LauncherTuiOptions.None;
 
-        return new WrapperOptions(take, force, noTake, skipCheck, exitOnHandoff, status, help, version, update, pair, pairDiscover, claim, agency, forward);
+        return new WrapperOptions(take, force, noTake, skipCheck, tuiOptions, exitOnHandoff, status, help, version, update, pair, pairDiscover, claim, agency, consoleModeSnapshot, forward);
     }
 
     /// <summary>
@@ -159,6 +187,15 @@ public sealed record WrapperOptions(
           --magpilot-force             auto-confirm + abort in-flight (ACP cancel + 2s grace). Implies --magpilot-take.
           --magpilot-no-take           if owned by anything else, exit non-zero (safe for scripting)
           --magpilot-skip-check        bypass the agent entirely; exec real copilot as a passthrough
+          --magpilot-no-tui-changes    disable Magpilot's terminal env hints, palette changes, colour
+                                       rewrites, and injected startup banner. Agent-coordinated sessions
+                                       still use a PTY for ownership detection and graceful handoff.
+                                       Alias for --magpilot-tui-options=none.
+          --magpilot-tui-options=<list>
+                                       enable only the comma-separated launcher TUI mutations listed:
+                                       term, truecolor, background, github-theme, palette, thinking,
+                                       input-band, legacy-colors, banner. `rewrite` enables all three
+                                       rewrite stages. Also accepts all (default) or none.
           --magpilot-exit-on-handoff   on web preemption, exit immediately (no resume prompt)
           --magpilot-status            don't spawn copilot; print agent reachability + sessions + exit
           --magpilot-version           print local + agent-reported version info, then exit
@@ -183,6 +220,10 @@ public sealed record WrapperOptions(
           MAGPILOT_AGENT_TOKEN         required for state/acquire/release ops (the bearer shared with the agent)
           MAGPILOT_REAL_COPILOT        explicit path to the real copilot binary (optional)
           MAGPILOT_AGENCY              explicit path to the agency binary (optional; used by --magpilot-agency)
+          MAGPILOT_TERM_MANIFEST       write resolved TUI options and child hints as JSON (optional)
+          MAGPILOT_TERM_DUMP[_POST]    capture raw and post-rewrite PTY output (optional)
+          MAGPILOT_TERM_DUMP_MS        stop those captures after this many milliseconds (optional)
+          MAGPILOT_CONPTY              app-local (default) or system ConPTY implementation
 
         Combinations:
           --magpilot-skip-check        wins over everything else

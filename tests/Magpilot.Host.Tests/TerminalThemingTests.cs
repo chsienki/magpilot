@@ -37,6 +37,32 @@ public class TerminalThemingTests
         Assert.False(disabled.ContainsKey("COPILOT_GITHUB_THEME"));
     }
 
+    [Fact]
+    public void PopulateChildEnv_applies_features_independently()
+    {
+        var backgroundOnly = new Dictionary<string, string>();
+        TerminalTheming.PopulateChildEnv(
+            backgroundOnly,
+            TerminalThemeConfig.Default,
+            isDark: true,
+            applyBackgroundHint: true,
+            applyGithubTheme: false);
+
+        Assert.Equal("15;0", backgroundOnly["COLORFGBG"]);
+        Assert.False(backgroundOnly.ContainsKey("COPILOT_GITHUB_THEME"));
+
+        var githubOnly = new Dictionary<string, string>();
+        TerminalTheming.PopulateChildEnv(
+            githubOnly,
+            TerminalThemeConfig.Default,
+            isDark: true,
+            applyBackgroundHint: false,
+            applyGithubTheme: true);
+
+        Assert.False(githubOnly.ContainsKey("COLORFGBG"));
+        Assert.Equal("1", githubOnly["COPILOT_GITHUB_THEME"]);
+    }
+
     private static TerminalThemeConfig WithBackground(BackgroundMode mode) =>
         TerminalThemeConfig.Default with { Background = mode };
 

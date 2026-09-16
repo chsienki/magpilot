@@ -162,6 +162,12 @@ internal sealed class AnsiColorRewriter
         }
 
         var paramText = Encoding.ASCII.GetString(_seq.ToArray(), 2, _seq.Count - 3);
+        if (paramText.Any(c => !char.IsAsciiDigit(c) && c != ';'))
+        {
+            output.AddRange(_seq);
+            return;
+        }
+
         var tokens = paramText.Split(';');
         var rebuilt = RewriteSgrParams(tokens);
 

@@ -213,7 +213,8 @@ the launcher explicitly with `magpilot [args]`; the real `copilot`
 binary stays as it is. The launcher:
 
 1. Parses `--magpilot-*` flags (take, force, no-take, skip-check,
-   exit-on-handoff, status, help) and strips them before forwarding.
+   no-tui-changes, the granular `tui-options` allowlist, exit-on-handoff,
+   status, help) and strips them before forwarding.
 2. Pings the agent. If unreachable, emits one warning and exec's the
    real `copilot` binary as a transparent passthrough.
 3. Resolves the target session id from argv: a UUID inside
@@ -229,7 +230,7 @@ binary stays as it is. The launcher:
    register host ownership.
 4. On accept (known-sid take-over path): `POST /acquire-for-host`,
    then spawns the real `copilot --resume=<sid>` inside a real PTY
-   (via `sch.pty.net`). Bidirectional byte pump between the user's
+   (via `Porta.Pty`). Bidirectional byte pump between the user's
    terminal (in raw mode) and the PTY master; window-resize watcher.
 5. Subscribes to the session's SSE stream. On `release_requested`:
    writes `/exit\r` to the PTY master so copilot shuts down cleanly
@@ -247,7 +248,67 @@ binary stays as it is. The launcher:
    truecolor tokens when the theme configures `inputBand`, `thinking`, or
    `legacyDefaultColors`. Compatibility mode suppresses startup-banner
    injection because copilot's animated welcome card cannot account for text
-   inserted after its layout pass.
+   inserted after its layout pass. `--magpilot-no-tui-changes` bypasses the
+   background probe, terminal-environment defaults and hints, palette changes,
+   output rewrites, and banner injection. Coordinated sessions retain the PTY
+   because ownership detection and graceful handoff depend on it; agentless
+   passthrough direct-execs for parity with a raw `copilot` launch.
+   `--magpilot-tui-options=<list>` independently gates `term`, `truecolor`,
+   `background`, `github-theme`, `palette`, `thinking`, `input-band`,
+   `legacy-colors`, and `banner`; `rewrite` enables the three rewrite stages
+   as a group. `all` is the default and `none` is the explicit no-mutation
+   state.
+
+The launcher can characterize these stages without relying on screenshots:
+`MAGPILOT_TERM_MANIFEST` records the resolved child hints and active stages,
+while `MAGPILOT_TERM_DUMP`/`MAGPILOT_TERM_DUMP_POST` record pre/post-rewrite
+ANSI. `MAGPILOT_TERM_DUMP_MS` ends capture after a fixed settling window while
+Copilot keeps running. The manifest also records MSYS/shell/terminal markers
+and .NET's stdin/stdout redirection view, because Git Bash and PowerShell are
+different terminal-hosting experiments. `scripts/capture-tui-matrix.ps1`
+generates the full hint matrix and isolated rendering cases;
+`tools/tui-matrix/render.mjs` feeds each capture through `@xterm/headless` at
+the recorded dimensions and writes normalized cell-style snapshots plus
+row-level diffs against `none`.
+`tools/tui-matrix` also contains an offline xterm.js theme lab. It replays
+captured raw ANSI, applies the same palette/thinking/input-band/legacy
+transformations as the launcher, maps clicked cells back to shared selectors,
+and exports theme JSON. It deliberately does not host a live PTY.
+The capture runner's `none` case is intentionally PTY-hosted so bytes can be
+observed; it is not equivalent to the agentless direct-exec
+`--magpilot-no-tui-changes` path. In Git Bash the direct path retains a richer
+composer bar that none of the tested environment hints restores inside
+ConPTY, identifying terminal hosting/capability negotiation as a separate
+dimension from Magpilot's explicit TUI transformations.
+`scripts/probe-terminal-paths.ps1` compares those hosting paths directly by
+running the same Node probe outside and inside `PtyHost`, recording Node's
+TTY/color-depth view, Win32 console modes after Node enters raw mode, and the
+raw replies to Copilot's terminal queries.
+The measured Node TTY/color results and synchronized-output mode replies are
+identical under Porta.Pty's app-local path. The earlier mismatch came from
+Pty.Net's bundled January 2022 OpenConsole, which predated
+microsoft/terminal#17729. With Porta.Pty correctly staging current
+`conpty.dll` and `OpenConsole.exe` together, nested app-local results match
+direct Git Bash exactly: full OSC palette/foreground/background replies, DA,
+mode reports, TTY flags, dimensions, console modes, and code pages.
+
+`Magpilot.Host` moved to `net10.0` and `Porta.Pty` 2.2.2; the platform services
+remain on `net9.0`. Porta.Pty keeps the same PTY API shape, supports Native AOT,
+ships current out-of-band ConPTY assets, handles its startup DA1 handshake,
+and provides a runtime in-box/out-of-band selector.
+
+`MAGPILOT_CONPTY=app-local|system` maps to
+`PORTAPTY_CONPTY=oob|inbox` before the first PTY spawn, allowing the same
+launcher binary to compare app-local `OpenConsole.exe` with Windows'
+`kernel32!CreatePseudoConsole`. App-local is the default and matches the outer
+terminal; system remains a diagnostic fallback with reduced query behavior.
+
+On Windows `PtyHost` enables Porta.Pty's async I/O path and treats child exit
+and output completion as separate events. Disposal cancels input/resize work,
+waits for the child, then drains PTY output through EOF before closing the
+connection and restoring the parent terminal. This preserves Copilot's final
+terminal-mode reset sequences; closing at `ProcessExited` leaves the returned
+shell in application input mode.
 
 All launcher-side diagnostics that fire while copilot is rendering
 its TUI (SSE-subscribe failures, post-spawn detection timeouts,
@@ -263,8 +324,9 @@ return 409 to the SPA + WhatsApp + cron, so `events.jsonl` never forks.
 (`<PublishAot>true</PublishAot>` in `Magpilot.Host.csproj`): a single
 native `magpilot.exe` (~7 MB, no `coreclr.dll`/`deps.json`) that
 cold-starts in roughly a third of the JIT time -- worthwhile because it
-runs on every `magpilot` invocation. Pty.Net's `os64\conpty.dll` +
-`OpenConsole.exe` are still copied physically beside the exe. The one
+runs on every `magpilot` invocation. Porta.Pty's `conpty.dll` and matching
+architecture-specific `OpenConsole.exe` hosts are copied physically beside
+the exe. The one
 constraint AOT imposes: **all launcher JSON goes through
 source-generated contexts**, never reflection. `HostWebJsonContext`
 (mirrors `JsonSerializerDefaults.Web`) covers the `System.Net.Http.Json`

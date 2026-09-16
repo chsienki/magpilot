@@ -125,4 +125,80 @@ public class HostJsonContractTests
         Assert.Contains("\"hubBearer\"", json);
         Assert.DoesNotContain("\"HubUrl\"", json);
     }
+
+    [Fact]
+    public void TerminalLaunchManifest_serializes_with_source_generated_metadata()
+    {
+        var manifest = new TerminalLaunchManifest(
+            DateTimeOffset.UnixEpoch,
+            "pty",
+            ["term", "background"],
+            "app-local",
+            "MINGW64",
+            "/usr/bin/bash",
+            null,
+            "wt-session",
+            false,
+            false,
+            120,
+            40,
+            "xterm-256color",
+            null,
+            "15;0",
+            null,
+            "Auto",
+            "#101010",
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            null,
+            null,
+            [new TerminalPaletteEntry(4, "#268BD2")],
+            "#9BA5A5",
+            "#002B36",
+            "#7C8A8A",
+            "#073642",
+            true,
+            3000,
+            "raw.ansi",
+            "post.ansi");
+
+        var json = JsonSerializer.Serialize(
+            manifest,
+            HostGeneralJsonContext.Default.TerminalLaunchManifest);
+
+        Assert.Contains("\"LaunchMode\":\"pty\"", json);
+        Assert.Contains("\"EnabledOptions\":[\"term\",\"background\"]", json);
+        Assert.Contains("\"ConPtyImplementation\":\"app-local\"", json);
+        Assert.Contains("\"MsSystem\":\"MINGW64\"", json);
+        Assert.Contains("\"ColorFgBg\":\"15;0\"", json);
+        Assert.Contains("\"Palette\":[{\"Index\":4,\"Color\":\"#268BD2\"}]", json);
+    }
+
+    [Fact]
+    public void ConsoleModeSnapshot_serializes_with_source_generated_metadata()
+    {
+        var snapshot = new ConsoleModeSnapshotData(
+            false,
+            false,
+            2,
+            2,
+            0x200,
+            0x004,
+            true,
+            true,
+            65001,
+            65001);
+
+        var json = JsonSerializer.Serialize(
+            snapshot,
+            HostGeneralJsonContext.Default.ConsoleModeSnapshotData);
+
+        Assert.Contains("\"VirtualTerminalInput\":true", json);
+        Assert.Contains("\"InputMode\":512", json);
+    }
 }

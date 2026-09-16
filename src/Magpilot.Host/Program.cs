@@ -16,6 +16,11 @@ catch (ArgumentException ex)
     return 2;
 }
 
+if (opts.ConsoleModeSnapshot is not null)
+{
+    return ConsoleModeSnapshot.Write(opts.ConsoleModeSnapshot);
+}
+
 if (opts.Help)
 {
     Console.WriteLine(WrapperOptions.HelpText);
@@ -50,7 +55,7 @@ if (opts.Claim is not null)
 // --magpilot-skip-check wins over everything: degrade to a transparent
 // pass-through that just exec's the real copilot.
 if (opts.SkipCheck)
-    return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null, opts.Agency);
+    return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null, opts.Agency, opts.TuiOptions);
 
 // Best-effort: ask the local agent if a newer release is out and surface
 // it as a one-line banner. Fast (~500ms cap), silent on every error path,
@@ -133,7 +138,7 @@ if (string.IsNullOrEmpty(sid))
         // Non-interactive: just exec copilot. No coordination, but the
         // user didn't ask for it.
         agent.Dispose();
-        return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null, opts.Agency);
+        return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null, opts.Agency, opts.TuiOptions);
     }
     // No specific session known up front. Spawn copilot in a PTY and
     // post-spawn-detect whichever session it ends up holding (fresh,
@@ -149,7 +154,7 @@ catch (Exception ex)
 {
     Console.Error.WriteLine($"magpilot: GET /state failed ({ex.GetType().Name}: {ex.Message}). Falling through.");
     agent.Dispose();
-    return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null, opts.Agency);
+    return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null, opts.Agency, opts.TuiOptions);
 }
 
 if (state is null)
@@ -239,13 +244,12 @@ return await RunSessionLoopAsync(agent, sid, opts);
 static async Task<int> RunPassthroughAsync(WrapperOptions opts)
 {
     // Run copilot without agent coordination, but still through the PTY when
-    // we own a real terminal -- that's what gives the enhanced experience
-    // (terminal theming + the thinking-colour rewrite, both in PtyHost).
-    // Redirected stdio can't be hosted in a PTY, so fall back to a
-    // transparent direct exec there (e.g. `echo /help | magpilot`).
+    // we own a real terminal -- that's what gives the enhanced experience.
+    // With TUI changes disabled there is no reason to interpose a PTY, so
+    // direct-exec for parity with launching raw copilot.
     var canPty = !Console.IsInputRedirected && !Console.IsOutputRedirected;
-    if (!canPty)
-        return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null, opts.Agency);
+    if (!canPty || (opts.NoTuiChanges && !TerminalDiagnostics.CaptureRequested))
+        return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null, opts.Agency, opts.TuiOptions);
 
     string exe; IReadOnlyList<string> argv;
     try { (exe, argv) = CopilotLaunch.Resolve(opts.Agency, opts.ForwardArgs); }
@@ -255,11 +259,19 @@ static async Task<int> RunPassthroughAsync(WrapperOptions opts)
         return 127;
     }
 
-    await using var host = await PtyHost.SpawnAsync(exe, argv, Environment.CurrentDirectory);
+    await using var host = await PtyHost.SpawnAsync(
+        exe,
+        argv,
+        Environment.CurrentDirectory,
+        tuiOptions: opts.TuiOptions);
     return await host.ExitTask;
 }
 
-static async Task<int> ExecRealCopilotAsync(IReadOnlyList<string> forwardArgs, AgentClient? agentClient, bool agency)
+static async Task<int> ExecRealCopilotAsync(
+    IReadOnlyList<string> forwardArgs,
+    AgentClient? agentClient,
+    bool agency,
+    LauncherTuiOptions tuiOptions)
 {
     string exe; IReadOnlyList<string> argv;
     try { (exe, argv) = CopilotLaunch.Resolve(agency, forwardArgs); }
@@ -280,14 +292,45 @@ static async Task<int> ExecRealCopilotAsync(IReadOnlyList<string> forwardArgs, A
     };
     foreach (var a in argv) psi.ArgumentList.Add(a);
 
-    // Apply terminal theming here too, so the agentless passthrough
-    // (--magpilot-skip-check, or the agent-unreachable fallback) still gets
-    // palette overrides + the GitHub theme flag. copilot inherits the real
-    // terminal here, so its own OSC 11 background probe works -- we only pin
-    // COLORFGBG when the user forced dark/light, and never run our own probe.
-    var theme = TerminalThemeConfig.Load();
-    TerminalTheming.PopulateChildEnv(psi.Environment!, theme, TerminalTheming.PinnedBackground(theme));
-    var resetColors = TerminalTheming.ApplyPalette(theme);
+    var resetColors = false;
+    TerminalThemeConfig? theme = null;
+    var needsTheme = (tuiOptions &
+        (LauncherTuiOptions.Background |
+         LauncherTuiOptions.GithubTheme |
+         LauncherTuiOptions.Palette)) != 0;
+    if (needsTheme)
+    {
+        // Apply terminal theming here too, so the agentless passthrough
+        // (--magpilot-skip-check, or the agent-unreachable fallback) still
+        // gets palette overrides + the GitHub theme flag. copilot inherits
+        // the real terminal here, so its own OSC 11 background probe works.
+        theme = TerminalThemeConfig.Load();
+        TerminalTheming.PopulateChildEnv(
+            psi.Environment!,
+            theme,
+            TerminalTheming.PinnedBackground(theme),
+            applyBackgroundHint: tuiOptions.Includes(LauncherTuiOptions.Background),
+            applyGithubTheme: tuiOptions.Includes(LauncherTuiOptions.GithubTheme));
+        if (tuiOptions.Includes(LauncherTuiOptions.Palette))
+            resetColors = TerminalTheming.ApplyPalette(theme);
+    }
+
+    TerminalDiagnostics.WriteManifest(
+        "direct",
+        tuiOptions,
+        conPtyImplementation: "direct",
+        columns: null,
+        rows: null,
+        key => psi.Environment.TryGetValue(key, out var value) ? value : null,
+        theme,
+        detectedBackground: null,
+        resolvedIsDark: null,
+        paletteApplied: resetColors,
+        thinkingRewriteEnabled: false,
+        inputBandRewriteEnabled: false,
+        legacyColorRewriteEnabled: false,
+        bannerEnabled: false,
+        dumpDuration: TerminalDiagnostics.ResolveDumpDuration());
 
     try
     {
@@ -326,7 +369,11 @@ static async Task<int> RunSessionLoopAsync(AgentClient agent, string sid, Wrappe
         PtyHost copilotHost;
         try
         {
-            copilotHost = await PtyHost.SpawnAsync(exe, argv, Environment.CurrentDirectory);
+            copilotHost = await PtyHost.SpawnAsync(
+                exe,
+                argv,
+                Environment.CurrentDirectory,
+                tuiOptions: opts.TuiOptions);
         }
         catch (Exception ex)
         {
@@ -469,7 +516,11 @@ static async Task<int> RunSessionLoopWithDetectionAsync(AgentClient agent, Wrapp
     PtyHost copilotHost;
     try
     {
-        copilotHost = await PtyHost.SpawnAsync(exe, argv, Environment.CurrentDirectory);
+        copilotHost = await PtyHost.SpawnAsync(
+            exe,
+            argv,
+            Environment.CurrentDirectory,
+            tuiOptions: opts.TuiOptions);
     }
     catch (Exception ex)
     {

@@ -86,10 +86,12 @@ tool-call streaming, central log viewer at `/admin/logs`. As of
 2026-05-14, **GitHub OAuth** is wired (allowlisted username); the
 **`magpilot` launcher** ships a coordinated `copilot` shim that
 preempts cooperatively with the SPA + WhatsApp via a single-owner
-handoff (no events.jsonl forks). The **Windows installer** + autoupdate
-path (`installer/magpilot.iss`, `magpilot --magpilot-update`,
-hub-mediated version check) is in place; HENDRIK runs the agent as a
-scheduled task at user logon.
+handoff (no events.jsonl forks). Its terminal layer uses current app-local
+ConPTY assets, supports granular opt-in/out controls for launcher-owned TUI
+changes, and includes repeatable capture/probe tools plus an offline theme
+editor. The **Windows installer** + autoupdate path
+(`installer/magpilot.iss`, `magpilot --magpilot-update`, hub-mediated version
+check) is in place; HENDRIK runs the agent as a scheduled task at user logon.
 
 What is **NOT yet wired**: the MAUI Android shell (the original phone
 target), real FCM/Web Push delivery, TLS for hub<->agents (still LAN +

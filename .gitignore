@@ -25,3 +25,7 @@ spikes/node_modules/
 spikes/package-lock.json
 spikes/package.json
 spikes/inspect-prod.js
+
+# Local TUI characterization captures and renderer dependencies
+tools/tui-matrix/node_modules/
+tools/tui-matrix/captures/

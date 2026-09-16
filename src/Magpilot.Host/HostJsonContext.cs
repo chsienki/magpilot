@@ -39,4 +39,6 @@ internal sealed partial class HostWebJsonContext : JsonSerializerContext;
 /// </summary>
 [JsonSerializable(typeof(StreamEvent))]
 [JsonSerializable(typeof(MagpilotPairDiscover.DiscoveryReply))]
+[JsonSerializable(typeof(TerminalLaunchManifest))]
+[JsonSerializable(typeof(ConsoleModeSnapshotData))]
 internal sealed partial class HostGeneralJsonContext : JsonSerializerContext;

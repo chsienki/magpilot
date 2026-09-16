@@ -123,6 +123,10 @@ public class AnsiColorRewriterTests
         => Assert.Equal("\x1b[10;5H", Rewrite(new AnsiColorRewriter(Thinking, Band), "\x1b[10;5H"));
 
     [Fact]
+    public void Private_keyboard_mode_ending_in_m_is_not_treated_as_sgr()
+        => Assert.Equal("\x1b[>4;2m", RewriteThinking("\x1b[>4;2m"));
+
+    [Fact]
     public void Osc_sequence_passes_through()
         => Assert.Equal("\x1b]11;?\x07", Rewrite(new AnsiColorRewriter(Thinking, Band), "\x1b]11;?\x07"));
 
