@@ -352,7 +352,7 @@ already-served `index.html`. After every SPA change you MUST restart
 the hub for the browser to see it -- a hard refresh alone won't help
 if you skipped step (3) above.
 
-### Deploying the hub to the LXC
+### Publishing container images and deploying the hub
 
 `deploy/README.md` is the canonical recipe. Short version:
 
@@ -375,6 +375,34 @@ if you skipped step (3) above.
    unreviewed patch, `docker buildx build -f src/Magpilot.Hub/Dockerfile -t ghcr.io/chsienki/magpilot-hub:emergency-<timestamp> --load .`
    then `docker save` -> `scp` -> `pct push 102` -> `docker load` ->
    point the compose file at the emergency tag.
+
+The generic Linux agent image has a parallel publishing workflow:
+
+1. **CI publishes `ghcr.io/chsienki/magpilot-agent`** --
+   `.github/workflows/agent-image.yml` builds the repository-root
+   `src/Magpilot.Agent/Dockerfile` for `linux/amd64`. Pushes to `main`
+   produce only `:main` and `:main-<short-sha>`; they never advance
+   production `:latest`. A `vX.Y.Z` tag produces `:X.Y.Z`, `:X.Y`, and
+   `:latest`.
+2. **The image is generic and public** -- no deployer token, private runtime
+   file, pinned session id, or site-specific bootstrap hook is baked into it.
+   The consuming outer ring supplies environment, bind mounts, and
+   `MAGPILOT_BOOTSTRAP_HOOK_DIR`. After the package's first publish, its GHCR
+   visibility must be changed to public so anonymous Watchtower pulls work.
+3. **A manual latest seed is explicit** -- `workflow_dispatch` is main-only.
+   Its `seed_latest_from_main` boolean defaults to false; enabling it once
+   publishes `:latest` from current main when bootstrapping a package that has
+   no version-tagged image yet. Ordinary dispatches publish only the main
+   tags. Release tags own `:latest` after seeding.
+4. **Consumers own deployment policy** -- magpilot publishes the platform
+   image; an outer deployment chooses `:latest` versus an immutable version,
+   opts into its own Watchtower, and owns runtime hooks and persistent home.
+   A Watchtower recreation briefly interrupts the agent and reruns container
+   bootstrap, so hooks must be idempotent and state must live on a bind mount.
+5. **Manual shipping remains a valid escape hatch** -- a locally loaded image
+   with the same `:latest` name may run temporarily, but Watchtower can restore
+   the registry digest on the next poll. Use a unique local emergency tag and
+   pin the consumer compose file to it when the override must persist.
 
 **Critical `tar`/exclude gotcha when shipping source**: do NOT exclude
 `**/wwwroot` blanket-style — that kills `Magpilot.Web/wwwroot/index.html`
@@ -400,14 +428,16 @@ image only ships the publish output), but the rule is worth keeping
 in mind if you ever add another satellite that builds via Docker
 from the magstronaut root.
 
-The agent runs on each host directly (no docker). HENDRIK runs the
-**installed `MagpilotAgent` scheduled task** (registered by
-`installer/magpilot.iss` at user logon, NOT SYSTEM, so `~/.copilot/`
-is reachable). See `installer/README.md` for the install + upgrade
-recipe; `magpilot --magpilot-update` handles in-place upgrades. The
-older "run as `dotnet run` in an async pwsh session named `agent`"
-pattern is the dev-loop, NOT the deployed state -- see "Dev loop
-with the installed agent" above.
+Agents may run directly on a host or from the generic Linux container image.
+HENDRIK runs the **installed `MagpilotAgent` scheduled task** (registered by
+`installer/magpilot.iss` at user logon, NOT SYSTEM, so `~/.copilot/` is
+reachable). See `installer/README.md` for the install + upgrade recipe;
+`magpilot --magpilot-update` handles in-place upgrades. The older "run as
+`dotnet run` in an async pwsh session named `agent`" pattern is the dev-loop,
+NOT HENDRIK's deployed state -- see "Dev loop with the installed agent"
+above. Linux container deployments consume
+`ghcr.io/chsienki/magpilot-agent` and supply their own runtime configuration
+and bootstrap hooks.
 
 ## Environment variables
 

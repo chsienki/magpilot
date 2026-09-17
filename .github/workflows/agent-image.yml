@@ -1,0 +1,110 @@
+name: Agent image
+
+# Builds the generic Magpilot Agent container image and publishes it to
+# GitHub Container Registry (GHCR). The image contains only the platform:
+# deployer-specific hooks, credentials, configuration, and persistent home
+# data are supplied at runtime.
+#
+# Trigger/tag policy:
+#
+#   1. Push to main:    tags `:main` and `:main-<short-sha>` only. Main is
+#      build validation and an explicit opt-in candidate; it never advances
+#      production `:latest`.
+#
+#   2. Tag push v*.*.*: tags `:<full-version>`, `:<major.minor>`, and
+#      `:latest`. Release tags are the normal production update path.
+#
+#   3. Manual dispatch: must run from main and normally publishes the same
+#      main tags. The boolean input may be enabled once to seed `:latest`
+#      from current main before the first version-tagged image exists.
+#
+# Image: ghcr.io/<owner>/magpilot-agent
+# Public package after first publish: anonymous deployments can pull it.
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      seed_latest_from_main:
+        description: 'One-time seed: also publish :latest from current main'
+        required: false
+        type: boolean
+        default: false
+
+# Cancel superseded main builds, but never cancel immutable tag builds.
+concurrency:
+  group: agent-image-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+
+permissions:
+  contents: read
+  packages: write   # required to publish to GHCR
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Manual runs are intentionally main-only. This keeps the seeding knob
+      # tied to current main and guarantees an ordinary dispatch has the same
+      # non-production tags as a normal main push.
+      - name: Require main for manual runs
+        if: ${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' }}
+        run: |
+          echo "::error::Run this workflow from the main branch."
+          exit 1
+
+      # GHCR org+repo names must be lowercase even though GitHub allows
+      # mixed-case in handles. Compute once so downstream steps don't
+      # have to deal with the casing dance.
+      - name: Compute image name
+        id: image
+        run: |
+          echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/magpilot-agent" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Disable metadata-action's implicit latest handling and express every
+      # tag explicitly so only a version-tag push or the one-time seed input
+      # can move `:latest`.
+      - name: Compute tags + labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=main-,format=short,enable=${{ github.ref == 'refs/heads/main' }}
+            type=semver,pattern={{version}},enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.seed_latest_from_main) }}
+          labels: |
+            org.opencontainers.image.title=Magpilot Agent
+            org.opencontainers.image.description=Generic Linux agent for the Magpilot multi-host Copilot CLI multiplexer.
+
+      - name: Build + push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: src/Magpilot.Agent/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

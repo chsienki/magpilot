@@ -1,6 +1,7 @@
 # Magpilot deploy
 
-Deployment artifacts for running the hub on the docker LXC (102) in the home lab.
+Deployment artifacts for the hub on docker LXC 102, plus the publishing
+contract for Magpilot's generic Linux agent image.
 
 ## Layout
 
@@ -110,6 +111,95 @@ Get-Content deploy\docker-compose.yml | ssh proxmox `
 # Create /srv/magpilot/.env with the secrets above, then:
 ssh proxmox "pct exec 102 -- bash -c 'cd /srv/magpilot && docker compose up -d'"
 # Watchtower starts alongside the hub; first hub pull is from GHCR.
+```
+
+## Generic Linux agent image
+
+`.github/workflows/agent-image.yml` builds the repository-root
+`src/Magpilot.Agent/Dockerfile` for `linux/amd64` and publishes
+`ghcr.io/chsienki/magpilot-agent`. The package is a generic platform
+artifact: it contains no deployment credentials, private runtime files,
+pinned session ids, or deployment-specific bootstrap hooks. Consumers supply
+those through environment variables and bind mounts at runtime.
+
+Tag conventions deliberately separate build validation from production:
+
+| Trigger | Tags |
+|---|---|
+| Push to `main` | `:main`, `:main-<short-sha>` |
+| Manual dispatch from `main`, seed input false | `:main`, `:main-<short-sha>` |
+| Tag push `v0.1.11` | `:0.1.11`, `:0.1`, `:latest` |
+| Manual dispatch from `main`, `seed_latest_from_main=true` | `:main`, `:main-<short-sha>`, `:latest` |
+
+An ordinary main push or manual run never moves `:latest`. Release tags are
+the normal production update path.
+
+### First publish and one-time latest seed
+
+GHCR packages may be private when they are first created, even when the source
+repository is public. After the first successful publish, change the
+`magpilot-agent` package visibility to **public** in GitHub package settings.
+Anonymous Watchtower pulls will fail until that one-time visibility change is
+complete.
+
+If `:latest` does not exist yet and the first release tag is not ready:
+
+1. Open the **Agent image** workflow in GitHub Actions.
+2. Choose **Run workflow**, select the `main` branch, and set
+   **One-time seed: also publish :latest from current main** to `true`.
+3. Run it once, verify the package has `:latest`, then leave the input at its
+   default `false` for later manual runs.
+
+The workflow rejects manual runs from any ref other than current `main`.
+Seeding is a bootstrap operation only; after that, version tags own
+`:latest`.
+
+### Consumer update contract
+
+The consuming deployment owns its image tag, runtime configuration, hooks,
+secrets, and persistent home. A deployment may opt an `:latest` container into
+an existing label-gated Watchtower by adding:
+
+```yaml
+labels:
+  - com.centurylinklabs.watchtower.enable=true
+```
+
+Magpilot publishes the generic image but does not add or configure Watchtower
+for an outer deployment. When Watchtower recreates an agent, active requests
+are briefly interrupted and the container bootstrap runs again. Keep agent
+state under a bind-mounted home directory so session files and deployment
+state survive the recreation; bootstrap hooks must remain idempotent.
+
+For staging or rollback, the deployment can pin an immutable version tag such
+as `ghcr.io/chsienki/magpilot-agent:0.1.11`. A pinned compose tag does not
+follow future releases.
+
+### Manual and emergency images
+
+The local `docker buildx build` plus `docker save` / `scp` / `pct push` /
+`docker load` path remains valid. Build from the magpilot repository root:
+
+```powershell
+docker buildx build --platform linux/amd64 `
+    -f src/Magpilot.Agent/Dockerfile `
+    -t ghcr.io/chsienki/magpilot-agent:emergency-$(Get-Date -Format yyyyMMdd-HHmm) `
+    --load .
+```
+
+Loading a local image under the same `:latest` name and force-recreating the
+service is only a temporary override: a label-enabled Watchtower may restore
+the registry's current `:latest` digest on its next poll. For a stable
+emergency deployment, use a unique local tag, point the consumer's compose
+file at that tag, and recreate the service. Restore `:latest` when the
+emergency is over.
+
+After recreation, verify the generic agent itself before checking any
+deployment-specific bootstrap:
+
+```powershell
+curl -fsS http://127.0.0.1:5099/api/version
+curl -fsS http://127.0.0.1:5099/healthz
 ```
 
 

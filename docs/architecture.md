@@ -910,6 +910,14 @@ with other sidecars. Magpilot doesn't need to know you exist.
   magpilot-cron            <- crontab snippet calling /srv/magpilot-cron/run.sh
 ```
 
+The Linux agent container comes from the generic public package
+`ghcr.io/chsienki/magpilot-agent`. Magpilot owns publishing that platform
+image; the outer deployment owns the selected tag, credentials, bootstrap
+hooks, and bind-mounted home. Main builds publish only `:main` and
+`:main-<short-sha>`; version tags publish the version tags and advance
+`:latest`. This keeps untagged platform work from automatically restarting a
+production agent.
+
 > **Note** -- the `magpilot-whatsapp/` and `magpilot-cron/` directories on
 > the LXC are deployed from
 > [chsienki/magstronaut](https://github.com/chsienki/magstronaut), not from
