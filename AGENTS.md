@@ -603,12 +603,13 @@ What happens at spawn (helpers: `TerminalColor.cs` / `TerminalThemeConfig.cs`
 
 1. **Background detection -> `COLORFGBG`.** copilot's default colour mode is
    `auto`, which emits `OSC 11` (`ESC]11;?`) to ask the terminal for its
-   background and adapt dark/light. **Under the ConPTY** that query never
-   reaches the outer terminal, so copilot times out and mis-themes; the host
-   runs the OSC 11 probe itself, computes dark/light from the reply's
-   luminance, and passes copilot the answer via `COLORFGBG` (copilot's
-   documented fallback). **In direct-exec** copilot inherits the real
-   terminal and its own probe works, so we do NOT probe and only pin
+   background and adapt dark/light. The supported app-local Porta.Pty path
+   passes terminal queries correctly, but the launcher resolves the background
+   before spawning the child so behaviour stays deterministic across PTY
+   implementations. It computes dark/light from the reply's luminance and
+   passes copilot the answer via `COLORFGBG` (copilot's documented fallback).
+   **In direct-exec** copilot inherits the real terminal and its own probe
+   works, so we do NOT probe and only pin
    `COLORFGBG` when the user forced `MAGPILOT_TERM_BACKGROUND=dark|light` --
    and note copilot's live OSC 11 wins over `COLORFGBG` there, so to force a
    background in passthrough use the theme file's `background` (which actually
@@ -723,30 +724,15 @@ offline; making it own a live PTY would duplicate input, resize, clipboard,
 mouse, query-response, and handoff responsibilities already owned by
 `PtyHost`.
 
-The PTY-none baseline is not a raw direct-exec baseline. Under Git Bash,
-agentless `--magpilot-no-tui-changes` direct-execs Copilot and retains its
-richer composer bar; forcing PTY capture removes that bar even when every
-explicit TUI option is disabled. None of `TERM`, `COLORTERM`, `COLORFGBG`, or
-`COPILOT_GITHUB_THEME` restores it. Captured Copilot startup output queries all
-16 palette slots (`OSC 4;<index>;?`) and terminal modes including synchronized
-output (`CSI ? 2026 $ p`), keyboard protocol (`CSI ? u`), and `CSI ? 996 n`.
-The direct-vs-nested probe identifies the exact failure:
+The capture runner's `none` case is PTY-hosted, not direct-exec, because bytes
+cannot be captured without interposing a host. The supported app-local
+Porta.Pty path nevertheless matches direct Git Bash in the terminal probe:
+TTY flags, size, colour depth, palette/foreground/background replies, device
+attributes, mode reports, console modes, and code pages. The `Transport` phase
+keeps Windows' in-box ConPTY as a reduced-capability diagnostic control.
 
-- Node's `isTTY`, `214x59` size, color depth (`24`), and 16/256/truecolor
-  support are identical.
-- Mode replies are identical (`DECTCEM`, alternate-scroll, and synchronized
-  output; `CSI ? 2026 ; 2 $ y` reports sync output reset in both paths).
-- Direct palette/foreground/background probing returns 472 bytes containing
-  all 18 complete OSC replies. Through ConPTY the child receives only five
-  malformed bytes (`575 ESC \`).
-- Direct primary device attributes are
-  `CSI ? 61;4;6;7;14;21;22;23;24;28;32;42;52 c`; ConPTY substitutes the
-  minimal `CSI ? 1;0 c`. Secondary DA and pixel/cell dimensions match.
-
-The initial composer investigation exposed an obsolete PTY dependency:
-`sch.pty.net 0.3.36-pre` bundled app-local ConPTY binaries from January 2022.
-Microsoft added OSC 4/10/11 query handling in
-https://github.com/microsoft/terminal/pull/17729 in August 2024.
+Do not reintroduce `sch.pty.net`: its bundled January 2022 ConPTY predates OSC
+4/10/11 query handling from microsoft/terminal#17729.
 
 `Magpilot.Host` and `Magpilot.Host.Tests` target `net10.0` and use maintained
 `Porta.Pty` 2.2.2. The rest of Magpilot remains on `net9.0`; a .NET 10 SDK
@@ -766,8 +752,7 @@ but the terminal no longer accepts normal input. Input/resize cancellation is
 separate; the output pump reads to EOF.
 
 The Native AOT launcher payload contains `magpilot.exe`, `conpty.dll`, and
-matching `x64/OpenConsole.exe` + `arm64/OpenConsole.exe`. Do not restore
-Pty.Net's `os64/` binaries.
+matching `x64/OpenConsole.exe` + `arm64/OpenConsole.exe`.
 
 With Porta.Pty correctly staging OpenConsole beside its own `conpty.dll`, the
 out-of-band path matches direct Git Bash exactly in the probe: 472-byte
@@ -1418,8 +1403,9 @@ When making a release:
 5. Let watchtower deploy the tag's `:latest` hub image, or force
    `docker compose pull hub && docker compose up -d hub`; verify the hub's
    authenticated `/api/agent-version?from=<old-version>` reports the release.
-6. Wait for the agent's next 15-minute poll (or restart it), then run
-   `magpilot --magpilot-update` on the dev machine to test.
+6. Use "Check for agent updates" on `/admin/agents` to refresh the hub and
+   signal every visible agent immediately (or wait for the next 15-minute
+   poll), then run `magpilot --magpilot-update` on the dev machine to test.
 
 ## Architectural rules and gotchas
 

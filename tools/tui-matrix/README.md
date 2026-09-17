@@ -44,9 +44,10 @@ the `none` case, so every capture has identical hosting while only the selected
 TUI options vary. This means `none` is a **PTY-none** baseline, not the
 agentless direct-exec path used by a normal `--magpilot-no-tui-changes` launch.
 The byte-capture pipeline cannot observe direct-exec output without
-interposing a PTY and changing the condition being measured. Compare the
-direct/raw composer visually; use the matrix only to compare transformations
-within the PTY-hosted path.
+interposing a PTY and changing the process topology. Porta.Pty's app-local path
+matches direct Git Bash's measured terminal capabilities; use the matrix to
+compare launcher transformations and the `Transport` phase to detect future
+runtime drift.
 
 Copilot queries the terminal palette and capabilities during startup. PTY
 captures include `OSC 4;<index>;?` for all 16 ANSI slots plus synchronized
@@ -189,8 +190,7 @@ app-local ConPTY matches the direct terminal's TTY flags, dimensions, color
 depth, palette replies, device attributes, mode reports, console modes, and
 code pages. The system/in-box ConPTY remains the reduced diagnostic control.
 
-The original mismatch was measured against Pty.Net's bundled January 2022
-runtime. Magpilot now targets .NET 10 and uses Porta.Pty 2.2.2. Its correctly
-staged app-local path matches the direct Git Bash terminal's palette, device,
-mode, TTY, size, and console-mode observations; the system path remains
-different. Rerun the probe after any PTY/runtime change.
+Magpilot targets .NET 10 and uses Porta.Pty 2.2.2. Its app-local path matches
+the direct Git Bash terminal's palette, device, mode, TTY, size, and
+console-mode observations; the system path remains different. Rerun the probe
+after any PTY/runtime change.

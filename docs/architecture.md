@@ -284,13 +284,12 @@ dimension from Magpilot's explicit TUI transformations.
 running the same Node probe outside and inside `PtyHost`, recording Node's
 TTY/color-depth view, Win32 console modes after Node enters raw mode, and the
 raw replies to Copilot's terminal queries.
-The measured Node TTY/color results and synchronized-output mode replies are
-identical under Porta.Pty's app-local path. The earlier mismatch came from
-Pty.Net's bundled January 2022 OpenConsole, which predated
-microsoft/terminal#17729. With Porta.Pty correctly staging current
-`conpty.dll` and `OpenConsole.exe` together, nested app-local results match
-direct Git Bash exactly: full OSC palette/foreground/background replies, DA,
-mode reports, TTY flags, dimensions, console modes, and code pages.
+Porta.Pty's app-local path matches direct Git Bash in the terminal probe: full
+OSC palette/foreground/background replies, device attributes, mode reports,
+TTY flags, dimensions, console modes, and code pages. Windows' in-box ConPTY
+is retained only as a reduced-capability diagnostic control. `sch.pty.net`
+must not return because its bundled January 2022 host predates
+microsoft/terminal#17729.
 
 `Magpilot.Host` moved to `net10.0` and `Porta.Pty` 2.2.2; the platform services
 remain on `net9.0`. Porta.Pty keeps the same PTY API shape, supports Native AOT,

@@ -56,6 +56,11 @@ timestamped backup and copying the new `magpilot.exe` into its original path;
 running processes continue from the mapped backup while new sessions load the
 replacement.
 
+Agents from v0.1.36 also expose composite version status and an authenticated
+immediate-refresh endpoint. The hub's `/admin/agents` page uses it to bypass
+the 15-minute poll without installing remotely; older agents remain visible
+through the two legacy read endpoints and show "Scheduled checks only."
+
 ## Building locally
 
 You need Inno Setup 6 installed (e.g. `winget install JRSoftware.InnoSetup`).
