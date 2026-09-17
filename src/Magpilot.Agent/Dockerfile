@@ -17,6 +17,8 @@ ARG DOTNET_RUNTIME=9.0
 FROM mcr.microsoft.com/dotnet/sdk:${DOTNET_SDK} AS build
 WORKDIR /src
 
+COPY Directory.Build.props VERSION ./
+
 # Copy only csproj files first for layer caching of `dotnet restore`.
 COPY src/Magpilot.Shared/Magpilot.Shared.csproj src/Magpilot.Shared/
 COPY src/Magpilot.Agent/Magpilot.Agent.csproj   src/Magpilot.Agent/
