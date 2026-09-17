@@ -244,6 +244,59 @@ public static class HubEndpoints
                 ? Results.Ok(reg.List())
                 : Results.Json(new { error = "admin only" }, statusCode: StatusCodes.Status403Forbidden));
 
+        api.MapGet("/agents/version-status",
+            async (
+                bool? all,
+                AgentRegistry reg,
+                AgentUpdateCoordinator updates,
+                ClaimsPrincipal user,
+                HubAuthOptions opts,
+                CancellationToken ct) =>
+            {
+                var agents = SelectAgentsForVersionOperation(
+                    reg, user, opts, includeAll: all == true);
+                if (agents is null)
+                {
+                    return Results.Json(
+                        new { error = "admin only" },
+                        statusCode: StatusCodes.Status403Forbidden);
+                }
+
+                return Results.Ok(await updates.GetStatusesAsync(agents, ct));
+            });
+
+        api.MapPost("/agents/check-updates",
+            async (
+                bool? all,
+                AgentRegistry reg,
+                AgentUpdateCoordinator updates,
+                ClaimsPrincipal user,
+                HubAuthOptions opts,
+                CancellationToken ct) =>
+            {
+                var agents = SelectAgentsForVersionOperation(
+                    reg, user, opts, includeAll: all == true);
+                if (agents is null)
+                {
+                    return Results.Json(
+                        new { error = "admin only" },
+                        statusCode: StatusCodes.Status403Forbidden);
+                }
+
+                try
+                {
+                    return Results.Ok(await updates.CheckForUpdatesAsync(agents, ct));
+                }
+                catch (Exception ex) when (
+                    (ex is HttpRequestException or InvalidOperationException) &&
+                    !ct.IsCancellationRequested)
+                {
+                    return Results.Json(
+                        new { error = "hub release refresh failed", detail = ex.Message },
+                        statusCode: StatusCodes.Status502BadGateway);
+                }
+            });
+
         // V2a pairing: the manual POST /api/agents register endpoint
         // is gone. The only way to add an agent to the registry now is
         // via the voucher-redeem flow (POST /api/enroll/redeem) -- that
@@ -459,6 +512,31 @@ public static class HubEndpoints
 
     internal static string BuildAgentHistoryPath(string sessionId, QueryString queryString) =>
         $"api/sessions/{sessionId}/history{queryString.ToUriComponent()}";
+
+    internal static IReadOnlyList<AgentInfo>? SelectAgentsForVersionOperation(
+        AgentRegistry registry,
+        ClaimsPrincipal user,
+        HubAuthOptions options,
+        bool includeAll)
+    {
+        var agents = registry.List();
+        if (includeAll)
+        {
+            return AgentVisibility.IsAdmin(user, options)
+                ? agents
+                : null;
+        }
+
+        if (AgentVisibility.IsInfra(user))
+            return agents;
+
+        var login = user.Identity?.Name;
+        var isAdminLogin = AgentVisibility.IsAdminLogin(login, options);
+        return agents
+            .Where(agent => AgentVisibility.ScopedToOwner(
+                agent.OwnerUser, login, isAdminLogin))
+            .ToList();
+    }
 
     /// <summary>
     /// Wraps a per-agent proxy call so that transport failures (timeout, refused,

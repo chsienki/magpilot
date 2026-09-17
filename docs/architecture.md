@@ -421,6 +421,10 @@ Enforcement points:
   gate lives in one place upstream of all ~17 call sites.
 - `GET /api/me` reports `{ identity, isAdmin }` so the SPA can show the
   admin toggle.
+- `GET /api/agents/version-status` and `POST
+  /api/agents/check-updates` use the same scoped/all-agent rules.
+  `all=true` is admin-only; regular users can inspect and signal only their
+  own agents.
 
 **Central logs are admin-only.** `GET /api/log` + `/api/log/sources`
 (the viewer/query side) are gated to the admin -- they aggregate every
@@ -462,7 +466,8 @@ the new enrollment carries none (`COALESCE(excluded.owner_user, ...)`).
 
 
 All routes are under `/api`, all protected by `Authorization: Bearer <MAGPILOT_AGENT_TOKEN>`
-**except** the two version endpoints (`/version`, `/version/latest`),
+**except** the three read-only version endpoints (`/version`,
+`/version/latest`, `/version/status`),
 which are deliberately unauthenticated so the launcher's banner check
 works without a configured token.
 
@@ -470,6 +475,8 @@ works without a configured token.
 |---|---|---|
 | GET    | `/version`                                 | Agent's own `{version, protocolVersion}`. **No auth.** Used by `magpilot --magpilot-version` and external probes. |
 | GET    | `/version/latest?from=X.Y.Z`               | Hub-reported latest release metadata (cached locally by `UpdatePoller`). **No auth.** Recomputes `updateAvailable` against the requesting launcher's version, which may differ from the agent after a partial install. Drives the upgrade banner + `--magpilot-update`. |
+| GET    | `/version/status`                          | Composite running/latest version, protocol range, update state, `lastCheckedAt`, and immediate-refresh capability. **No auth.** |
+| POST   | `/version/refresh`                         | Authenticated hub signal: immediately poll `/api/agent-version`, update the local cache, and return the composite status. Does not install anything. |
 | GET    | `/info`                                    | Agent name, OS, available flavors                          |
 | GET    | `/sessions`                                | List sessions on disk (with state, cwd, last-touched)      |
 | POST   | `/sessions`                                | Create a new session. Body `NewSessionRequest { Cwd?, Name?, InitialPrompt?, UseAgency?, Model?, ReasoningEffort?, DisableMcpServers?, Agent?, AvailableTools?, DisableBuiltinMcps?, NoCustomInstructions?, CopilotHome? }`. `Agent`/`Model`/`ReasoningEffort` pin advertised ACP session config options; all other added fields are process-scoped and select an isolated child. `Agent` also supplies the startup `--agent` needed for Copilot to advertise that selector. `AvailableTools` maps to `--available-tools=<selector>`, the booleans map to their CLI switches, and `CopilotHome` sets the child's `COPILOT_HOME`. **400** on an unsafe token/path; **502** if the CLI does not advertise/accept/confirm the requested config. |

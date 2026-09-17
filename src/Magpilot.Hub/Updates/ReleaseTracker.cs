@@ -33,6 +33,7 @@ public sealed class ReleaseTracker(
     IConfiguration cfg) : BackgroundService
 {
     private static readonly TimeSpan PollInterval = TimeSpan.FromHours(1);
+    private readonly SemaphoreSlim _refreshGate = new(1, 1);
 
     private readonly string _repo = cfg["Updates:ReleaseRepo"]
         ?? Environment.GetEnvironmentVariable("MAGPILOT_RELEASE_REPO")
@@ -46,7 +47,7 @@ public sealed class ReleaseTracker(
         log.LogInformation("ReleaseTracker started; polling {Repo} every {Interval}", _repo, PollInterval);
         while (!stoppingToken.IsCancellationRequested)
         {
-            try { await PollOnceAsync(stoppingToken); }
+            try { await RefreshAsync(stoppingToken); }
             catch (OperationCanceledException) { break; }
             catch (Exception ex) { log.LogWarning(ex, "ReleaseTracker poll failed"); }
 
@@ -55,71 +56,70 @@ public sealed class ReleaseTracker(
         }
     }
 
-    private async Task PollOnceAsync(CancellationToken ct)
+    public async Task<LatestVersionInfo> RefreshAsync(CancellationToken ct = default)
     {
-        var http = httpFactory.CreateClient("releases");
-        using var req = new HttpRequestMessage(HttpMethod.Get,
-            $"https://api.github.com/repos/{_repo}/releases/latest");
-        req.Headers.UserAgent.Add(new ProductInfoHeaderValue("magpilot-hub", Versioning.AssemblyVersion));
-        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
-        if (!string.IsNullOrEmpty(_token))
-            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
-
-        using var resp = await http.SendAsync(req, ct);
-        if (resp.StatusCode == HttpStatusCode.NotFound)
+        await _refreshGate.WaitAsync(ct);
+        try
         {
-            // 404 from GH releases/latest means EITHER (a) the repo has
-            // zero published non-prerelease releases, OR (b) the repo is
-            // private and we're polling anonymously (no
-            // MAGPILOT_GITHUB_TOKEN set). Both are misconfigurations
-            // worth surfacing -- they silently break the autoupdate path
-            // for all clients. Log at Warning so /admin/logs shows it.
-            log.LogWarning(
-                "GitHub releases/latest 404 for {Repo}. Either no published " +
-                "release exists yet, or the repo is private and " +
-                "MAGPILOT_GITHUB_TOKEN is not set on the hub. Autoupdate banners " +
-                "will not fire until this is resolved.", _repo);
-            return;
-        }
-        resp.EnsureSuccessStatusCode();
+            var http = httpFactory.CreateClient("releases");
+            using var req = new HttpRequestMessage(HttpMethod.Get,
+                $"https://api.github.com/repos/{_repo}/releases/latest");
+            req.Headers.UserAgent.Add(new ProductInfoHeaderValue("magpilot-hub", Versioning.AssemblyVersion));
+            req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+            if (!string.IsNullOrEmpty(_token))
+                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
 
-        var release = await resp.Content.ReadFromJsonAsync<GitHubRelease>(cancellationToken: ct);
-        if (release?.TagName is null)
-        {
-            log.LogWarning("Latest release from {Repo} had no tag_name", _repo);
-            return;
-        }
-
-        var version = release.TagName.TrimStart('v');
-
-        // Try to find a version.json asset to get the protocol range.
-        // First release may not have one yet; fall back to baseline 1.
-        int min = 1, max = 1;
-        var versionAsset = release.Assets?.FirstOrDefault(a =>
-            string.Equals(a.Name, "version.json", StringComparison.OrdinalIgnoreCase));
-        if (versionAsset?.BrowserDownloadUrl is not null)
-        {
-            try
+            using var resp = await http.SendAsync(req, ct);
+            if (resp.StatusCode == HttpStatusCode.NotFound)
             {
-                using var assetReq = new HttpRequestMessage(HttpMethod.Get, versionAsset.BrowserDownloadUrl);
-                assetReq.Headers.UserAgent.Add(new ProductInfoHeaderValue("magpilot-hub", Versioning.AssemblyVersion));
-                using var assetResp = await http.SendAsync(assetReq, ct);
-                assetResp.EnsureSuccessStatusCode();
-                var meta = await assetResp.Content.ReadFromJsonAsync<VersionJson>(cancellationToken: ct);
-                if (meta is not null)
+                throw new InvalidOperationException(
+                    $"GitHub releases/latest returned 404 for {_repo}. " +
+                    "Either no published release exists, or the repo is private and " +
+                    "MAGPILOT_GITHUB_TOKEN is not configured.");
+            }
+            resp.EnsureSuccessStatusCode();
+
+            var release = await resp.Content.ReadFromJsonAsync<GitHubRelease>(cancellationToken: ct);
+            if (release?.TagName is null)
+                throw new InvalidOperationException($"Latest release from {_repo} had no tag_name.");
+
+            var version = release.TagName.TrimStart('v');
+
+            // Try to find a version.json asset to get the protocol range.
+            // First release may not have one yet; fall back to baseline 1.
+            int min = 1, max = 1;
+            var versionAsset = release.Assets?.FirstOrDefault(a =>
+                string.Equals(a.Name, "version.json", StringComparison.OrdinalIgnoreCase));
+            if (versionAsset?.BrowserDownloadUrl is not null)
+            {
+                try
                 {
-                    min = meta.MinProtocol > 0 ? meta.MinProtocol : 1;
-                    max = meta.MaxProtocol > 0 ? meta.MaxProtocol : min;
+                    using var assetReq = new HttpRequestMessage(HttpMethod.Get, versionAsset.BrowserDownloadUrl);
+                    assetReq.Headers.UserAgent.Add(new ProductInfoHeaderValue("magpilot-hub", Versioning.AssemblyVersion));
+                    using var assetResp = await http.SendAsync(assetReq, ct);
+                    assetResp.EnsureSuccessStatusCode();
+                    var meta = await assetResp.Content.ReadFromJsonAsync<VersionJson>(cancellationToken: ct);
+                    if (meta is not null)
+                    {
+                        min = meta.MinProtocol > 0 ? meta.MinProtocol : 1;
+                        max = meta.MaxProtocol > 0 ? meta.MaxProtocol : min;
+                    }
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested)
+                {
+                    log.LogDebug(ex, "Failed to fetch version.json asset for {Repo}; using defaults", _repo);
                 }
             }
-            catch (Exception ex)
-            {
-                log.LogDebug(ex, "Failed to fetch version.json asset for {Repo}; using defaults", _repo);
-            }
-        }
 
-        cache.Set(new LatestVersionInfo(version, min, max, UpdateAvailable: false));
-        log.LogInformation("Cached latest release {Version} (protocol [{Min},{Max}])", version, min, max);
+            var info = new LatestVersionInfo(version, min, max, UpdateAvailable: false);
+            cache.Set(info);
+            log.LogInformation("Cached latest release {Version} (protocol [{Min},{Max}])", version, min, max);
+            return info;
+        }
+        finally
+        {
+            _refreshGate.Release();
+        }
     }
 
     private sealed record GitHubRelease(

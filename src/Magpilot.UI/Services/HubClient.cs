@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Magpilot.Shared;
 using Magpilot.Shared.Models;
 using Magpilot.UI.Abstractions;
 using Magpilot.UI.Components;
@@ -73,6 +74,25 @@ public sealed class HubClient
     /// </summary>
     public Task<List<AgentInfo>?> ListAllAgentsAsync(CancellationToken ct = default) =>
         _http.GetFromJsonAsync<List<AgentInfo>>("api/admin/agents/all", ct);
+
+    public Task<List<AgentVersionReport>?> ListAgentVersionStatusesAsync(
+        bool includeAll,
+        CancellationToken ct = default) =>
+        _http.GetFromJsonAsync<List<AgentVersionReport>>(
+            $"api/agents/version-status?all={includeAll.ToString().ToLowerInvariant()}",
+            ct);
+
+    public async Task<AgentUpdateCheckResult?> CheckAgentUpdatesAsync(
+        bool includeAll,
+        CancellationToken ct = default)
+    {
+        using var response = await _http.PostAsync(
+            $"api/agents/check-updates?all={includeAll.ToString().ToLowerInvariant()}",
+            content: null,
+            ct);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<AgentUpdateCheckResult>(cancellationToken: ct);
+    }
 
     /// <summary>
     /// Revoke a paired agent. Hub clears the per-agent token + sets

@@ -52,4 +52,25 @@ public class LatestVersionCacheTests
 
         Assert.False(cache.Get(from).UpdateAvailable);
     }
+
+    [Fact]
+    public void GetStatus_reports_running_and_latest_versions_with_check_time()
+    {
+        var cache = new LatestVersionCache();
+        cache.Set(new LatestVersionInfo(
+            LatestVersion: "99.0.0",
+            MinProtocol: 1,
+            MaxProtocol: 2,
+            UpdateAvailable: false));
+
+        var status = cache.GetStatus();
+
+        Assert.Equal(Versioning.AssemblyVersion, status.Version);
+        Assert.Equal(Versioning.ProtocolVersion, status.ProtocolVersion);
+        Assert.Equal("99.0.0", status.LatestVersion);
+        Assert.Equal(1, status.MinProtocol);
+        Assert.Equal(2, status.MaxProtocol);
+        Assert.True(status.UpdateAvailable);
+        Assert.NotNull(status.LastCheckedAt);
+    }
 }

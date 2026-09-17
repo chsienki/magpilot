@@ -35,6 +35,7 @@ public sealed class UpdatePoller(
 {
     private static readonly TimeSpan PollInterval = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(30);
+    private readonly SemaphoreSlim _refreshGate = new(1, 1);
 
     private readonly string? _hubUrl = cfg["Hub:Url"]
         ?? Environment.GetEnvironmentVariable("MAGPILOT_HUB_URL");
@@ -42,9 +43,13 @@ public sealed class UpdatePoller(
     private readonly string? _hubBearer = cfg["Hub:Bearer"]
         ?? Environment.GetEnvironmentVariable("MAGPILOT_HUB_BEARER");
 
+    public bool IsConfigured =>
+        !string.IsNullOrEmpty(_hubUrl) &&
+        !string.IsNullOrEmpty(_hubBearer);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (string.IsNullOrEmpty(_hubUrl) || string.IsNullOrEmpty(_hubBearer))
+        if (!IsConfigured)
         {
             log.LogInformation(
                 "UpdatePoller disabled: MAGPILOT_HUB_URL/MAGPILOT_HUB_BEARER not set; cache stays at default");
@@ -60,7 +65,7 @@ public sealed class UpdatePoller(
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            try { await PollOnceAsync(stoppingToken); }
+            try { await RefreshAsync(stoppingToken); }
             catch (OperationCanceledException) { break; }
             catch (Exception ex) { log.LogWarning(ex, "UpdatePoller poll failed"); }
 
@@ -69,22 +74,37 @@ public sealed class UpdatePoller(
         }
     }
 
-    private async Task PollOnceAsync(CancellationToken ct)
+    public async Task<AgentVersionStatus> RefreshAsync(CancellationToken ct = default)
     {
-        var http = httpFactory.CreateClient("hub-update");
-        using var req = new HttpRequestMessage(HttpMethod.Get,
-            $"{_hubUrl!.TrimEnd('/')}/api/agent-version?from={Versioning.AssemblyVersion}");
-        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _hubBearer!);
+        if (!IsConfigured)
+        {
+            throw new InvalidOperationException(
+                "Update polling is disabled because MAGPILOT_HUB_URL or MAGPILOT_HUB_BEARER is not set.");
+        }
 
-        using var resp = await http.SendAsync(req, ct);
-        resp.EnsureSuccessStatusCode();
-        var info = await resp.Content.ReadFromJsonAsync<LatestVersionInfo>(cancellationToken: ct);
-        if (info is null) return;
+        await _refreshGate.WaitAsync(ct);
+        try
+        {
+            var http = httpFactory.CreateClient("hub-update");
+            using var req = new HttpRequestMessage(HttpMethod.Get,
+                $"{_hubUrl!.TrimEnd('/')}/api/agent-version?from={Versioning.AssemblyVersion}");
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _hubBearer!);
 
-        cache.Set(info);
-        log.LogInformation(
-            "Hub reports latest {Latest} (protocol [{Min},{Max}], updateAvailable={Up})",
-            string.IsNullOrEmpty(info.LatestVersion) ? "<unknown>" : info.LatestVersion,
-            info.MinProtocol, info.MaxProtocol, info.UpdateAvailable);
+            using var resp = await http.SendAsync(req, ct);
+            resp.EnsureSuccessStatusCode();
+            var info = await resp.Content.ReadFromJsonAsync<LatestVersionInfo>(cancellationToken: ct)
+                ?? throw new InvalidOperationException("Hub returned an empty agent-version response.");
+
+            cache.Set(info);
+            log.LogInformation(
+                "Hub reports latest {Latest} (protocol [{Min},{Max}], updateAvailable={Up})",
+                string.IsNullOrEmpty(info.LatestVersion) ? "<unknown>" : info.LatestVersion,
+                info.MinProtocol, info.MaxProtocol, info.UpdateAvailable);
+            return cache.GetStatus();
+        }
+        finally
+        {
+            _refreshGate.Release();
+        }
     }
 }

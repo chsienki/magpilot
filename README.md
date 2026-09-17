@@ -92,6 +92,9 @@ changes, and includes repeatable capture/probe tools plus an offline theme
 editor. The **Windows installer** + autoupdate path
 (`installer/magpilot.iss`, `magpilot --magpilot-update`, hub-mediated version
 check) is in place; HENDRIK runs the agent as a scheduled task at user logon.
+The hub's Agents page reports each machine's running/update version and can
+force an immediate hub + agent update check without remotely installing
+anything.
 
 What is **NOT yet wired**: the MAUI Android shell (the original phone
 target), real FCM/Web Push delivery, TLS for hub<->agents (still LAN +

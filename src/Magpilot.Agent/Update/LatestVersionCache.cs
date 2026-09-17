@@ -23,21 +23,43 @@ namespace Magpilot.Agent.Update;
 /// </summary>
 public sealed class LatestVersionCache
 {
-    private volatile LatestVersionInfo _value =
-        new(Versioning.AssemblyVersion,
-            MinProtocol: Versioning.ProtocolVersion,
-            MaxProtocol: Versioning.ProtocolVersion,
-            UpdateAvailable: false);
+    private sealed record CacheState(
+        LatestVersionInfo Info,
+        DateTimeOffset? LastCheckedAt);
+
+    private volatile CacheState _state =
+        new(
+            new LatestVersionInfo(
+                Versioning.AssemblyVersion,
+                MinProtocol: Versioning.ProtocolVersion,
+                MaxProtocol: Versioning.ProtocolVersion,
+                UpdateAvailable: false),
+            LastCheckedAt: null);
 
     public LatestVersionInfo Get(string? from = null)
     {
-        var value = _value;
+        var value = _state.Info;
         return value with
         {
             UpdateAvailable = Versioning.IsUpdateAvailable(from, value.LatestVersion),
         };
     }
 
+    public AgentVersionStatus GetStatus()
+    {
+        var state = _state;
+        return new AgentVersionStatus(
+            Versioning.AssemblyVersion,
+            Versioning.ProtocolVersion,
+            state.Info.LatestVersion,
+            state.Info.MinProtocol,
+            state.Info.MaxProtocol,
+            Versioning.IsUpdateAvailable(Versioning.AssemblyVersion, state.Info.LatestVersion),
+            state.LastCheckedAt);
+    }
+
     public void Set(LatestVersionInfo value) =>
-        _value = value with { UpdateAvailable = false };
+        _state = new CacheState(
+            value with { UpdateAvailable = false },
+            DateTimeOffset.UtcNow);
 }

@@ -25,7 +25,9 @@ builder.Services.AddHttpClient("agent-action", c => c.Timeout = TimeSpan.FromSec
 builder.Services.AddHttpClient("agent-stream", c => c.Timeout = Timeout.InfiniteTimeSpan);
 builder.Services.AddHttpClient("releases", c => c.Timeout = TimeSpan.FromSeconds(15));
 builder.Services.AddSingleton<Magpilot.Hub.Updates.ReleaseCache>();
-builder.Services.AddHostedService<Magpilot.Hub.Updates.ReleaseTracker>();
+builder.Services.AddSingleton<Magpilot.Hub.Updates.ReleaseTracker>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<Magpilot.Hub.Updates.ReleaseTracker>());
+builder.Services.AddSingleton<Magpilot.Hub.Updates.AgentUpdateCoordinator>();
 builder.Services.AddHttpClient("oauth");
 builder.Services.AddHubAuth(builder.Configuration);
 builder.Services.AddSingleton<Magpilot.Hub.Auth.EnrollmentService>();

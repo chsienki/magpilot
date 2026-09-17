@@ -485,13 +485,25 @@ GitHub Releases <--(every 1h)-- Hub.ReleaseTracker --> ReleaseCache
                                              also drives --magpilot-update)
 ```
 
+The Agents page can bypass both polling delays. `POST
+/api/agents/check-updates` first calls `ReleaseTracker.RefreshAsync`, then
+concurrently POSTs each visible agent's authenticated `/api/version/refresh`.
+The agent immediately re-queries `/api/agent-version`, updates
+`LatestVersionCache`, and returns its composite running/latest status. This is
+a notification/cache-refresh signal only -- it never downloads or installs an
+update on the remote machine.
+
 Endpoints added by the packaging work:
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
 | `GET /api/version` (agent) | none | Agent's own `{version, protocolVersion}` |
 | `GET /api/version/latest?from=X.Y.Z` (agent) | none | Hub-reported latest metadata, cached locally; computes `updateAvailable` for the requesting launcher |
+| `GET /api/version/status` (agent) | none | Composite running/latest status plus `lastCheckedAt` and immediate-refresh capability |
+| `POST /api/version/refresh` (agent) | agent bearer | Immediately poll the configured hub and return refreshed composite status |
 | `GET /api/agent-version?from=X.Y.Z` (hub) | cookie or bearer | Hub's view of latest release; computes `updateAvailable` for the caller |
+| `GET /api/agents/version-status?all=...` (hub) | cookie or bearer | Aggregate version status for the caller's visible agents; `all=true` is admin-only |
+| `POST /api/agents/check-updates?all=...` (hub) | cookie or bearer | Force hub release refresh, signal visible agents to refresh immediately, and return partial per-agent results |
 
 The agent's version endpoints are deliberately **unauthenticated** so
 the launcher can show its banner without `MAGPILOT_AGENT_TOKEN` set.
@@ -999,8 +1011,13 @@ sections:
   freshly-redirected browser visually emphasizes the right card
   via `mud-elevation-4`. 5-second poll keeps it live without page
   refresh.
-* "Paired agents" below -- V2b MudTable with name / status / url
-  / enrolled / last-seen + per-row Revoke. Revoked rows greyed.
+* "Paired agents" below -- V2b MudTable with name / status / running version
+  + update state / url / enrolled / last-seen + per-row Revoke. Revoked rows
+  greyed. A "Check for agent updates" button refreshes GitHub release state,
+  pushes an immediate cache-refresh signal to every visible agent, and keeps
+  unreachable/unsupported results isolated to their rows. Older agents fall
+  back to `/version` + `/version/latest` and show "Scheduled checks only" until
+  upgraded.
 
 **Gotcha (carried from V2a / V2b)**: running `--magpilot-pair`
 without `MAGPILOT_ENV_FILE` set on a machine where the installed

@@ -5,6 +5,7 @@
 @inject IDialogService DialogService
 @implements IDisposable
 @using Magpilot.UI.Services
+@using Magpilot.Shared
 @using Magpilot.Shared.Models
 
 @*
@@ -90,6 +91,13 @@
             <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-2">
                 <MudText Typo="Typo.h6">@(_showAll ? "All agents" : "Paired agents")</MudText>
                 <MudSpacer />
+                <MudButton Variant="Variant.Outlined" Color="Color.Primary"
+                           Size="Size.Small"
+                           StartIcon="@Icons.Material.Filled.SystemUpdateAlt"
+                           Disabled="@(_checkingUpdates || _agents is null || _agents.Count == 0)"
+                           OnClick="CheckForUpdatesAsync">
+                    @(_checkingUpdates ? "Checking..." : "Check for agent updates")
+                </MudButton>
                 @if (_isAdmin)
                 {
                     <MudSwitch T="bool" Value="_showAll" Color="Color.Primary"
@@ -129,6 +137,7 @@
                             <MudTh>Owner</MudTh>
                         }
                         <MudTh>Status</MudTh>
+                        <MudTh>Version</MudTh>
                         <MudTh>URL</MudTh>
                         <MudTh>Enrolled</MudTh>
                         <MudTh>Last seen</MudTh>
@@ -161,6 +170,79 @@
                             <MudChip T="string" Size="Size.Small" Variant="Variant.Filled" Color="@statusColor">
                                 @statusLabel
                             </MudChip>
+                        </MudTd>
+                        <MudTd Style="@rowStyle">
+                            @{
+                                _agentVersions.TryGetValue(context.Name, out var versionReport);
+                            }
+                            @if (versionReport?.Status is { } version)
+                            {
+                                <MudStack Spacing="0">
+                                    <MudText Typo="Typo.caption" Style="font-family: monospace;">
+                                        @version.Version
+                                    </MudText>
+                                    @if (version.UpdateAvailable)
+                                    {
+                                        <MudChip T="string" Size="Size.Small"
+                                                 Variant="Variant.Outlined" Color="Color.Warning">
+                                            @version.LatestVersion available
+                                        </MudChip>
+                                    }
+                                    else if (!string.IsNullOrEmpty(version.LatestVersion)
+                                             && (version.LastCheckedAt is not null || !version.RefreshSupported))
+                                    {
+                                        <MudText Typo="Typo.caption" Color="Color.Success">
+                                            Up to date
+                                        </MudText>
+                                    }
+                                    else
+                                    {
+                                        <MudText Typo="Typo.caption" Color="Color.Default">
+                                            Not checked
+                                        </MudText>
+                                    }
+                                    @if (version.LastCheckedAt is { } checkedAt)
+                                    {
+                                        <MudText Typo="Typo.caption" Color="Color.Default">
+                                            checked @RelativeTime(checkedAt)
+                                        </MudText>
+                                    }
+                                    @if (!version.RefreshSupported)
+                                    {
+                                        <MudTooltip Text="Update this agent to enable immediate hub-triggered checks.">
+                                            <MudText Typo="Typo.caption" Color="Color.Warning">
+                                                Scheduled checks only
+                                            </MudText>
+                                        </MudTooltip>
+                                    }
+                                    @if (versionReport.Error is { } refreshError)
+                                    {
+                                        <MudTooltip Text="@refreshError">
+                                            <MudText Typo="Typo.caption" Color="Color.Warning">
+                                                Refresh failed
+                                            </MudText>
+                                        </MudTooltip>
+                                    }
+                                </MudStack>
+                            }
+                            else if (versionReport?.Error is { } error)
+                            {
+                                <MudTooltip Text="@error">
+                                    <MudText Typo="Typo.caption" Color="Color.Default">
+                                        Unavailable
+                                    </MudText>
+                                </MudTooltip>
+                            }
+                            else if (_loadingVersions)
+                            {
+                                <MudProgressCircular Indeterminate="true" Size="Size.Small" />
+                            }
+                            else
+                            {
+                                <MudText Typo="Typo.caption" Color="Color.Default">
+                                    Not checked
+                                </MudText>
+                            }
                         </MudTd>
                         <MudTd Style="@rowStyle">
                             <MudText Typo="Typo.caption" Color="Color.Default" Style="font-family: monospace;">
@@ -210,8 +292,12 @@
     private bool _loading;
     private bool _isAdmin;
     private bool _showAll;
+    private bool _loadingVersions;
+    private bool _checkingUpdates;
     private List<AgentInfo>? _agents;
     private List<PairingClaimSummary>? _claims;
+    private readonly Dictionary<string, AgentVersionReport> _agentVersions =
+        new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _busyAgents = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<int> _busyClaims = new();
     private System.Threading.Timer? _poller;
@@ -254,6 +340,7 @@
         }
 
         await LoadAsync();
+        await LoadVersionStatusesAsync();
         // Poll every 5s so a launcher pairing in the background shows
         // up promptly without the admin having to refresh. Same poll
         // covers the agent list so a Revoke triggered by another tab
@@ -298,7 +385,70 @@
     {
         _showAll = value;
         _agents = null;
+        _agentVersions.Clear();
         await LoadAsync();
+        await LoadVersionStatusesAsync();
+    }
+
+    private async Task LoadVersionStatusesAsync()
+    {
+        _loadingVersions = true;
+        StateHasChanged();
+        try
+        {
+            var reports = await Hub.ListAgentVersionStatusesAsync(_showAll && _isAdmin);
+            ApplyVersionReports(reports);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Could not load agent versions: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _loadingVersions = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task CheckForUpdatesAsync()
+    {
+        _checkingUpdates = true;
+        StateHasChanged();
+        try
+        {
+            var result = await Hub.CheckAgentUpdatesAsync(_showAll && _isAdmin)
+                ?? throw new InvalidOperationException("Hub returned an empty update-check response.");
+            ApplyVersionReports(result.Agents);
+
+            var reports = result.Agents;
+            var updatesAvailable = reports.Count(report => report.Status?.UpdateAvailable == true);
+            var warnings = reports.Count(report => report.Error is not null);
+            var scheduledOnly = reports.Count(report => report.Status?.RefreshSupported == false);
+            var message = updatesAvailable > 0
+                ? $"{updatesAvailable} agent update(s) available; latest is {result.LatestVersion}."
+                : $"Agents checked; latest is {result.LatestVersion}.";
+            if (scheduledOnly > 0)
+                message += $" {scheduledOnly} older agent(s) remain on scheduled checks.";
+            if (warnings > 0)
+                message += $" {warnings} agent(s) reported refresh warnings.";
+            Snackbar.Add(message, warnings > 0 ? Severity.Warning : Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Could not check for agent updates: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _checkingUpdates = false;
+            StateHasChanged();
+        }
+    }
+
+    private void ApplyVersionReports(IEnumerable<AgentVersionReport>? reports)
+    {
+        if (reports is null) return;
+        foreach (var report in reports)
+            _agentVersions[report.AgentName] = report;
     }
 
     private async Task ApproveAsync(PairingClaimSummary claim)
@@ -400,4 +550,3 @@
         _poller?.Dispose();
     }
 }
-

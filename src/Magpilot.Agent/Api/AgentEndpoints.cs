@@ -22,8 +22,34 @@ public static class AgentEndpoints
             new VersionInfo(Versioning.AssemblyVersion, Versioning.ProtocolVersion));
         routes.MapGet("/api/version/latest", (LatestVersionCache cache, string? from) =>
             cache.Get(from));
+        routes.MapGet("/api/version/status", (LatestVersionCache cache) =>
+            cache.GetStatus());
 
         var api = routes.MapGroup("/api").RequireAuthorization();
+
+        api.MapPost("/version/refresh",
+            async (UpdatePoller poller, CancellationToken ct) =>
+            {
+                if (!poller.IsConfigured)
+                {
+                    return Results.Json(
+                        new { error = "agent update polling is not configured" },
+                        statusCode: StatusCodes.Status503ServiceUnavailable);
+                }
+
+                try
+                {
+                    return Results.Ok(await poller.RefreshAsync(ct));
+                }
+                catch (Exception ex) when (
+                    (ex is HttpRequestException or TaskCanceledException) &&
+                    !ct.IsCancellationRequested)
+                {
+                    return Results.Json(
+                        new { error = "hub update check failed", detail = ex.Message },
+                        statusCode: StatusCodes.Status502BadGateway);
+                }
+            });
 
         api.MapGet("/info", (FlavorCapabilities flavors) => new
         {

@@ -75,3 +75,35 @@ public sealed record LatestVersionInfo(
     int MinProtocol,
     int MaxProtocol,
     bool UpdateAvailable);
+
+/// <summary>
+/// An agent's running version plus the release metadata it most recently
+/// received from the hub.
+/// </summary>
+public sealed record AgentVersionStatus(
+    string Version,
+    int ProtocolVersion,
+    string LatestVersion,
+    int MinProtocol,
+    int MaxProtocol,
+    bool UpdateAvailable,
+    DateTimeOffset? LastCheckedAt,
+    bool RefreshSupported = true);
+
+/// <summary>
+/// Hub-side result for one agent. A failed or offline agent carries an error
+/// without preventing other agents from reporting successfully.
+/// </summary>
+public sealed record AgentVersionReport(
+    string AgentName,
+    AgentVersionStatus? Status,
+    string? Error = null);
+
+/// <summary>
+/// Result of a hub-triggered release refresh followed by an immediate update
+/// signal to every visible agent.
+/// </summary>
+public sealed record AgentUpdateCheckResult(
+    string LatestVersion,
+    DateTimeOffset CheckedAt,
+    IReadOnlyList<AgentVersionReport> Agents);
