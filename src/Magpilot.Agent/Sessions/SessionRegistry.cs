@@ -1,18 +1,18 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using Magpilot.Agent.Acp;
+using Magpilot.Agent.Runtime;
 using Magpilot.Shared.Models;
 
 namespace Magpilot.Agent.Sessions;
 
 /// <summary>
-/// Bridges on-disk Copilot CLI sessions with the live ACP process.
+/// Bridges on-disk Copilot CLI sessions with the active agent runtime.
 /// Maintains the set of "owned" sessionIds (those currently loaded into
-/// our ACP child) and orchestrates adoption of locked sessions.
+/// that runtime) and orchestrates adoption of locked sessions.
 /// </summary>
 public sealed class SessionRegistry
 {
-    private readonly AcpSessionManager _acp;
+    private readonly IAgentSessionRuntime _runtime;
     private readonly SessionScanner _scanner;
     private readonly HostOwnership _hostOwnership;
     private readonly YoloRegistry _yolo;
@@ -33,9 +33,14 @@ public sealed class SessionRegistry
         (Environment.GetEnvironmentVariable("MAGPILOT_STALE_RECYCLE") ?? "").Trim().ToLowerInvariant()
             is "1" or "true" or "yes" or "on";
 
-    public SessionRegistry(AcpSessionManager acp, SessionScanner scanner, HostOwnership hostOwnership, YoloRegistry yolo, ILogger<SessionRegistry> logger)
+    public SessionRegistry(
+        IAgentSessionRuntime runtime,
+        SessionScanner scanner,
+        HostOwnership hostOwnership,
+        YoloRegistry yolo,
+        ILogger<SessionRegistry> logger)
     {
-        _acp = acp;
+        _runtime = runtime;
         _scanner = scanner;
         _hostOwnership = hostOwnership;
         _yolo = yolo;
@@ -48,8 +53,8 @@ public sealed class SessionRegistry
 
     private bool IsAgentOwned(string sessionId) =>
         _owned.ContainsKey(sessionId) &&
-        _acp.IsAttached(sessionId) &&
-        !_acp.IsQuarantined(sessionId);
+        _runtime.IsAttached(sessionId) &&
+        !_runtime.IsQuarantined(sessionId);
 
     public IReadOnlyList<SessionInfo> List() =>
         _scanner.Enumerate(Owned).Select(s => s with { Yolo = _yolo.IsEnabled(s.Id) }).ToList();
@@ -64,7 +69,7 @@ public sealed class SessionRegistry
         info is null ? null : info with { Yolo = _yolo.IsEnabled(info.Id) };
 
     // cwd for a session, from its on-disk workspace.yaml; backs the recycle
-    // reload path so AcpSessionManager stays free of the scanner.
+    // reload path so the runtime stays free of the scanner.
     internal string? CwdFor(string sessionId) => _scanner.Get(sessionId, Owned)?.Cwd;
 
     private async Task<SemaphoreSlim> AcquireLifecycleGateAsync(string sessionId, CancellationToken ct)
@@ -88,9 +93,9 @@ public sealed class SessionRegistry
         bool noCustomInstructions = false,
         string? copilotHome = null)
     {
-        AcpFlavor.ValidateAvailableToolsRequest(availableTools);
+        SessionRuntimeProfile.ValidateAvailableToolsRequest(availableTools);
         cwd ??= Environment.CurrentDirectory;
-        var flavor = AcpFlavor.Resolve(
+        var profile = SessionRuntimeProfile.Resolve(
             useAgency,
             model,
             reasoningEffort,
@@ -100,10 +105,10 @@ public sealed class SessionRegistry
             disableBuiltinMcps,
             noCustomInstructions,
             copilotHome);
-        // AcpSessionManager invokes onAttached only after the complete requested
+        // The runtime invokes onAttached only after the complete requested
         // configuration has been applied and verified. A failed configure may
         // leave a quarantined route for retry, but it is not advertised as Owned.
-        var sid = await _acp.NewSessionAsync(cwd, flavor, ct, onAttached: id => _owned.TryAdd(id, 0));
+        var sid = await _runtime.NewSessionAsync(cwd, profile, ct, onAttached: id => _owned.TryAdd(id, 0));
 
         // Stamp a friendly name into workspace.yaml if the caller supplied
         // one. Copilot CLI auto-derives a summary from the first user
@@ -180,7 +185,7 @@ public sealed class SessionRegistry
         bool? noCustomInstructions = null,
         string? copilotHome = null)
     {
-        AcpFlavor.ValidateAvailableToolsRequest(availableTools);
+        SessionRuntimeProfile.ValidateAvailableToolsRequest(availableTools);
         var gate = await AcquireLifecycleGateAsync(sessionId, ct);
         try
         {
@@ -220,7 +225,7 @@ public sealed class SessionRegistry
             throw new InvalidOperationException(
                 $"Session is held by magpilot launcher PID {host.HostPid}; release it from the host before adopting.");
         }
-        var requestedFlavor = AcpFlavor.Resolve(
+        var requestedProfile = SessionRuntimeProfile.Resolve(
             useAgency: false,
             model,
             reasoningEffort,
@@ -257,13 +262,13 @@ public sealed class SessionRegistry
         // its requested configuration. The child cannot load the same session a
         // second time, so retry against the quarantined route in place. It only
         // becomes registry-Owned after the complete tuple verifies.
-        if (_acp.IsAttached(sessionId) &&
-            _acp.IsQuarantined(sessionId) &&
+        if (_runtime.IsAttached(sessionId) &&
+            _runtime.IsQuarantined(sessionId) &&
             !_hostOwnership.TryGet(sessionId, out _))
         {
-            await _acp.ApplyOwnedConfigurationAsync(
+            await _runtime.ApplyOwnedConfigurationAsync(
                 sessionId,
-                requestedFlavor,
+                requestedProfile,
                 processScopeSpecified,
                 ct);
             _owned.TryAdd(sessionId, 0);
@@ -275,28 +280,28 @@ public sealed class SessionRegistry
         // invalidated bystanders even if its old live-looking lock has not yet
         // disappeared; reload it from disk instead of treating that lock as an
         // unrelated process that requires force.
-        if (_owned.ContainsKey(sessionId) && !_acp.IsAttached(sessionId))
+        if (_owned.ContainsKey(sessionId) && !_runtime.IsAttached(sessionId))
         {
-            var retainedFlavor = _acp.EffectiveFlavor(sessionId);
-            var reloadFlavor = retainedFlavor is null
-                ? requestedFlavor
-                : AcpFlavor.Resolve(
-                    Describe(retainedFlavor)!.UseAgency,
-                    model ?? retainedFlavor.Model,
-                    reasoningEffort ?? retainedFlavor.ReasoningEffort,
-                    disableMcpServers ?? retainedFlavor.DisabledMcpServers,
-                    agent ?? retainedFlavor.Agent,
-                    availableTools ?? retainedFlavor.AvailableTools,
-                    disableBuiltinMcps ?? retainedFlavor.DisableBuiltinMcps,
-                    noCustomInstructions ?? retainedFlavor.NoCustomInstructions,
-                    copilotHome ?? retainedFlavor.CopilotHome);
+            var retainedProfile = _runtime.EffectiveProfile(sessionId);
+            var reloadProfile = retainedProfile is null
+                ? requestedProfile
+                : SessionRuntimeProfile.Resolve(
+                    retainedProfile.UseAgency,
+                    model ?? retainedProfile.Model,
+                    reasoningEffort ?? retainedProfile.ReasoningEffort,
+                    disableMcpServers ?? retainedProfile.DisabledMcpServers,
+                    agent ?? retainedProfile.Agent,
+                    availableTools ?? retainedProfile.AvailableTools,
+                    disableBuiltinMcps ?? retainedProfile.DisableBuiltinMcps,
+                    noCustomInstructions ?? retainedProfile.NoCustomInstructions,
+                    copilotHome ?? retainedProfile.CopilotHome);
             _logger.LogWarning(
                 "Session {Sid} was invalidated with its co-hosted ACP child; re-attaching it from disk",
                 sessionId);
-            await _acp.ReloadFromDiskAsync(
+            await _runtime.ReloadFromDiskAsync(
                 sessionId,
                 info.Cwd ?? Environment.CurrentDirectory,
-                reloadFlavor,
+                reloadProfile,
                 ct,
                 onAttached: id => _owned.TryAdd(id, 0));
             return CompleteAdopt(
@@ -308,25 +313,25 @@ public sealed class SessionRegistry
         // session resident in one of our children without a published route.
         // Its live lock is ours, not a foreign owner that should require force.
         // Recycle the holder and retry from disk before the generic Locked path.
-        if (!_acp.IsAttached(sessionId) && _acp.IsResident(sessionId))
+        if (!_runtime.IsAttached(sessionId) && _runtime.IsResident(sessionId))
         {
-            var retainedFlavor = _acp.EffectiveFlavor(sessionId);
-            var reloadFlavor = retainedFlavor is null
-                ? requestedFlavor
-                : AcpFlavor.Resolve(
-                    Describe(retainedFlavor)!.UseAgency,
-                    model ?? retainedFlavor.Model,
-                    reasoningEffort ?? retainedFlavor.ReasoningEffort,
-                    disableMcpServers ?? retainedFlavor.DisabledMcpServers,
-                    agent ?? retainedFlavor.Agent,
-                    availableTools ?? retainedFlavor.AvailableTools,
-                    disableBuiltinMcps ?? retainedFlavor.DisableBuiltinMcps,
-                    noCustomInstructions ?? retainedFlavor.NoCustomInstructions,
-                    copilotHome ?? retainedFlavor.CopilotHome);
-            await _acp.ReloadFromDiskAsync(
+            var retainedProfile = _runtime.EffectiveProfile(sessionId);
+            var reloadProfile = retainedProfile is null
+                ? requestedProfile
+                : SessionRuntimeProfile.Resolve(
+                    retainedProfile.UseAgency,
+                    model ?? retainedProfile.Model,
+                    reasoningEffort ?? retainedProfile.ReasoningEffort,
+                    disableMcpServers ?? retainedProfile.DisabledMcpServers,
+                    agent ?? retainedProfile.Agent,
+                    availableTools ?? retainedProfile.AvailableTools,
+                    disableBuiltinMcps ?? retainedProfile.DisableBuiltinMcps,
+                    noCustomInstructions ?? retainedProfile.NoCustomInstructions,
+                    copilotHome ?? retainedProfile.CopilotHome);
+            await _runtime.ReloadFromDiskAsync(
                 sessionId,
                 info.Cwd ?? Environment.CurrentDirectory,
-                reloadFlavor,
+                reloadProfile,
                 ct,
                 onAttached: id => _owned.TryAdd(id, 0));
             return CompleteAdopt(
@@ -335,7 +340,7 @@ public sealed class SessionRegistry
         }
 
         var eventsPath = Path.Combine(_scanner.Root, sessionId, "events.jsonl");
-        if (!_acp.IsAttached(sessionId) && !File.Exists(eventsPath))
+        if (!_runtime.IsAttached(sessionId) && !File.Exists(eventsPath))
         {
             throw new SessionNotLoadableException(
                 sessionId,
@@ -349,29 +354,29 @@ public sealed class SessionRegistry
             // so the only way to serve current state is to recycle the child that
             // holds it (kill + respawn + reload from disk). Opt-in via
             // MAGPILOT_STALE_RECYCLE; otherwise surface it loudly.
-            if (_acp.MayBeStale(sessionId))
+            if (_runtime.MayBeStale(sessionId))
             {
                 if (_recycleOnStale)
                 {
-                    var outcome = await _acp.RecycleForStaleAsync(sessionId, CwdFor, ct);
+                    var outcome = await _runtime.RecycleForStaleAsync(sessionId, CwdFor, ct);
                     switch (outcome)
                     {
-                        case RecycleOutcome.Recycled:
+                        case SessionRecycleOutcome.Recycled:
                             _logger.LogWarning(
                                 "Session {Sid} resume was stale; recycled the ACP child and reloaded current state from disk",
                                 sessionId);
-                            if (_acp.HasForeignLiveHolder(sessionId))
+                            if (_runtime.HasForeignLiveHolder(sessionId))
                                 _logger.LogWarning(
                                     "Session {Sid} still has a live foreign holder after recycle; it may go stale again while that process keeps writing",
                                     sessionId);
                             break;
-                        case RecycleOutcome.Busy:
+                        case SessionRecycleOutcome.Busy:
                             _logger.LogWarning(
                                 "Session {Sid} resume is stale but a co-hosted turn is in flight; served context stays behind until it is idle",
                                 sessionId);
                             break;
-                        case RecycleOutcome.NotLoaded:
-                            _acp.ResyncWatermark(sessionId);
+                        case SessionRecycleOutcome.NotLoaded:
+                            _runtime.ResyncWatermark(sessionId);
                             break;
                     }
                 }
@@ -385,16 +390,16 @@ public sealed class SessionRegistry
                 }
             }
             else
-                _acp.ResyncWatermark(sessionId); // absorb our child's async post-turn flush
+                _runtime.ResyncWatermark(sessionId); // absorb our child's async flush after a turn
 
             // An Owned session must still honor an adopt request's config. ACP
             // session/load is not idempotent, so apply and verify against the
             // latest configOptions state captured from setup/set responses and
             // config_option_update notifications. Process-scoped MCP changes
             // cannot be made in place and fail explicitly.
-            await _acp.ApplyOwnedConfigurationAsync(
+            await _runtime.ApplyOwnedConfigurationAsync(
                 sessionId,
-                requestedFlavor,
+                requestedProfile,
                 processScopeSpecified,
                 ct);
             return CompleteAdopt(sessionId, WithYolo(_scanner.Get(sessionId, Owned) ?? info)!);
@@ -430,7 +435,7 @@ public sealed class SessionRegistry
         // Ownership is claimed only after configuration verifies. A failure keeps
         // a quarantined attached route that the early retry path above can
         // configure without issuing a second session/load.
-        await _acp.ReloadFromDiskAsync(sessionId, cwd, requestedFlavor, ct, onAttached: id => _owned.TryAdd(id, 0));
+        await _runtime.ReloadFromDiskAsync(sessionId, cwd, requestedProfile, ct, onAttached: id => _owned.TryAdd(id, 0));
         return CompleteAdopt(
             sessionId,
             WithYolo(_scanner.Get(sessionId, Owned)) ?? info with { State = SessionState.Owned });
@@ -446,7 +451,10 @@ public sealed class SessionRegistry
         return info;
     }
 
-    public async Task<AcpFlavor?> DetachAsync(string sessionId, CancellationToken ct, bool force = false)
+    public async Task<SessionRuntimeProfile?> DetachAsync(
+        string sessionId,
+        CancellationToken ct,
+        bool force = false)
     {
         var gate = await AcquireLifecycleGateAsync(sessionId, ct);
         try
@@ -456,22 +464,25 @@ public sealed class SessionRegistry
         finally { gate.Release(); }
     }
 
-    public bool IsResident(string sessionId) => _acp.IsResident(sessionId);
+    public bool IsResident(string sessionId) => _runtime.IsResident(sessionId);
 
-    private async Task<AcpFlavor?> DetachCoreAsync(string sessionId, CancellationToken ct, bool force)
+    private async Task<SessionRuntimeProfile?> DetachCoreAsync(
+        string sessionId,
+        CancellationToken ct,
+        bool force)
     {
-        if (!_acp.IsAttached(sessionId))
+        if (!_runtime.IsAttached(sessionId))
         {
-            var retainedFlavor = force && _acp.IsResident(sessionId)
-                ? await _acp.ForceDetachAsync(sessionId, ct)
-                : _acp.EffectiveFlavor(sessionId);
+            var retainedFlavor = force && _runtime.IsResident(sessionId)
+                ? await _runtime.ForceDetachAsync(sessionId, ct)
+                : _runtime.EffectiveProfile(sessionId);
             _owned.TryRemove(sessionId, out _);
             return retainedFlavor;
         }
 
         var flavor = force
-            ? await _acp.ForceDetachAsync(sessionId, ct)
-            : await _acp.CloseAsync(sessionId, _scanner.Root, ct);
+            ? await _runtime.ForceDetachAsync(sessionId, ct)
+            : await _runtime.CloseAsync(sessionId, _scanner.Root, ct);
         _owned.TryRemove(sessionId, out _);
         return flavor;
     }
@@ -508,7 +519,7 @@ public sealed class SessionRegistry
 
         SessionActivity activity;
         InFlightInfo? inFlight = null;
-        if (_acp.IsTurnInFlight(sessionId, out var entry))
+        if (_runtime.IsTurnInFlight(sessionId, out var entry))
         {
             activity = SessionActivity.InFlight;
             inFlight = new InFlightInfo(
@@ -538,14 +549,14 @@ public sealed class SessionRegistry
         var draining = false;
         try
         {
-            await _acp.BeginSessionDrainAsync(sessionId, ct);
+            await _runtime.BeginSessionDrainAsync(sessionId, ct);
             draining = true;
             return await AcquireForHostCoreAsync(sessionId, hostPid, force, ct);
         }
         finally
         {
             if (draining)
-                await _acp.EndSessionDrainAsync(sessionId);
+                await _runtime.EndSessionDrainAsync(sessionId);
             gate.Release();
         }
     }
@@ -562,7 +573,7 @@ public sealed class SessionRegistry
             throw new InvalidOperationException(
                 $"Session is already held by host PID {liveHost.HostPid}; it must release before host PID {hostPid} can acquire it.");
         }
-        if (!_acp.IsAttached(sessionId) &&
+        if (!_runtime.IsAttached(sessionId) &&
             scanned.State == SessionState.Locked &&
             scanned.OwnerPid is int externalPid &&
             IsAlive(externalPid) &&
@@ -574,8 +585,8 @@ public sealed class SessionRegistry
                     $"Session is held by external PID {externalPid}; pass force=true to evict it before acquiring.");
             }
 
-            var evicted = _acp.EvictForeignLiveHolders(sessionId);
-            if (_acp.HasForeignLiveHolder(sessionId))
+            var evicted = _runtime.EvictForeignLiveHolders(sessionId);
+            if (_runtime.HasForeignLiveHolder(sessionId))
             {
                 throw new InvalidOperationException(
                     $"Could not evict the external holder of session {sessionId}; host acquisition was not recorded.");
@@ -589,35 +600,35 @@ public sealed class SessionRegistry
 
         // If we currently own the session, gracefully release it.
         HostSessionFlavor? flavor = null;
-        if (_acp.IsAttached(sessionId))
+        if (_runtime.IsAttached(sessionId))
         {
             _handoffFlavor.TryGetValue(sessionId, out var pendingFlavor);
             var preservePendingFlavor =
-                _acp.IsQuarantined(sessionId) &&
+                _runtime.IsQuarantined(sessionId) &&
                 pendingFlavor is not null;
             // Capture what the session is actually running under BEFORE detaching:
             // process-scoped tool surface plus the model/reasoning the child last
             // confirmed. Handback restores exactly this, so a launcher round-trip
             // no longer silently demotes a pinned session to the default flavor.
             var forceDetach = false;
-            if (_acp.IsTurnInFlight(sessionId, out _))
+            if (_runtime.IsTurnInFlight(sessionId, out _))
             {
                 if (force)
                 {
                     _logger.LogInformation("AcquireForHost (force): cancelling in-flight turn on {Sid}", sessionId);
-                    try { await _acp.CancelAsync(sessionId, ct); }
+                    try { await _runtime.CancelAsync(sessionId, ct); }
                     catch (Exception ex) { _logger.LogWarning(ex, "session/cancel failed during force-acquire for {Sid}", sessionId); }
                     // Give the turn ~2s to finalize (it should emit TurnComplete).
                     using var grace = CancellationTokenSource.CreateLinkedTokenSource(ct);
                     grace.CancelAfter(TimeSpan.FromSeconds(2));
-                    try { await _acp.WaitForTurnBoundaryAsync(sessionId, grace.Token); }
+                    try { await _runtime.WaitForTurnBoundaryAsync(sessionId, grace.Token); }
                     catch (OperationCanceledException) { /* stop waiting; we'll detach anyway */ }
-                    forceDetach = _acp.IsTurnInFlight(sessionId, out _);
+                    forceDetach = _runtime.IsTurnInFlight(sessionId, out _);
                 }
                 else
                 {
                     _logger.LogInformation("AcquireForHost (polite): waiting for in-flight turn on {Sid}", sessionId);
-                    await _acp.WaitForTurnBoundaryAsync(sessionId, ct);
+                    await _runtime.WaitForTurnBoundaryAsync(sessionId, ct);
                 }
             }
             var detachedFlavor = Describe(await DetachCoreAsync(sessionId, ct, forceDetach));
@@ -630,7 +641,7 @@ public sealed class SessionRegistry
             else if (_hostOwnership.TryGetRecorded(sessionId, out var existingHost))
                 flavor = existingHost.Flavor;
             else
-                flavor = Describe(_acp.EffectiveFlavor(sessionId));
+                flavor = Describe(_runtime.EffectiveProfile(sessionId));
             _owned.TryRemove(sessionId, out _);
         }
 
@@ -719,7 +730,7 @@ public sealed class SessionRegistry
         // leaves the terminal untouched and simply declines to adopt below.
         if (force)
         {
-            var evicted = _acp.EvictForeignLiveHolders(sessionId);
+            var evicted = _runtime.EvictForeignLiveHolders(sessionId);
             if (evicted.Count > 0)
                 _logger.LogWarning("ReleaseFromHost force-evicted {Count} live foreign holder(s) on {Sid}: {Pids}",
                     evicted.Count, sessionId, string.Join(", ", evicted));
@@ -732,7 +743,7 @@ public sealed class SessionRegistry
         // happens if the eviction couldn't complete (e.g. no permission to kill).
         // Either way, retain the host record (and its saved flavor) so a later
         // release can retry without losing the configuration to restore.
-        if (_acp.HasForeignLiveHolder(sessionId))
+        if (_runtime.HasForeignLiveHolder(sessionId))
         {
             _logger.LogInformation(
                 "ReleaseFromHost: a live foreign holder remains on {Sid}; not adopting (force={Force})",
@@ -742,7 +753,7 @@ public sealed class SessionRegistry
 
         // Re-load the session into our ACP child. The host's interactive copilot
         // appended to events.jsonl while it was driving, and our own child still
-        // has the pre-detach snapshot in memory (copilot implements neither
+        // still has the snapshot held before detachment in memory (copilot implements neither
         // session/close nor a disk re-read for an already-loaded session), so the
         // holding child is recycled first -- otherwise session/load either answers
         // "already loaded" or serves the frozen copy. The session comes back on
@@ -751,20 +762,22 @@ public sealed class SessionRegistry
         // configuration fails, but registry ownership is not restored until the
         // complete tuple verifies.
         var cwd = info.Cwd ?? Environment.CurrentDirectory;
-        var flavor = ResolveFlavor(recordedFlavor) ?? _acp.EffectiveFlavor(sessionId) ?? AcpFlavor.Default;
+        var profile = ResolveProfile(recordedFlavor)
+            ?? _runtime.EffectiveProfile(sessionId)
+            ?? SessionRuntimeProfile.Default;
         try
         {
-            if (_acp.IsAttached(sessionId))
+            if (_runtime.IsAttached(sessionId))
             {
-                await _acp.ApplyOwnedConfigurationAsync(
+                await _runtime.ApplyOwnedConfigurationAsync(
                     sessionId,
-                    flavor,
+                    profile,
                     processScopeSpecified: true,
                     ct);
             }
             else
             {
-                await _acp.ReloadFromDiskAsync(sessionId, cwd, flavor, ct);
+                await _runtime.ReloadFromDiskAsync(sessionId, cwd, profile, ct);
             }
 
             _owned.TryAdd(sessionId, 0);
@@ -778,35 +791,38 @@ public sealed class SessionRegistry
             // happened, or the manager retained a quarantined route that the next
             // release attempt can configure in place. In neither case do we
             // advertise the session as agent-owned.
-            _logger.LogWarning(ex, "Re-attaching {Sid} during ReleaseFromHost failed (flavor={Flavor})", sessionId, flavor.Key);
+            _logger.LogWarning(
+                ex,
+                "Re-attaching {Sid} during ReleaseFromHost failed (runtime profile={Profile})",
+                sessionId,
+                profile.UseAgency ? "agency" : "default");
         }
 
         return GetState(sessionId)!;
     }
 
     /// <summary>
-    /// Snapshot an <see cref="AcpFlavor"/> as the plain record the ownership map
+    /// Snapshot a runtime profile as the plain record the ownership map
     /// persists, so a handback can rebuild it after an agent restart.
     /// </summary>
-    private static HostSessionFlavor? Describe(AcpFlavor? flavor) =>
-        flavor is null
+    private static HostSessionFlavor? Describe(SessionRuntimeProfile? profile) =>
+        profile is null
             ? null
             : new HostSessionFlavor(
-                UseAgency: string.Equals(flavor.Key, AcpFlavor.Agency.Key, StringComparison.Ordinal)
-                    || flavor.Key.StartsWith(AcpFlavor.Agency.Key + ":", StringComparison.Ordinal),
-                Model: flavor.Model,
-                ReasoningEffort: flavor.ReasoningEffort,
-                DisabledMcpServers: flavor.DisabledMcpServers?.ToArray(),
-                Agent: flavor.Agent,
-                AvailableTools: flavor.AvailableTools?.ToArray(),
-                DisableBuiltinMcps: flavor.DisableBuiltinMcps,
-                NoCustomInstructions: flavor.NoCustomInstructions,
-                CopilotHome: flavor.CopilotHome);
+                UseAgency: profile.UseAgency,
+                Model: profile.Model,
+                ReasoningEffort: profile.ReasoningEffort,
+                DisabledMcpServers: profile.DisabledMcpServers?.ToArray(),
+                Agent: profile.Agent,
+                AvailableTools: profile.AvailableTools?.ToArray(),
+                DisableBuiltinMcps: profile.DisableBuiltinMcps,
+                NoCustomInstructions: profile.NoCustomInstructions,
+                CopilotHome: profile.CopilotHome);
 
-    private static AcpFlavor? ResolveFlavor(HostSessionFlavor? recorded) =>
+    private static SessionRuntimeProfile? ResolveProfile(HostSessionFlavor? recorded) =>
         recorded is null
             ? null
-            : AcpFlavor.Resolve(
+            : SessionRuntimeProfile.Resolve(
                 recorded.UseAgency,
                 recorded.Model,
                 recorded.ReasoningEffort,

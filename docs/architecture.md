@@ -111,21 +111,30 @@ TCP 5099 + UDP 47823.
 
 Responsibilities:
 
-- Owns the **ACP child process(es)** -- usually `copilot --acp` (Linux
+- Owns the active **session runtime** behind
+  `IAgentSessionRuntime`. The production implementation is currently the ACP
+  manager, which owns `copilot --acp` child process(es) (Linux
   binary or `copilot.exe`), optionally `agency.exe` for the agency flavor
   on Windows hosts.
-- Maintains **sessions**: maps a Magpilot session id to an ACP session id
+- Maintains **sessions**: maps a Magpilot session id to a runtime session id
   and a CWD. State persists in `~/.copilot/session-state/` (events.jsonl
   per session). Adopts dormant sessions on demand when the SPA opens one.
 - Serves the **agent HTTP API** (see below). Bearer-auth protected
   with `MAGPILOT_AGENT_TOKEN` (shared secret with the hub).
 - Replies to UDP discovery probes with name + URL + flavors.
 
-The agent process does **not** speak to the LLM directly. It speaks ACP
-(Agent Client Protocol -- a JSON-RPC-over-stdio protocol) to a child
+The HTTP endpoints, session registry, cooperative handoff, and turn watchdog
+depend only on `IAgentSessionRuntime`. `SessionRuntimeProfile` carries the
+complete generic configuration needed to create or restore a session.
+`AcpSessionManager` implements the interface through a thin explicit adapter,
+so this seam does not change runtime behavior. It exists so the public Copilot
+SDK can be introduced and canaried without changing the hub or agent API.
+
+The current runtime process does **not** speak to the LLM directly. It speaks
+ACP (Agent Client Protocol -- a JSON-RPC-over-stdio protocol) to a child
 `copilot` process, which in turn calls the GitHub Copilot API.
 
-### Copilot CLI (the ACP child)
+### Current runtime: Copilot CLI ACP child
 
 Each agent spawns one (or more) long-running `copilot --acp` subprocesses.
 ACP is a multi-session protocol -- one process can host many independent

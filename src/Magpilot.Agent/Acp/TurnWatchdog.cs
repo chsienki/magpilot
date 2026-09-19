@@ -1,3 +1,4 @@
+using Magpilot.Agent.Runtime;
 using Magpilot.Agent.Sessions;
 
 namespace Magpilot.Agent.Acp;
@@ -16,7 +17,7 @@ namespace Magpilot.Agent.Acp;
 /// normal); tune it with MAGPILOT_TURN_STALL_SECONDS.
 /// </summary>
 public sealed class TurnWatchdog(
-    AcpSessionManager acp,
+    IAgentSessionRuntime runtime,
     SessionRegistry registry,
     ILogger<TurnWatchdog> log) : BackgroundService
 {
@@ -47,7 +48,10 @@ public sealed class TurnWatchdog(
                     // watchdog itself; the next tick retries.
                     using var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
                     cts.CancelAfter(TimeSpan.FromSeconds(90));
-                    var recovered = await acp.SweepStalledTurnsAsync(threshold, registry.CwdFor, cts.Token);
+                    var recovered = await runtime.SweepStalledTurnsAsync(
+                        threshold,
+                        registry.CwdFor,
+                        cts.Token);
                     if (recovered > 0)
                         log.LogWarning("Turn watchdog recovered {Count} stalled session(s)", recovered);
                 }
