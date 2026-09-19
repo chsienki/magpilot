@@ -280,6 +280,14 @@ marked `ManagedApprovalRequired` always go to a user even when yolo is enabled.
 Pending requests fail closed when their session ends or the five-minute
 approval window expires.
 
+Enabling yolo also releases ordinary SDK approvals that are already pending.
+This is load-bearing for parallel tool calls: one permission can enter the
+pending path immediately before the toggle becomes visible while a later
+permission sees yolo and auto-approves. `YoloRegistry.Changed` wakes the
+existing request, and the broker re-checks yolo after registering each pending
+approval to close the change-vs-registration race. Managed approvals are never
+released by this mechanism.
+
 SDK runtime lock files require explicit ownership tracking because
 `CopilotClient` does not expose the spawned runtime PID. After create/resume,
 `SdkSessionRuntime` waits for the session's live lock holder(s) and records

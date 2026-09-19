@@ -41,6 +41,7 @@ internal sealed class SdkPermissionBroker
         _yolo = yolo;
         _log = log;
         _timeout = timeout;
+        _yolo.Changed += OnYoloChanged;
     }
 
     public Func<PermissionRequest, PermissionInvocation, Task<PermissionDecision>> CreateHandler(
@@ -102,18 +103,32 @@ internal sealed class SdkPermissionBroker
         var completion =
             new TaskCompletionSource<PermissionDecision>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
-        var pending = new PendingApproval(sessionId, completion);
+        var pending = new PendingApproval(
+            sessionId,
+            CanAutoApprove: request.ManagedApprovalRequired is not true,
+            completion);
         if (!_pending.TryAdd(approvalId, pending))
             throw new InvalidOperationException("Could not register SDK approval request.");
 
+        // The toggle can change between the first policy check and publishing
+        // this pending request. Re-check after registration so that race cannot
+        // strand an approval until timeout.
+        if (pending.CanAutoApprove && _yolo.IsEnabled(sessionId))
+        {
+            ApprovePending(approvalId, pending);
+        }
+
         var (title, detail) = Describe(request);
-        publish(
-            sessionId,
-            new ApprovalRequired(
-                approvalId,
-                title,
-                detail,
-                Options));
+        if (!completion.Task.IsCompleted)
+        {
+            publish(
+                sessionId,
+                new ApprovalRequired(
+                    approvalId,
+                    title,
+                    detail,
+                    Options));
+        }
 
         try
         {
@@ -158,8 +173,46 @@ internal sealed class SdkPermissionBroker
             _ => ($"Permission required: {request.Kind}", null),
         };
 
+    private void OnYoloChanged(string sessionId, bool enabled)
+    {
+        if (!enabled)
+            return;
+
+        foreach (var (approvalId, pending) in _pending)
+        {
+            if (pending.CanAutoApprove &&
+                string.Equals(
+                    pending.SessionId,
+                    sessionId,
+                    StringComparison.Ordinal))
+            {
+                ApprovePending(approvalId, pending);
+            }
+        }
+    }
+
+    private void ApprovePending(
+        string approvalId,
+        PendingApproval pending)
+    {
+        if (!_pending.TryRemove(
+                new KeyValuePair<string, PendingApproval>(
+                    approvalId,
+                    pending)))
+        {
+            return;
+        }
+
+        _log.LogInformation(
+            "Auto-approving pending SDK permission {ApprovalId} after yolo was enabled for session {SessionId}",
+            approvalId,
+            pending.SessionId);
+        pending.Completion.TrySetResult(PermissionDecision.ApproveOnce());
+    }
+
     private sealed record PendingApproval(
         string SessionId,
+        bool CanAutoApprove,
         TaskCompletionSource<PermissionDecision> Completion);
 }
 

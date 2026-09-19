@@ -174,6 +174,12 @@ approval is still controlled by the existing per-session yolo registry and
 require a user. The SDK's .NET permission decision types are experimental, so
 the diagnostic opt-in is scoped to this broker rather than project-wide.
 
+The yolo toggle is dynamic. Enabling it releases ordinary permission requests
+that were already waiting, including a request that raced the toggle while
+parallel tools were starting. The broker re-checks policy after adding a
+pending request and subscribes to `YoloRegistry.Changed`; managed-required
+requests remain pending for a human.
+
 `SdkSessionRuntime` preserves the single-writer invariant with the same
 registry and handoff protocol. It serializes turns per session, registers event
 handlers before sends, uses typed message provenance while retaining the

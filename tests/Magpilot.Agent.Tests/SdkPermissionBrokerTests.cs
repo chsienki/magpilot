@@ -102,6 +102,57 @@ public sealed class SdkPermissionBrokerTests
         Assert.IsType<PermissionDecisionUserNotAvailable>(await pending);
     }
 
+    [Fact]
+    public async Task Enabling_yolo_releases_an_existing_ordinary_approval()
+    {
+        var yolo = new YoloRegistry(NullLogger<YoloRegistry>.Instance);
+        var broker = CreateBroker(yolo);
+        ApprovalRequired? approval = null;
+        var handler = broker.CreateHandler(
+            "session-1",
+            (_, evt) => approval = Assert.IsType<ApprovalRequired>(evt),
+            CancellationToken.None);
+        var pending = handler(
+            new PermissionRequestRead
+            {
+                Intention = "Read documentation",
+                Path = "README.md",
+            },
+            new PermissionInvocation { SessionId = "session-1" });
+
+        Assert.NotNull(approval);
+        yolo.Set("session-1", enabled: true);
+
+        Assert.IsType<PermissionDecisionApproveOnce>(await pending);
+        Assert.False(broker.Resolve(approval.ApprovalId, "deny"));
+    }
+
+    [Fact]
+    public async Task Enabling_yolo_does_not_release_a_managed_approval()
+    {
+        var yolo = new YoloRegistry(NullLogger<YoloRegistry>.Instance);
+        var broker = CreateBroker(yolo);
+        ApprovalRequired? approval = null;
+        var handler = broker.CreateHandler(
+            "session-1",
+            (_, evt) => approval = Assert.IsType<ApprovalRequired>(evt),
+            CancellationToken.None);
+        var pending = handler(
+            new PermissionRequestRead
+            {
+                Intention = "Read managed file",
+                ManagedApprovalRequired = true,
+                Path = "managed.txt",
+            },
+            new PermissionInvocation { SessionId = "session-1" });
+
+        Assert.NotNull(approval);
+        yolo.Set("session-1", enabled: true);
+        Assert.False(pending.IsCompleted);
+        Assert.True(broker.Resolve(approval.ApprovalId, "deny"));
+        Assert.IsType<PermissionDecisionReject>(await pending);
+    }
+
     private static SdkPermissionBroker CreateBroker(YoloRegistry yolo) =>
         new(
             yolo,
