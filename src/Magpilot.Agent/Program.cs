@@ -44,6 +44,7 @@ builder.Services.AddSingleton<IAgentSessionRuntime>(
     sp => sp.GetRequiredService<AcpSessionManager>());
 builder.Services.AddSingleton<SdkClientPool>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<SdkClientPool>());
+builder.Services.AddSingleton<SdkPermissionBroker>();
 builder.Services.AddSingleton<SessionScanner>();
 builder.Services.AddSingleton<HostOwnership>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<HostOwnership>());

@@ -28,6 +28,7 @@ public sealed class SdkSessionProfileMapperTests
         Assert.Equal("example-model", config.Model);
         Assert.Equal("high", config.ReasoningEffort);
         Assert.Equal("example-agent", config.Agent);
+        Assert.True(config.Streaming);
         Assert.Equal(["example(tool)", "shell"], config.AvailableTools);
         Assert.Equal(["example-mcp"], config.DisabledMcpServers);
         Assert.True(config.SkipCustomInstructions);
@@ -43,6 +44,7 @@ public sealed class SdkSessionProfileMapperTests
         Assert.Null(config.AvailableTools);
         Assert.Null(config.DisabledMcpServers);
         Assert.Null(config.SkipCustomInstructions);
+        Assert.True(config.Streaming);
     }
 
     [Fact]

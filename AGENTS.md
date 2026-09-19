@@ -91,6 +91,16 @@ src/
                                       Agency and disable-all-built-in-MCP
                                       profiles fail explicitly until parity is
                                       proven.
+    Runtime/Sdk/SdkTurnEventMapper.cs <- stateful one-turn translator from
+                                      typed SDK events to the existing
+                                      StreamEvent SSE contract. session.idle
+                                      is the clean boundary; errors publish one
+                                      error + terminal event.
+    Runtime/Sdk/SdkPermissionBroker.cs <- bridges the SDK permission callback
+                                      into the existing approval endpoint and
+                                      yolo policy. This file alone opts into
+                                      the SDK's GHCP001 experimental permission
+                                      decision types.
     Acp/AcpSessionManager.cs       <- the heart; ACP <-> SSE translation.
                                       Has _inFlight tracking +
                                       WaitForTurnBoundaryAsync used by
@@ -239,6 +249,19 @@ SDK clients use `CopilotClientMode.CopilotCli` and the supported
 out-of-process stdio transport. Each distinct `CopilotHome` becomes a distinct
 client `BaseDirectory`; model, reasoning, tools, MCP exclusions, agent, and
 working directory remain session-scoped.
+
+SDK sessions will run with streaming enabled. `SdkTurnEventMapper` maps only
+the streaming message/reasoning deltas and ignores the SDK's final duplicate
+message events. `session.idle` is the authoritative successful turn boundary.
+A session error emits `ErrorEvent` plus exactly one
+`TurnComplete("error")`; the later idle notification is suppressed.
+
+`SdkPermissionBroker` reuses `ApprovalRequired` and the existing
+`/approvals/{id}` resolution surface. Yolo and
+`MAGPILOT_AUTO_APPROVE=true` approve ordinary requests one at a time. Requests
+marked `ManagedApprovalRequired` always go to a user even when yolo is enabled.
+Pending requests fail closed when their session ends or the five-minute
+approval window expires.
 
 The SDK package emits `runtime.node` both under its wrapper name and renamed as
 an FFI library for experimental in-process hosting. Magpilot does not use

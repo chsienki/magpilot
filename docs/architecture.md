@@ -144,6 +144,19 @@ silently weakening them:
 - `DisableBuiltinMcps` remains unsupported until disabling the SDK runtime's
   complete built-in MCP set is proven equivalent to the CLI switch.
 
+SDK sessions use streaming mode. `SdkTurnEventMapper` translates typed
+message/reasoning deltas and tool lifecycle events to the existing
+`StreamEvent` wire records. It treats `session.idle` as the successful turn
+boundary and emits one error plus one terminal boundary for a session error,
+so the later idle event cannot double-complete callers.
+
+`SdkPermissionBroker` connects the SDK permission callback to the current
+`ApprovalRequired` SSE event and `/approvals/{approvalId}` endpoint. Automatic
+approval is still controlled by the existing per-session yolo registry and
+`MAGPILOT_AUTO_APPROVE`; managed-policy requests bypass auto-approval and
+require a user. The SDK's .NET permission decision types are experimental, so
+the diagnostic opt-in is scoped to this broker rather than project-wide.
+
 The current runtime process does **not** speak to the LLM directly. It speaks
 ACP (Agent Client Protocol -- a JSON-RPC-over-stdio protocol) to a child
 `copilot` process, which in turn calls the GitHub Copilot API.
