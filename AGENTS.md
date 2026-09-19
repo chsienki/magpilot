@@ -82,6 +82,15 @@ src/
     Runtime/SessionRuntimeProfile.cs <- complete generic session/process
                                       configuration. ACP maps it to AcpFlavor;
                                       the SDK backend will consume it directly.
+    Runtime/Sdk/SdkClientPool.cs    <- lazy Copilot SDK clients keyed by
+                                      client-wide isolation (currently
+                                      CopilotHome/BaseDirectory). Registered
+                                      but unused until the SDK backend is
+                                      selected.
+    Runtime/Sdk/SdkSessionProfileMapper.cs <- typed SDK create/resume config.
+                                      Agency and disable-all-built-in-MCP
+                                      profiles fail explicitly until parity is
+                                      proven.
     Acp/AcpSessionManager.cs       <- the heart; ACP <-> SSE translation.
                                       Has _inFlight tracking +
                                       WaitForTurnBoundaryAsync used by
@@ -218,6 +227,25 @@ scripts/test-shim-phase1.sh <- bash acceptance test for the four shim endpoints.
 
 `Magpilot.slnx` (XML solution format) is the solution. There is no
 `.sln`. `dotnet build` / `dotnet test` understand `.slnx`.
+
+### Copilot SDK migration
+
+The Agent references `GitHub.Copilot.SDK` 1.0.14, which pins Copilot runtime
+1.0.85. `SdkClientPool` is lazy: ordinary Agent startup does not launch an SDK
+runtime, so ACP remains the only session backend until runtime selection is
+wired deliberately.
+
+SDK clients use `CopilotClientMode.CopilotCli` and the supported
+out-of-process stdio transport. Each distinct `CopilotHome` becomes a distinct
+client `BaseDirectory`; model, reasoning, tools, MCP exclusions, agent, and
+working directory remain session-scoped.
+
+The SDK package emits `runtime.node` both under its wrapper name and renamed as
+an FFI library for experimental in-process hosting. Magpilot does not use
+in-process hosting, so `Magpilot.Agent.csproj` removes the byte-identical FFI
+alias from build and publish outputs. Set
+`CopilotIncludeInProcessRuntime=true` only if a future implementation actually
+uses `RuntimeConnection.ForInProcess()`.
 
 ## Build, run, deploy
 

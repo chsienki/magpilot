@@ -3,6 +3,7 @@ using Magpilot.Agent.Api;
 using Magpilot.Agent.Discovery;
 using Magpilot.Agent.Logging;
 using Magpilot.Agent.Runtime;
+using Magpilot.Agent.Runtime.Sdk;
 using Magpilot.Agent.Sessions;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.Extensions.Options;
@@ -41,6 +42,8 @@ builder.Services.AddSingleton<AcpFlavorPool>();
 builder.Services.AddSingleton<AcpSessionManager>();
 builder.Services.AddSingleton<IAgentSessionRuntime>(
     sp => sp.GetRequiredService<AcpSessionManager>());
+builder.Services.AddSingleton<SdkClientPool>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<SdkClientPool>());
 builder.Services.AddSingleton<SessionScanner>();
 builder.Services.AddSingleton<HostOwnership>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<HostOwnership>());

@@ -130,6 +130,20 @@ complete generic configuration needed to create or restore a session.
 so this seam does not change runtime behavior. It exists so the public Copilot
 SDK can be introduced and canaried without changing the hub or agent API.
 
+The Agent also owns a lazy `SdkClientPool`. It uses the public .NET Copilot SDK
+with `CopilotClientMode.CopilotCli` and the supported out-of-process stdio
+transport. Clients are keyed by `CopilotHome`/SDK `BaseDirectory`; session
+configuration is mapped separately. Merely starting Magpilot.Agent does not
+start an SDK runtime, and no session routes through this pool yet.
+
+The initial typed profile mapper deliberately rejects two profiles instead of
+silently weakening them:
+
+- Agency remains ACP-only until `agency copilot` exposes a compatible SDK
+  runtime surface.
+- `DisableBuiltinMcps` remains unsupported until disabling the SDK runtime's
+  complete built-in MCP set is proven equivalent to the CLI switch.
+
 The current runtime process does **not** speak to the LLM directly. It speaks
 ACP (Agent Client Protocol -- a JSON-RPC-over-stdio protocol) to a child
 `copilot` process, which in turn calls the GitHub Copilot API.

@@ -8,10 +8,22 @@
     <InternalsVisibleTo Include="Magpilot.Agent.Tests" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="GitHub.Copilot.SDK" Version="1.0.14" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!--
+      Magpilot uses the supported out-of-process SDK transport. The SDK package
+      copies runtime.node twice by default: once for the process wrapper and once
+      renamed as copilot_runtime.dll for experimental in-process hosting. The two
+      files are byte-identical (~87 MB). Keep the wrapper copy and remove the
+      unused FFI alias from build/publish output.
+    -->
+    <CopilotIncludeInProcessRuntime>false</CopilotIncludeInProcessRuntime>
     <!--
       WinExe instead of Exe so the published Magpilot.Agent.exe is a
       Windows-subsystem app (no console window). When the installed
@@ -23,5 +35,17 @@
     -->
     <OutputType>WinExe</OutputType>
   </PropertyGroup>
+
+  <Target Name="RemoveUnusedCopilotInProcessRuntimeFromBuild"
+          AfterTargets="_CopyCopilotCliToOutput"
+          Condition="'$(CopilotIncludeInProcessRuntime)' != 'true'">
+    <Delete Files="$(OutDir)runtimes\$(_CopilotRid)\native\$(_CopilotRuntimeLib)" />
+  </Target>
+
+  <Target Name="RemoveUnusedCopilotInProcessRuntimeFromPublish"
+          AfterTargets="Publish"
+          Condition="'$(CopilotIncludeInProcessRuntime)' != 'true'">
+    <Delete Files="$(PublishDir)runtimes\$(_CopilotRid)\native\$(_CopilotRuntimeLib)" />
+  </Target>
 
 </Project>
