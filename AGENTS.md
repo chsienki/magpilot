@@ -294,6 +294,21 @@ alias from build and publish outputs. Set
 `CopilotIncludeInProcessRuntime=true` only if a future implementation actually
 uses `RuntimeConnection.ForInProcess()`.
 
+Packaging measurements from the isolated SDK canary:
+
+- Windows self-contained Agent publish: 228.95 MiB after removing the unused
+  FFI alias (311.94 MiB before).
+- Linux framework-dependent Agent publish: 127.41 MiB.
+- Generic Linux Docker image: 2.11 GB versus 1.89 GB for the deployed
+  pre-SDK image, approximately 220 MB additional uncompressed size.
+
+The Linux image was built and run as a separate bridge-network container with
+no published ports and a separate home. Health and an authenticated
+`LINUX-SDK-OK` quick prompt passed using the bundled runtime; process inspection
+showed Agent + `copilot-runtime` and no ACP child. The container, image, source
+checkout, and home were removed after the test. Keep the npm-installed CLI in
+the image while ACP rollback remains supported.
+
 ## Build, run, deploy
 
 ```pwsh
