@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text.Json;
+using Magpilot.Agent.Runtime;
 
 namespace Magpilot.Agent.Sessions;
 
@@ -266,7 +267,8 @@ public sealed record HostSessionFlavor(
     string[]? AvailableTools = null,
     bool DisableBuiltinMcps = false,
     bool NoCustomInstructions = false,
-    string? CopilotHome = null);
+    string? CopilotHome = null,
+    SessionRuntimeBackend? Backend = null);
 
 public readonly record struct HostOwnerEntry(
     int HostPid,

@@ -1,3 +1,4 @@
+using Magpilot.Agent.Runtime;
 using Magpilot.Agent.Sessions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -57,7 +58,8 @@ public sealed class HostOwnershipTests : IDisposable
             AvailableTools: ["magnus-phone", "server(tool_name)"],
             DisableBuiltinMcps: true,
             NoCustomInstructions: true,
-            CopilotHome: Path.Combine(Path.GetTempPath(), "copilot-phone"));
+            CopilotHome: Path.Combine(Path.GetTempPath(), "copilot-phone"),
+            Backend: SessionRuntimeBackend.Sdk);
         New().Set(sid, Environment.ProcessId, flavor);
 
         var reloaded = New();
@@ -75,6 +77,7 @@ public sealed class HostOwnershipTests : IDisposable
             Assert.Equal(flavor.DisableBuiltinMcps, entry.Flavor.DisableBuiltinMcps);
             Assert.Equal(flavor.NoCustomInstructions, entry.Flavor.NoCustomInstructions);
             Assert.Equal(flavor.CopilotHome, entry.Flavor.CopilotHome);
+            Assert.Equal(flavor.Backend, entry.Flavor.Backend);
         }
         finally
         {

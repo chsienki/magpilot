@@ -48,6 +48,9 @@ internal sealed class SdkTurnEventMapper
         };
     }
 
+    public IReadOnlyList<StreamEvent> Fail(string message) =>
+        _active ? CompleteWithError(message) : [];
+
     private IReadOnlyList<StreamEvent> CompleteWithError(string? message)
     {
         if (_terminalPublished)

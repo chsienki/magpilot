@@ -134,7 +134,12 @@ The Agent also owns a lazy `SdkClientPool`. It uses the public .NET Copilot SDK
 with `CopilotClientMode.CopilotCli` and the supported out-of-process stdio
 transport. Clients are keyed by `CopilotHome`/SDK `BaseDirectory`; session
 configuration is mapped separately. Merely starting Magpilot.Agent does not
-start an SDK runtime, and no session routes through this pool yet.
+start an SDK runtime; the first SDK-backed session starts it.
+
+Custom Copilot homes use the same validated layout for ACP and SDK: the
+directory must exist and its `session-state` entry must link to the canonical
+session store scanned by Magpilot. This preserves one durable session catalog
+even when tools, agents, and configuration are isolated.
 
 The initial typed profile mapper deliberately rejects two profiles instead of
 silently weakening them:
@@ -143,6 +148,18 @@ silently weakening them:
   runtime surface.
 - `DisableBuiltinMcps` remains unsupported until disabling the SDK runtime's
   complete built-in MCP set is proven equivalent to the CLI switch.
+
+`MAGPILOT_RUNTIME_BACKEND=acp|sdk` selects the default backend for ordinary
+sessions (`acp` when unset). `SessionRuntimeRouter` records the chosen backend
+per attached session, so prompts, cancellation, approvals, detach, and handoff
+continue on the backend that created/resumed it. Agency always selects ACP.
+The backend is also persisted in host-handoff metadata; older records without
+the field mean ACP.
+
+SDK-default startup does not eagerly start either runtime. `SdkClientPool`
+starts on the first SDK session. The ACP pool starts lazily for rollback or
+Agency. This keeps the feature switch reversible without paying for two idle
+Copilot processes.
 
 SDK sessions use streaming mode. `SdkTurnEventMapper` translates typed
 message/reasoning deltas and tool lifecycle events to the existing
@@ -156,6 +173,18 @@ approval is still controlled by the existing per-session yolo registry and
 `MAGPILOT_AUTO_APPROVE`; managed-policy requests bypass auto-approval and
 require a user. The SDK's .NET permission decision types are experimental, so
 the diagnostic opt-in is scoped to this broker rather than project-wide.
+
+`SdkSessionRuntime` preserves the single-writer invariant with the same
+registry and handoff protocol. It serializes turns per session, registers event
+handlers before sends, uses typed message provenance while retaining the
+existing `[via source]` prompt tag, disconnects without deleting disk state,
+and cold-resumes from the shared Copilot session store.
+
+The SDK does not expose its child process PID. On create/resume the runtime
+records the live `inuse.<pid>.lock` holders it created. Foreign-holder checks
+exclude only those recorded PIDs; a later holder remains foreign. This is
+required for terminal handback because otherwise the SDK's own lock looks like
+a terminal writer and prevents ownership from clearing.
 
 The current runtime process does **not** speak to the LLM directly. It speaks
 ACP (Agent Client Protocol -- a JSON-RPC-over-stdio protocol) to a child

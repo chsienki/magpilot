@@ -1,5 +1,6 @@
 using Magpilot.Agent.Runtime;
 using Magpilot.Agent.Runtime.Sdk;
+using Magpilot.Agent.Sessions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -28,6 +29,75 @@ public sealed class SdkClientPoolIntegrationTests
         }
         finally
         {
+            await pool.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task Sdk_session_recognizes_its_own_lock_and_detaches_cleanly()
+    {
+        var pool = new SdkClientPool(
+            NullLoggerFactory.Instance,
+            NullLogger<SdkClientPool>.Instance);
+        var broker = new SdkPermissionBroker(
+            new YoloRegistry(NullLogger<YoloRegistry>.Instance),
+            NullLogger<SdkPermissionBroker>.Instance);
+        var runtime = new SdkSessionRuntime(
+            pool,
+            broker,
+            NullLogger<SdkSessionRuntime>.Instance);
+        var profile = SessionRuntimeProfile.Resolve(
+            useAgency: false,
+            model: null,
+            reasoningEffort: null,
+            backend: SessionRuntimeBackend.Sdk);
+        string? sessionId = null;
+
+        try
+        {
+            sessionId = await runtime.NewSessionAsync(
+                Environment.CurrentDirectory,
+                profile,
+                CancellationToken.None);
+
+            Assert.True(runtime.IsAttached(sessionId));
+            Assert.False(runtime.HasForeignLiveHolder(sessionId));
+
+            var detached = await runtime.CloseAsync(
+                sessionId,
+                sessionsRoot: null,
+                CancellationToken.None);
+
+            Assert.NotNull(detached);
+            Assert.False(runtime.IsAttached(sessionId));
+            Assert.False(runtime.HasForeignLiveHolder(sessionId));
+
+            var host = await pool.AcquireAsync(
+                profile,
+                CancellationToken.None);
+            await host.Client.DeleteSessionAsync(
+                sessionId,
+                CancellationToken.None);
+            sessionId = null;
+        }
+        finally
+        {
+            if (sessionId is not null)
+            {
+                if (runtime.IsAttached(sessionId))
+                {
+                    await runtime.CloseAsync(
+                        sessionId,
+                        sessionsRoot: null,
+                        CancellationToken.None);
+                }
+                var host = await pool.AcquireAsync(
+                    profile,
+                    CancellationToken.None);
+                await host.Client.DeleteSessionAsync(
+                    sessionId,
+                    CancellationToken.None);
+            }
             await pool.StopAsync(CancellationToken.None);
         }
     }

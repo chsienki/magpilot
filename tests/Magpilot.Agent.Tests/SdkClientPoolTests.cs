@@ -86,6 +86,26 @@ public sealed class SdkClientPoolTests
         Assert.Equal(1, host.DisposeCount);
     }
 
+    [Fact]
+    public void Real_factory_rejects_a_missing_copilot_home()
+    {
+        var missing = Path.Combine(
+            Path.GetTempPath(),
+            $"missing-sdk-home-{Guid.NewGuid():N}");
+        var profile = SessionRuntimeProfile.Resolve(
+            useAgency: false,
+            model: null,
+            reasoningEffort: null,
+            copilotHome: missing);
+        var factory = new CopilotSdkClientHostFactory(
+            NullLoggerFactory.Instance);
+
+        var ex = Assert.Throws<ArgumentException>(() =>
+            factory.ValidateProfile(profile));
+
+        Assert.Contains("does not exist or is not ready", ex.Message);
+    }
+
     private static SdkClientPool CreatePool(FakeFactory factory) =>
         new(factory, NullLogger<SdkClientPool>.Instance);
 
@@ -93,6 +113,10 @@ public sealed class SdkClientPoolTests
         : ISdkClientHostFactory
     {
         public List<FakeHost> Hosts { get; } = [];
+
+        public void ValidateProfile(SessionRuntimeProfile profile)
+        {
+        }
 
         public ISdkClientHost Create(SdkClientKey key)
         {
