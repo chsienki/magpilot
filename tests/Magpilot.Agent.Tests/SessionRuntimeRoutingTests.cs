@@ -15,6 +15,29 @@ public sealed class SessionRuntimeRoutingTests : IDisposable
 
     public SessionRuntimeRoutingTests() => Directory.CreateDirectory(_root);
 
+    [Theory]
+    [InlineData(null, SessionRuntimeBackend.Sdk)]
+    [InlineData("", SessionRuntimeBackend.Sdk)]
+    [InlineData("sdk", SessionRuntimeBackend.Sdk)]
+    [InlineData("acp", SessionRuntimeBackend.Acp)]
+    public void Runtime_backend_value_selects_expected_default(
+        string? value,
+        SessionRuntimeBackend expected)
+    {
+        Assert.Equal(
+            expected,
+            SessionRuntimeBackendOptions.FromValue(value).DefaultBackend);
+    }
+
+    [Fact]
+    public void Invalid_runtime_backend_value_fails_explicitly()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            SessionRuntimeBackendOptions.FromValue("fallback"));
+
+        Assert.Contains("must be 'acp' or 'sdk'", ex.Message);
+    }
+
     [Fact]
     public async Task Registry_selects_the_configured_sdk_backend_for_ordinary_sessions()
     {

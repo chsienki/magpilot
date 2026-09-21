@@ -4,11 +4,11 @@ namespace Magpilot.Agent.Sessions;
 
 /// <summary>
 /// Per-session "yolo mode" flag. When a session is yolo-enabled, the
-/// agent auto-approves every <c>session/request_permission</c> callback
-/// for it (picking an allow-flavored option), the same way the
-/// env-wide <c>MAGPILOT_AUTO_APPROVE=true</c> short-circuits the SSE
-/// approval round-trip -- but scoped to one session that the user
-/// explicitly opted in via the SPA toggle.
+/// agent auto-approves permission callbacks through the active backend's
+/// native decision surface. The env-wide
+/// <c>MAGPILOT_AUTO_APPROVE=true</c> applies the same policy globally; this
+/// registry scopes it to one session that the user explicitly opted in via
+/// the SPA toggle.
 ///
 /// State is in-memory only: not written to <c>workspace.yaml</c>
 /// (the Copilot CLI owns that file), not survived across agent

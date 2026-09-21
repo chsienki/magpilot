@@ -150,7 +150,7 @@ silently weakening them:
   complete built-in MCP set is proven equivalent to the CLI switch.
 
 `MAGPILOT_RUNTIME_BACKEND=acp|sdk` selects the default backend for ordinary
-sessions (`acp` when unset). `SessionRuntimeRouter` records the chosen backend
+sessions (`sdk` when unset). `SessionRuntimeRouter` records the chosen backend
 per attached session, so prompts, cancellation, approvals, detach, and handoff
 continue on the backend that created/resumed it. Agency always selects ACP.
 The backend is also persisted in host-handoff metadata; older records without

@@ -31,7 +31,7 @@ RUN dotnet publish src/Magpilot.Agent/Magpilot.Agent.csproj \
 # --------- Runtime image ---------
 FROM mcr.microsoft.com/dotnet/aspnet:${DOTNET_RUNTIME} AS runtime
 
-# Install Node.js 22 (Copilot CLI prerequisite) + git/curl/openssh-client/ca-certs
+# Install Node.js 22 for the ACP rollback/Agency path + git/curl/openssh-client/ca-certs
 # + ffmpeg (audio transcoding for voice tools / Wyoming pipeline)
 # + poppler-utils (pdftotext -- lets any agent extract text from PDF
 #   attachments the user drops on disk; ~5 MB layer, no runtime cost)
