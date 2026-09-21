@@ -127,7 +127,7 @@ public static class AgentEndpoints
                     copilotHome: req.CopilotHome);
             }
             catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
-            catch (SessionConfigurationException ex)
+            catch (SessionRuntimeConfigurationException ex)
             {
                 return Results.Json(
                     new
@@ -181,7 +181,7 @@ public static class AgentEndpoints
                 {
                     await reg.AdoptAsync(req.SessionId, force: false, cts.Token);
                 }
-                catch (SessionConfigurationException ex)
+                catch (SessionRuntimeConfigurationException ex)
                 {
                     return Results.Json(
                         new
@@ -258,7 +258,7 @@ public static class AgentEndpoints
                 {
                     info = await reg.CreateAsync(req.Cwd, useAgency: false, cts.Token);
                 }
-                catch (SessionConfigurationException ex)
+                catch (SessionRuntimeConfigurationException ex)
                 {
                     return Results.Json(
                         new
@@ -369,7 +369,7 @@ public static class AgentEndpoints
                 return Results.Ok(info);
             }
             catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
-            catch (SessionConfigurationException ex)
+            catch (SessionRuntimeConfigurationException ex)
             {
                 return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status502BadGateway);
             }

@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using System.Runtime.ExceptionServices;
+using Magpilot.Agent.Runtime;
 
 namespace Magpilot.Agent.Acp;
 
@@ -422,26 +423,18 @@ internal static class AcpSessionConfig
     }
 }
 
-internal sealed class SessionConfigurationException : InvalidOperationException
+internal sealed class SessionConfigurationException
+    : SessionRuntimeConfigurationException
 {
-    internal SessionConfigurationException(string message) : base(message) { }
+    internal SessionConfigurationException(string message)
+        : base(message)
+    {
+    }
 
-    internal SessionConfigurationException(string message, Exception innerException)
-        : base(message, innerException) { }
-
-    /// <summary>
-    /// True when the failure happened after a <c>session/set_config_option</c>
-    /// request went out without a verified outcome, so the live session may no
-    /// longer match either the requested or the previous configuration. The
-    /// session manager quarantines on this rather than keep routing prompts to a
-    /// child whose configuration it cannot vouch for.
-    /// </summary>
-    internal bool LeavesSessionIndeterminate { get; init; }
-
-    /// <summary>
-    /// The session that was already created or loaded before configuration
-    /// failed. This lets an HTTP caller retain the id and retry configuration
-    /// in place instead of creating a second session.
-    /// </summary>
-    internal string? SessionId { get; set; }
+    internal SessionConfigurationException(
+        string message,
+        Exception innerException)
+        : base(message, innerException)
+    {
+    }
 }

@@ -28,6 +28,8 @@ public sealed class YoloRegistry
     private readonly ILogger<YoloRegistry> _logger;
     private readonly ConcurrentDictionary<string, byte> _enabled = new();
 
+    public event Action<string, bool>? Changed;
+
     public YoloRegistry(ILogger<YoloRegistry> logger)
     {
         _logger = logger;
@@ -69,10 +71,14 @@ public sealed class YoloRegistry
         {
             _enabled[sessionId] = 0;
             _logger.LogInformation("Yolo ENABLED for session {Sid}", sessionId);
+            Changed?.Invoke(sessionId, true);
             return true;
         }
         if (_enabled.TryRemove(sessionId, out _))
+        {
             _logger.LogInformation("Yolo DISABLED for session {Sid}", sessionId);
+            Changed?.Invoke(sessionId, false);
+        }
         return false;
     }
 
@@ -84,6 +90,9 @@ public sealed class YoloRegistry
     public void Clear(string sessionId)
     {
         if (_enabled.TryRemove(sessionId, out _))
+        {
             _logger.LogDebug("Yolo cleared (lifecycle) for session {Sid}", sessionId);
+            Changed?.Invoke(sessionId, false);
+        }
     }
 }

@@ -16,6 +16,7 @@ internal interface ISdkClientHost : IAsyncDisposable
 
 internal interface ISdkClientHostFactory
 {
+    void ValidateProfile(SessionRuntimeProfile profile);
     ISdkClientHost Create(SdkClientKey key);
 }
 
@@ -44,6 +45,9 @@ internal sealed class CopilotSdkClientHostFactory(ILoggerFactory loggerFactory)
             ?.InformationalVersion
         ?? typeof(CopilotClient).Assembly.GetName().Version?.ToString()
         ?? "unknown";
+
+    public void ValidateProfile(SessionRuntimeProfile profile) =>
+        CopilotHomeLayout.Validate(profile);
 
     public ISdkClientHost Create(SdkClientKey key)
     {
@@ -98,6 +102,7 @@ internal sealed class SdkClientPool : IHostedService, IAsyncDisposable
         SessionRuntimeProfile profile,
         CancellationToken ct)
     {
+        _factory.ValidateProfile(profile);
         var key = SdkClientKey.FromProfile(profile);
         var lazy = _clients.GetOrAdd(
             key,

@@ -17,6 +17,7 @@ public sealed class SessionRegistry
     private readonly HostOwnership _hostOwnership;
     private readonly YoloRegistry _yolo;
     private readonly ILogger<SessionRegistry> _logger;
+    private readonly SessionRuntimeBackendOptions _runtimeOptions;
     private readonly ConcurrentDictionary<string, byte> _owned = new();
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _lifecycleGates = new();
     // Current-process copy of the flavor captured at host acquisition. The
@@ -38,13 +39,16 @@ public sealed class SessionRegistry
         SessionScanner scanner,
         HostOwnership hostOwnership,
         YoloRegistry yolo,
-        ILogger<SessionRegistry> logger)
+        ILogger<SessionRegistry> logger,
+        SessionRuntimeBackendOptions? runtimeOptions = null)
     {
         _runtime = runtime;
         _scanner = scanner;
         _hostOwnership = hostOwnership;
         _yolo = yolo;
         _logger = logger;
+        _runtimeOptions = runtimeOptions
+            ?? SessionRuntimeBackendOptions.AcpDefault;
     }
 
     public IReadOnlySet<string> Owned => _owned.Keys
@@ -104,7 +108,8 @@ public sealed class SessionRegistry
             availableTools,
             disableBuiltinMcps,
             noCustomInstructions,
-            copilotHome);
+            copilotHome,
+            _runtimeOptions.ForProfile(useAgency));
         // The runtime invokes onAttached only after the complete requested
         // configuration has been applied and verified. A failed configure may
         // leave a quarantined route for retry, but it is not advertised as Owned.
@@ -234,7 +239,8 @@ public sealed class SessionRegistry
             availableTools,
             disableBuiltinMcps ?? false,
             noCustomInstructions ?? false,
-            copilotHome);
+            copilotHome,
+            _runtimeOptions.ForProfile(useAgency: false));
         var processScopeSpecified =
             disableMcpServers is not null ||
             agent is not null ||
@@ -294,7 +300,8 @@ public sealed class SessionRegistry
                     availableTools ?? retainedProfile.AvailableTools,
                     disableBuiltinMcps ?? retainedProfile.DisableBuiltinMcps,
                     noCustomInstructions ?? retainedProfile.NoCustomInstructions,
-                    copilotHome ?? retainedProfile.CopilotHome);
+                    copilotHome ?? retainedProfile.CopilotHome,
+                    retainedProfile.Backend);
             _logger.LogWarning(
                 "Session {Sid} was invalidated with its co-hosted ACP child; re-attaching it from disk",
                 sessionId);
@@ -327,7 +334,8 @@ public sealed class SessionRegistry
                     availableTools ?? retainedProfile.AvailableTools,
                     disableBuiltinMcps ?? retainedProfile.DisableBuiltinMcps,
                     noCustomInstructions ?? retainedProfile.NoCustomInstructions,
-                    copilotHome ?? retainedProfile.CopilotHome);
+                    copilotHome ?? retainedProfile.CopilotHome,
+                    retainedProfile.Backend);
             await _runtime.ReloadFromDiskAsync(
                 sessionId,
                 info.Cwd ?? Environment.CurrentDirectory,
@@ -817,7 +825,8 @@ public sealed class SessionRegistry
                 AvailableTools: profile.AvailableTools?.ToArray(),
                 DisableBuiltinMcps: profile.DisableBuiltinMcps,
                 NoCustomInstructions: profile.NoCustomInstructions,
-                CopilotHome: profile.CopilotHome);
+                CopilotHome: profile.CopilotHome,
+                Backend: profile.Backend);
 
     private static SessionRuntimeProfile? ResolveProfile(HostSessionFlavor? recorded) =>
         recorded is null
@@ -831,7 +840,8 @@ public sealed class SessionRegistry
                 recorded.AvailableTools,
                 recorded.DisableBuiltinMcps,
                 recorded.NoCustomInstructions,
-                recorded.CopilotHome);
+                recorded.CopilotHome,
+                recorded.Backend ?? SessionRuntimeBackend.Acp);
 
     private LastEventInfo? TryReadLastEvent(string sessionId)
     {
