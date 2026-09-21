@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
+using Magpilot.Agent.Runtime;
 using Magpilot.Shared.Models;
 
 namespace Magpilot.Agent.Acp;
@@ -25,7 +26,7 @@ public enum RecycleOutcome
 /// against; subsequent prompt/cancel/close calls for that session are routed
 /// to the matching <see cref="AcpClient"/> instance from the pool.
 /// </summary>
-public sealed class AcpSessionManager
+public sealed partial class AcpSessionManager : IAgentSessionRuntime
 {
     private readonly Func<AcpFlavor, CancellationToken, Task<AcpClient>> _acquireClient;
     private readonly Func<AcpFlavor, AcpClient, CancellationToken, Task<AcpClient?>> _recycleClient;

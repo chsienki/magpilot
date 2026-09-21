@@ -76,11 +76,20 @@ src/
                        LastEventInfo, AcquireForHostBody,
                        ReleaseRequestBody, ReleaseFromHostBody,
                        HostOwnedResponse, ReleaseRequested SSE case.
-  Magpilot.Agent/    <- per-host daemon: ACP client + minimal HTTP/SSE API
+  Magpilot.Agent/    <- per-host daemon: session runtime + minimal HTTP/SSE API
+    Runtime/IAgentSessionRuntime.cs <- protocol-neutral contract consumed by
+                                      endpoints, registry, handoff, watchdog.
+    Runtime/SessionRuntimeProfile.cs <- complete generic session/process
+                                      configuration. ACP maps it to AcpFlavor;
+                                      the SDK backend will consume it directly.
     Acp/AcpSessionManager.cs       <- the heart; ACP <-> SSE translation.
                                       Has _inFlight tracking +
                                       WaitForTurnBoundaryAsync used by
                                       AcquireForHostAsync.
+    Acp/AcpSessionManager.Runtime.cs <- explicit adapter from
+                                      IAgentSessionRuntime to the existing ACP
+                                      implementation. Gate 1 of the SDK
+                                      migration; no behavior change.
     Acp/AcpClient.cs               <- one process. Resolves exe full path
                                       (Process.Start launcher-shim fix),
                                       reads settings.json and forwards
@@ -100,7 +109,7 @@ src/
                                       /messages, /interrupt, /approvals
                                       return 409 when host-owned.
     Sessions/SessionScanner.cs     <- discovers Owned/Locked/Dormant sessions
-    Sessions/SessionRegistry.cs    <- composes scanner + ACP + HostOwnership.
+    Sessions/SessionRegistry.cs    <- composes scanner + runtime + HostOwnership.
                                       GetState / AcquireForHostAsync /
                                       ReleaseFromHostAsync.
     Sessions/HostOwnership.cs      <- AUTHORITATIVE in-memory map of

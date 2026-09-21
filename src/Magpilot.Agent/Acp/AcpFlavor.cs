@@ -1,3 +1,5 @@
+using Magpilot.Agent.Runtime;
+
 namespace Magpilot.Agent.Acp;
 
 /// <summary>
@@ -5,17 +7,6 @@ namespace Magpilot.Agent.Acp;
 /// pair gets its own long-lived process inside <see cref="AcpFlavorPool"/>
 /// when <see cref="MultiplexesSessions"/> is true; otherwise a fresh process
 /// is spawned per session.
-///
-/// "Default" wraps nothing -- just <c>copilot --acp --allow-all-tools</c>.
-/// One process multiplexes any number of ACP sessions.
-///
-/// "Agency" wraps via Microsoft's `agency` CLI, which adds Microsoft-internal
-/// MCP servers above plain Copilot CLI. Empirically the agency-wrapped child
-/// does NOT multiplex sessions cleanly (a second session/new on the same
-/// child hangs), so we spawn a dedicated child per agency session.
-///
-/// Sessions are tagged with the flavor key they were created against so the
-/// session manager can route prompt/stream/cancel calls to the right child.
 /// </summary>
 public sealed record AcpFlavor(
     string Key,
@@ -32,8 +23,7 @@ public sealed record AcpFlavor(
     string? CopilotHome = null)
 {
     /// <summary>
-    /// The default Copilot CLI flavor. One instance is started eagerly at
-    /// agent boot; all sessions created without an explicit flavor use this.
+    /// Plain Copilot CLI. One eager child multiplexes ordinary sessions.
     /// </summary>
     public static readonly AcpFlavor Default =
         new("default",
@@ -42,13 +32,8 @@ public sealed record AcpFlavor(
             MultiplexesSessions: true);
 
     /// <summary>
-    /// Agency-wrapped Copilot. <c>agency copilot</c> adds a curated set of
-    /// Microsoft-internal MCP servers and other tooling above the regular
-    /// Copilot CLI experience. Each agency session gets its own child
-    /// process because agency's session-multiplexing isn't reliable.
-    ///
-    /// Per-session MCP customization (which MCPs to add explicitly) is a
-    /// future enhancement.
+    /// Agency-wrapped Copilot. Agency does not multiplex sessions reliably, so
+    /// each Agency session receives its own child process.
     /// </summary>
     public static readonly AcpFlavor Agency =
         new("agency",
@@ -57,20 +42,22 @@ public sealed record AcpFlavor(
             MultiplexesSessions: false);
 
     /// <summary>
-    /// Build the default Copilot process flavor plus per-session model/reasoning
-    /// configuration. Model and reasoning are applied through ACP config options,
-    /// so they do not change the process key or command line.
+    /// Builds the default process flavor plus session-scoped model and
+    /// reasoning configuration.
     /// </summary>
-    public static AcpFlavor ForModel(string model, string? reasoningEffort, IReadOnlyList<string>? disableMcpServers = null)
-        => Resolve(useAgency: false, model, reasoningEffort, disableMcpServers);
+    public static AcpFlavor ForModel(
+        string model,
+        string? reasoningEffort,
+        IReadOnlyList<string>? disableMcpServers = null) =>
+        Resolve(
+            useAgency: false,
+            model,
+            reasoningEffort,
+            disableMcpServers);
 
     /// <summary>
-    /// Resolve the process flavor and per-session configuration for a create or
-    /// adopt request. Model and reasoning remain session-scoped ACP settings, so
-    /// ordinary Copilot sessions share the default multiplexed child even when
-    /// they use different models. Agent discovery/selection and every tool,
-    /// built-in MCP, instruction, or Copilot-home switch alter process behavior
-    /// and therefore produce a distinct child flavor.
+    /// Retained compatibility factory for ACP-focused tests and internals.
+    /// Runtime consumers resolve <see cref="SessionRuntimeProfile"/> instead.
     /// </summary>
     public static AcpFlavor Resolve(
         bool useAgency,
@@ -81,148 +68,88 @@ public sealed record AcpFlavor(
         IReadOnlyList<string>? availableTools = null,
         bool disableBuiltinMcps = false,
         bool noCustomInstructions = false,
-        string? copilotHome = null)
+        string? copilotHome = null) =>
+        FromRuntimeProfile(SessionRuntimeProfile.Resolve(
+            useAgency,
+            model,
+            reasoningEffort,
+            disableMcpServers,
+            agent,
+            availableTools,
+            disableBuiltinMcps,
+            noCustomInstructions,
+            copilotHome));
+
+    /// <summary>
+    /// Maps protocol-neutral session configuration to ACP process arguments
+    /// and a stable process-scope key.
+    /// </summary>
+    internal static AcpFlavor FromRuntimeProfile(SessionRuntimeProfile profile)
     {
-        var baseFlavor = useAgency ? Agency : Default;
-        var requestedModel = string.IsNullOrWhiteSpace(model) ? null : ValidateModel(model);
-        var effort = ValidateEffort(reasoningEffort);
-        var disabled = ValidateMcpServerNames(disableMcpServers);
-        var requestedAgent = string.IsNullOrWhiteSpace(agent) ? null : ValidateAgent(agent);
-        var tools = ValidateToolSelectors(availableTools);
-        var requestedCopilotHome = string.IsNullOrWhiteSpace(copilotHome)
-            ? null
-            : ValidateCopilotHome(copilotHome);
+        var baseFlavor = profile.UseAgency ? Agency : Default;
+        var disabled = profile.DisabledMcpServers ?? [];
+        var tools = profile.AvailableTools ?? [];
 
         var args = new System.Text.StringBuilder(baseFlavor.Args);
         foreach (var server in disabled)
             args.Append(" --disable-mcp-server ").Append(server);
-        if (requestedAgent is not null)
-            args.Append(" --agent ").Append(requestedAgent);
+        if (profile.Agent is not null)
+            args.Append(" --agent ").Append(profile.Agent);
         foreach (var tool in tools)
             args.Append(" --available-tools=").Append(tool);
-        if (disableBuiltinMcps)
+        if (profile.DisableBuiltinMcps)
             args.Append(" --disable-builtin-mcps");
-        if (noCustomInstructions)
+        if (profile.NoCustomInstructions)
             args.Append(" --no-custom-instructions");
 
         var hasProcessScope =
             disabled.Count > 0 ||
-            requestedAgent is not null ||
+            profile.Agent is not null ||
             tools.Count > 0 ||
-            disableBuiltinMcps ||
-            noCustomInstructions ||
-            requestedCopilotHome is not null;
+            profile.DisableBuiltinMcps ||
+            profile.NoCustomInstructions ||
+            profile.CopilotHome is not null;
         var key = hasProcessScope
             ? $"{baseFlavor.Key}:scope-{ProcessScopeHash(
                 disabled,
-                requestedAgent,
+                profile.Agent,
                 tools,
-                disableBuiltinMcps,
-                noCustomInstructions,
-                requestedCopilotHome)}"
+                profile.DisableBuiltinMcps,
+                profile.NoCustomInstructions,
+                profile.CopilotHome)}"
             : baseFlavor.Key;
 
         return baseFlavor with
         {
             Key = key,
             Args = args.ToString(),
-            Model = requestedModel,
-            ReasoningEffort = effort,
+            Model = profile.Model,
+            ReasoningEffort = profile.ReasoningEffort,
             DisabledMcpServers = disabled,
-            Agent = requestedAgent,
+            Agent = profile.Agent,
             AvailableTools = tools,
-            DisableBuiltinMcps = disableBuiltinMcps,
-            NoCustomInstructions = noCustomInstructions,
-            CopilotHome = requestedCopilotHome,
+            DisableBuiltinMcps = profile.DisableBuiltinMcps,
+            NoCustomInstructions = profile.NoCustomInstructions,
+            CopilotHome = profile.CopilotHome,
         };
     }
 
-    // Model + effort arrive over HTTP and are interpolated into the child's
-    // ACP request, while MCP names are also interpolated into the child command
-    // line. Keep validation generic and constrain all of them to safe tokens;
-    // the session's advertised configOptions are authoritative for whether a
-    // particular model or reasoning value is supported.
-    private static string ValidateModel(string model)
-    {
-        if (!System.Text.RegularExpressions.Regex.IsMatch(model, "^[A-Za-z0-9._-]{1,64}$"))
-            throw new ArgumentException($"Invalid model id '{model}'.", nameof(model));
-        return model;
-    }
+    internal static void ValidateAvailableToolsRequest(
+        IReadOnlyList<string>? selectors) =>
+        SessionRuntimeProfile.ValidateAvailableToolsRequest(selectors);
 
-    private static string? ValidateEffort(string? effort)
-    {
-        if (string.IsNullOrWhiteSpace(effort)) return null;
-        if (!System.Text.RegularExpressions.Regex.IsMatch(effort, "^[A-Za-z0-9._-]{1,64}$"))
-            throw new ArgumentException($"Invalid reasoning effort '{effort}'.", nameof(effort));
-        return effort.ToLowerInvariant();
-    }
-
-    private static string ValidateAgent(string agent)
-    {
-        if (!System.Text.RegularExpressions.Regex.IsMatch(agent, "^[A-Za-z0-9._-]{1,64}$"))
-            throw new ArgumentException($"Invalid agent name '{agent}'.", nameof(agent));
-        return agent;
-    }
-
-    // MCP server names arrive over HTTP and are interpolated into the child's
-    // command line as `--disable-mcp-server <name>`, so constrain them to safe
-    // tokens -- same guard as the model id -- to stop them injecting extra args.
-    private static IReadOnlyList<string> ValidateMcpServerNames(IReadOnlyList<string>? names)
-    {
-        if (names is null || names.Count == 0) return [];
-        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var n in names)
-        {
-            if (string.IsNullOrWhiteSpace(n)) continue;
-            if (!System.Text.RegularExpressions.Regex.IsMatch(n, "^[A-Za-z0-9._-]{1,64}$"))
-                throw new ArgumentException($"Invalid MCP server name '{n}'.", nameof(names));
-            result.Add(n);
-        }
-        return result.OrderBy(static name => name, StringComparer.OrdinalIgnoreCase).ToArray();
-    }
-
-    // Tool selectors are command-line values such as `magnus-phone` or
-    // `server(tool_name)`. Whitespace and quoting characters are deliberately
-    // excluded so an HTTP caller cannot turn one selector into extra arguments.
-    private static IReadOnlyList<string> ValidateToolSelectors(IReadOnlyList<string>? selectors)
-    {
-        if (selectors is null || selectors.Count == 0) return [];
-        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var selector in selectors)
-        {
-            if (string.IsNullOrWhiteSpace(selector)) continue;
-            if (!System.Text.RegularExpressions.Regex.IsMatch(selector, "^[A-Za-z0-9._:/?*()=-]{1,128}$"))
-                throw new ArgumentException($"Invalid tool selector '{selector}'.", nameof(selectors));
-            result.Add(selector);
-        }
-        return result.OrderBy(static selector => selector, StringComparer.OrdinalIgnoreCase).ToArray();
-    }
-
-    internal static void ValidateAvailableToolsRequest(IReadOnlyList<string>? selectors)
-    {
-        if (selectors is null) return;
-        if (selectors.Count == 0 || selectors.All(string.IsNullOrWhiteSpace))
-        {
-            throw new ArgumentException(
-                "Available tools cannot be empty; omit the property to leave tools unrestricted.",
-                nameof(selectors));
-        }
-        if (selectors.Any(string.IsNullOrWhiteSpace))
-        {
-            throw new ArgumentException(
-                "Available tools cannot contain a blank selector.",
-                nameof(selectors));
-        }
-    }
-
-    private static string ValidateCopilotHome(string copilotHome)
-    {
-        if (copilotHome.IndexOf('\0') >= 0 || copilotHome.Length > 1024)
-            throw new ArgumentException("Invalid Copilot home path.", nameof(copilotHome));
-        if (!Path.IsPathFullyQualified(copilotHome))
-            throw new ArgumentException("Copilot home path must be absolute.", nameof(copilotHome));
-        return Path.TrimEndingDirectorySeparator(Path.GetFullPath(copilotHome));
-    }
+    internal SessionRuntimeProfile ToRuntimeProfile() =>
+        new(
+            UseAgency: string.Equals(Key, Agency.Key, StringComparison.Ordinal)
+                || Key.StartsWith(Agency.Key + ":", StringComparison.Ordinal),
+            Model,
+            ReasoningEffort,
+            DisabledMcpServers,
+            Agent,
+            AvailableTools,
+            DisableBuiltinMcps,
+            NoCustomInstructions,
+            CopilotHome);
 
     private static string CopilotHomeKey(string copilotHome) =>
         OperatingSystem.IsWindows() ? copilotHome.ToUpperInvariant() : copilotHome;
@@ -247,14 +174,18 @@ public sealed record AcpFlavor(
         return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 
-    private static void AppendList(System.Text.StringBuilder target, IReadOnlyList<string> values)
+    private static void AppendList(
+        System.Text.StringBuilder target,
+        IReadOnlyList<string> values)
     {
         target.Append(values.Count).Append(':');
         foreach (var value in values)
             AppendValue(target, value);
     }
 
-    private static void AppendValue(System.Text.StringBuilder target, string? value)
+    private static void AppendValue(
+        System.Text.StringBuilder target,
+        string? value)
     {
         if (value is null)
         {
