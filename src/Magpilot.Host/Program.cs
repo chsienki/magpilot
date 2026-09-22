@@ -352,23 +352,27 @@ static async Task<int> RunSessionLoopAsync(
     WrapperOptions opts,
     Guid? initialLeaseId)
 {
+    var currentSid = sid;
     var leaseId = initialLeaseId;
-    IReadOnlyList<string> copilotArgs = WithResumeFlag(opts.ForwardArgs, sid);
-    string exe; IReadOnlyList<string> argv;
-    try { (exe, argv) = CopilotLaunch.Resolve(copilotArgs); }
+    string exe;
+    try { (exe, _) = CopilotLaunch.Resolve(WithResumeSession(opts.ForwardArgs, currentSid)); }
     catch (FileNotFoundException ex)
     {
         Console.Error.WriteLine($"magpilot: {ex.Message}");
-        await ReleaseLeaseAfterLaunchFailureAsync(agent, sid, leaseId);
+        await ReleaseLeaseAfterLaunchFailureAsync(agent, currentSid, leaseId);
         agent.Dispose();
         return 127;
     }
 
     var hostPid = Environment.ProcessId;
+    var firstSpawn = true;
 
     while (true)
     {
-        var handbackFailed = false;
+        var argv = firstSpawn
+            ? WithResumeFlag(opts.ForwardArgs, currentSid)
+            : WithResumeSession(opts.ForwardArgs, currentSid);
+        firstSpawn = false;
         // Spawn copilot inside a PTY. PtyHost wires up stdin/stdout
         // pumping and puts our terminal in raw mode so copilot's TUI
         // sees keystrokes verbatim. Disposing the PtyHost restores the
@@ -385,14 +389,13 @@ static async Task<int> RunSessionLoopAsync(
         catch (Exception ex)
         {
             Console.Error.WriteLine($"magpilot: failed to spawn copilot in PTY: {ex.Message}");
-            await ReleaseLeaseAfterLaunchFailureAsync(agent, sid, leaseId);
+            await ReleaseLeaseAfterLaunchFailureAsync(agent, currentSid, leaseId);
             agent.Dispose();
             return 4;
         }
 
         await using (copilotHost)
         {
-            var deferredErrors = new System.Collections.Concurrent.ConcurrentQueue<string>();
             if (leaseId is null)
             {
                 using var detectCts = new CancellationTokenSource();
@@ -409,10 +412,10 @@ static async Task<int> RunSessionLoopAsync(
                 }
 
                 var detectedSid = await detectedTask;
-                if (!string.Equals(detectedSid, sid, StringComparison.Ordinal))
+                if (!string.Equals(detectedSid, currentSid, StringComparison.Ordinal))
                 {
-                    deferredErrors.Enqueue(
-                        $"magpilot: could not confirm terminal ownership for {sid}; " +
+                    Console.Error.WriteLine(
+                        $"magpilot: could not confirm terminal ownership for {currentSid}; " +
                         $"detected {(detectedSid ?? "no session")} instead.");
                 }
                 else
@@ -420,7 +423,7 @@ static async Task<int> RunSessionLoopAsync(
                     try
                     {
                         var acquired = await agent.AcquireForHostAsync(
-                            sid,
+                            currentSid,
                             hostPid,
                             force: false);
                         leaseId = acquired.HostLeaseId
@@ -429,7 +432,7 @@ static async Task<int> RunSessionLoopAsync(
                     }
                     catch (Exception ex)
                     {
-                        deferredErrors.Enqueue(
+                        Console.Error.WriteLine(
                             $"magpilot: post-spawn terminal acquisition failed: {ex.Message}");
                     }
                 }
@@ -438,66 +441,34 @@ static async Task<int> RunSessionLoopAsync(
             if (leaseId is null)
             {
                 var exit = await copilotHost.ExitTask;
-                FlushDeferredErrors(deferredErrors);
                 agent.Dispose();
                 return exit;
             }
 
-            // Listen for release-requested in the background; signal via cts.
-            // Diagnostics from the listener must be deferred -- copilot owns
-            // the screen while this runs, so writing to stderr corrupts the
-            // TUI. Queue and flush after copilot exits.
-            using var sseCts = new CancellationTokenSource();
-            var preempted = new TaskCompletionSource<ReleaseRequested>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _ = Task.Run(() => SubscribeWithReconnectAsync(agent, sid, preempted, deferredErrors, sseCts.Token));
+            var result = await RunActivePtySessionAsync(
+                agent,
+                copilotHost,
+                currentSid,
+                leaseId.Value,
+                hostPid);
+            currentSid = result.SessionId;
+            leaseId = result.LeaseId;
 
-            var done = await Task.WhenAny(copilotHost.ExitTask, preempted.Task);
-            sseCts.Cancel();
-
-            if (done == copilotHost.ExitTask)
+            if (!result.Preempted)
             {
-                // Child exited on its own. Release ownership and return.
-                var exit = await copilotHost.ExitTask;
-                try { await agent.ReleaseAsync(sid, leaseId.Value); }
-                catch (Exception ex)
-                {
-                    handbackFailed = true;
-                    deferredErrors.Enqueue($"magpilot: release failed: {ex.Message}");
-                }
-                FlushDeferredErrors(deferredErrors);
                 agent.Dispose();
-                return handbackFailed && exit == 0 ? 6 : exit;
+                return result.HandbackFailed && result.ExitCode == 0
+                    ? 6
+                    : result.ExitCode;
             }
 
-            // SSE arrived first -- web is preempting us.
-            var rrEvt = await preempted.Task;
-            await copilotHost.ShutdownGracefullyAsync(TimeSpan.FromSeconds(rrEvt.Force ? 1 : 3));
-            // Banner uses Carriage Return to start at column 0 in case
-            // copilot left the cursor mid-line. Newlines are \r\n because
-            // the parent terminal is still in raw mode at this point.
-            Console.Out.Write("\r\n─── web took over this session ───\r\n");
-            Console.Out.Write($"   requester: {rrEvt.Requester}{(rrEvt.Force ? " (force)" : "")}\r\n");
-            Console.Out.Flush();
-
-            try
+            if (result.HandbackFailed)
             {
-                await agent.ReleaseAsync(sid, leaseId.Value);
-                leaseId = null;
+                agent.Dispose();
+                return 6;
             }
-            catch (Exception ex)
-            {
-                handbackFailed = true;
-                deferredErrors.Enqueue($"magpilot: release failed: {ex.Message}");
-            }
-            FlushDeferredErrors(deferredErrors);
         }
         // PtyHost disposed here -- raw mode restored, cooked mode back.
-
-        if (handbackFailed)
-        {
-            agent.Dispose();
-            return 6;
-        }
 
         if (opts.ExitOnHandoff)
         {
@@ -532,7 +503,10 @@ static async Task<int> RunSessionLoopAsync(
         // block the take-back (the acquire still flips ownership).
         try
         {
-            await agent.FireReleaseRequestAsync(sid, $"magpilot/{hostPid}", force: false);
+            await agent.FireReleaseRequestAsync(
+                currentSid,
+                $"magpilot/{hostPid}",
+                force: false);
             await Task.Delay(500);
         }
         catch (Exception ex)
@@ -541,7 +515,10 @@ static async Task<int> RunSessionLoopAsync(
         }
         try
         {
-            var acquired = await agent.AcquireForHostAsync(sid, hostPid, force: false);
+            var acquired = await agent.AcquireForHostAsync(
+                currentSid,
+                hostPid,
+                force: false);
             leaseId = acquired.HostLeaseId
                 ?? throw new InvalidOperationException(
                     "Agent acquired the session without returning a terminal lease.");
@@ -554,6 +531,202 @@ static async Task<int> RunSessionLoopAsync(
         }
         Console.WriteLine("magpilot: reconnected. resuming copilot...");
         // Loop -> spawn copilot again
+    }
+}
+
+static async Task<(
+    int ExitCode,
+    string SessionId,
+    Guid? LeaseId,
+    bool Preempted,
+    bool HandbackFailed)> RunActivePtySessionAsync(
+    AgentClient agent,
+    PtyHost copilotHost,
+    string initialSessionId,
+    Guid initialLeaseId,
+    int hostPid)
+{
+    var currentSid = initialSessionId;
+    var leaseId = initialLeaseId;
+    string? pendingSwitch = null;
+    var pendingHandbacks =
+        new System.Collections.Concurrent.ConcurrentDictionary<
+            string,
+            (Guid LeaseId, int CopilotPid)>(
+            StringComparer.Ordinal);
+    var deferredErrors =
+        new System.Collections.Concurrent.ConcurrentQueue<string>();
+
+    while (true)
+    {
+        using var monitorCts = new CancellationTokenSource();
+        var preempted = new TaskCompletionSource<ReleaseRequested>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        _ = Task.Run(() => SubscribeWithReconnectAsync(
+            agent,
+            currentSid,
+            preempted,
+            deferredErrors,
+            monitorCts.Token));
+        var switchTask = pendingSwitch is null
+            ? PostSpawnDetector.WaitForSessionSwitchAsync(
+                copilotHost.Pid,
+                currentSid,
+                monitorCts.Token)
+            : Task.FromResult<string?>(pendingSwitch);
+
+        var done = await Task.WhenAny(
+            copilotHost.ExitTask,
+            preempted.Task,
+            switchTask);
+        monitorCts.Cancel();
+
+        if (done == copilotHost.ExitTask)
+        {
+            var exit = await copilotHost.ExitTask;
+            pendingHandbacks[currentSid] = (
+                leaseId,
+                copilotHost.Pid);
+            await RetryPendingHandbacksAsync(
+                agent,
+                pendingHandbacks,
+                deferredErrors,
+                childStopped: true,
+                activeSessionId: currentSid);
+            FlushDeferredErrors(deferredErrors);
+            return (
+                exit,
+                currentSid,
+                leaseId,
+                Preempted: false,
+                HandbackFailed: pendingHandbacks.Count > 0);
+        }
+
+        if (done == switchTask)
+        {
+            var nextSid = await switchTask;
+            if (nextSid is null)
+                continue;
+
+            try
+            {
+                try
+                {
+                    await agent.FireReleaseRequestAsync(
+                        nextSid,
+                        $"magpilot/{hostPid}",
+                        force: false);
+                    await Task.Delay(500);
+                }
+                catch (Exception ex)
+                {
+                    deferredErrors.Enqueue(
+                        "magpilot: release-request before session switch " +
+                        $"failed (non-fatal): {ex.Message}");
+                }
+
+                var acquired = await agent.AcquireForHostAsync(
+                    nextSid,
+                    hostPid,
+                    force: false);
+                var nextLease = acquired.HostLeaseId
+                    ?? throw new InvalidOperationException(
+                        "Agent acquired the switched session without " +
+                        "returning a terminal lease.");
+
+                pendingHandbacks.TryRemove(nextSid, out _);
+                pendingHandbacks[currentSid] = (
+                    leaseId,
+                    copilotHost.Pid);
+                currentSid = nextSid;
+                leaseId = nextLease;
+                pendingSwitch = null;
+                await RetryPendingHandbacksAsync(
+                    agent,
+                    pendingHandbacks,
+                    deferredErrors,
+                    childStopped: false,
+                    activeSessionId: currentSid);
+            }
+            catch (Exception ex)
+            {
+                deferredErrors.Enqueue(
+                    $"magpilot: session-switch lease transfer failed: {ex.Message}; retrying...");
+                pendingSwitch = nextSid;
+                await Task.Delay(TimeSpan.FromSeconds(2));
+            }
+            continue;
+        }
+
+        var rrEvt = await preempted.Task;
+        await copilotHost.ShutdownGracefullyAsync(
+            TimeSpan.FromSeconds(rrEvt.Force ? 1 : 3));
+        Console.Out.Write("\r\n--- web took over this session ---\r\n");
+        Console.Out.Write(
+            $"   requester: {rrEvt.Requester}" +
+            $"{(rrEvt.Force ? " (force)" : "")}\r\n");
+        Console.Out.Flush();
+
+        pendingHandbacks[currentSid] = (
+            leaseId,
+            copilotHost.Pid);
+        await RetryPendingHandbacksAsync(
+            agent,
+            pendingHandbacks,
+            deferredErrors,
+            childStopped: true,
+            activeSessionId: currentSid);
+        FlushDeferredErrors(deferredErrors);
+        return (
+            ExitCode: 0,
+            currentSid,
+            LeaseId: null,
+            Preempted: true,
+            HandbackFailed: pendingHandbacks.Count > 0);
+    }
+}
+
+static async Task RetryPendingHandbacksAsync(
+    AgentClient agent,
+    System.Collections.Concurrent.ConcurrentDictionary<
+        string,
+        (Guid LeaseId, int CopilotPid)> pending,
+    System.Collections.Concurrent.ConcurrentQueue<string> deferredErrors,
+    bool childStopped,
+    string activeSessionId)
+{
+    foreach (var (sessionId, handback) in pending.ToArray())
+    {
+        if (!childStopped &&
+            (string.Equals(
+                 sessionId,
+                 activeSessionId,
+                 StringComparison.Ordinal) ||
+             string.Equals(
+                 PostSpawnDetector.FindMostRecentLockedSession(
+                     handback.CopilotPid),
+                 sessionId,
+                 StringComparison.Ordinal)))
+        {
+            continue;
+        }
+
+        PostSpawnDetector.RemoveSessionLock(
+            sessionId,
+            handback.CopilotPid);
+        try
+        {
+            await agent.ReleaseAsync(
+                sessionId,
+                handback.LeaseId);
+            pending.TryRemove(sessionId, out _);
+        }
+        catch (Exception ex)
+        {
+            deferredErrors.Enqueue(
+                $"magpilot: handback for {sessionId} failed: " +
+                $"{ex.Message}");
+        }
     }
 }
 
@@ -576,15 +749,50 @@ static async Task ReleaseLeaseAfterLaunchFailureAsync(
     }
 }
 
-static IReadOnlyList<string> WithResumeFlag(IReadOnlyList<string> forwardArgs, string sid)
+static IReadOnlyList<string> WithResumeSession(
+    IReadOnlyList<string> forwardArgs,
+    string sid)
 {
-    // If forwardArgs already includes --resume=<sid> or --resume <sid>,
-    // pass through as-is. Otherwise prepend --resume=<sid>.
-    foreach (var a in forwardArgs)
+    var copy = new List<string>(forwardArgs.Count + 1)
     {
-        if (a.StartsWith("--resume", StringComparison.Ordinal)) return forwardArgs;
+        $"--resume={sid}",
+    };
+    for (var i = 0; i < forwardArgs.Count; i++)
+    {
+        var arg = forwardArgs[i];
+        if (arg.StartsWith("--resume=", StringComparison.Ordinal) ||
+            arg.StartsWith("--session-id=", StringComparison.Ordinal) ||
+            arg == "--continue")
+        {
+            continue;
+        }
+        if (arg is "--resume" or "--session-id")
+        {
+            if (i + 1 < forwardArgs.Count &&
+                !forwardArgs[i + 1].StartsWith('-'))
+            {
+                i++;
+            }
+            continue;
+        }
+        copy.Add(arg);
     }
-    var copy = new List<string>(forwardArgs.Count + 1) { $"--resume={sid}" };
+    return copy;
+}
+
+static IReadOnlyList<string> WithResumeFlag(
+    IReadOnlyList<string> forwardArgs,
+    string sid)
+{
+    foreach (var arg in forwardArgs)
+    {
+        if (arg.StartsWith("--resume", StringComparison.Ordinal))
+            return forwardArgs;
+    }
+    var copy = new List<string>(forwardArgs.Count + 1)
+    {
+        $"--resume={sid}",
+    };
     copy.AddRange(forwardArgs);
     return copy;
 }
@@ -629,126 +837,79 @@ static async Task<int> RunSessionLoopWithDetectionAsync(AgentClient agent, Wrapp
 
     await using (copilotHost)
     {
-        var handbackFailed = false;
-        // Background-detect which session copilot ended up taking, then
-        // register a terminal lease with the agent. The launcher PID is the
-        // coordinator identity; the agent verifies that the detected Copilot
-        // lock holder is its descendant.
-        //
-        // The detection task runs concurrently with copilot's TUI, so any
-        // diagnostics it produces must be deferred -- writing to stderr
-        // while copilot is rendering corrupts the user-visible screen.
-        // Errors are queued and printed after copilot exits.
-        using var sseCts = new CancellationTokenSource();
-        var preempted = new TaskCompletionSource<ReleaseRequested>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var deferredErrors = new System.Collections.Concurrent.ConcurrentQueue<string>();
-        string? detectedSid = null;
-        Guid? leaseId = null;
-        _ = Task.Run(async () =>
+        using var detectCts = new CancellationTokenSource();
+        var detectedTask = PostSpawnDetector.WaitForSessionAsync(
+            copilotHost.Pid,
+            detectCts.Token);
+        var first = await Task.WhenAny(
+            copilotHost.ExitTask,
+            detectedTask);
+        if (first == copilotHost.ExitTask)
         {
-            try
-            {
-                detectedSid = await PostSpawnDetector.WaitForSessionAsync(copilotHost.Pid, sseCts.Token);
-                if (detectedSid is null)
-                {
-                    deferredErrors.Enqueue(
-                        "magpilot: post-spawn detection timed out. " +
-                        "Session not registered for cooperative handoff; SPA may show it as Locked.");
-                    return;
-                }
+            detectCts.Cancel();
+            var exit = await copilotHost.ExitTask;
+            agent.Dispose();
+            return exit;
+        }
 
-                // Same release-request-before-acquire pattern as the
-                // known-sid path: tell any SSE subscribers (typically a
-                // SPA tab) that we're claiming the session, so they
-                // shut down their stream cleanly instead of finding
-                // out via 409 on the next send. Best-effort: failure
-                // doesn't block the acquire.
-                try
-                {
-                    await agent.FireReleaseRequestAsync(detectedSid, $"magpilot/{hostPid}", force: false, sseCts.Token);
-                    await Task.Delay(500, sseCts.Token);
-                }
-                catch (OperationCanceledException) { return; }
-                catch (Exception ex)
-                {
-                    deferredErrors.Enqueue($"magpilot: release-request before acquire failed (non-fatal): {ex.Message}");
-                }
-
-                try
-                {
-                    var acquired = await agent.AcquireForHostAsync(
-                        detectedSid,
-                        hostPid,
-                        force: false);
-                    leaseId = acquired.HostLeaseId
-                        ?? throw new InvalidOperationException(
-                            "Agent acquired the session without returning a terminal lease.");
-                }
-                catch (Exception ex)
-                {
-                    deferredErrors.Enqueue($"magpilot: acquire-for-host on detected session {detectedSid} failed: {ex.Message}");
-                    return;
-                }
-
-                // Now that we know the sid, subscribe to its SSE so we
-                // can react to release_requested events -- reconnecting
-                // across agent restarts (see SubscribeWithReconnectAsync).
-                await SubscribeWithReconnectAsync(agent, detectedSid, preempted, deferredErrors, sseCts.Token);
-            }
-            catch (OperationCanceledException) { }
-        });
-
-        var done = await Task.WhenAny(copilotHost.ExitTask, preempted.Task);
-        sseCts.Cancel();
-
-        if (done == copilotHost.ExitTask)
+        var detectedSid = await detectedTask;
+        if (detectedSid is null)
         {
             var exit = await copilotHost.ExitTask;
-            if (detectedSid is not null && leaseId is { } exitLease)
-            {
-                try { await agent.ReleaseAsync(detectedSid, exitLease); }
-                catch (Exception ex)
-                {
-                    handbackFailed = true;
-                    deferredErrors.Enqueue($"magpilot: release failed: {ex.Message}");
-                }
-            }
-            FlushDeferredErrors(deferredErrors);
+            Console.Error.WriteLine(
+                "magpilot: post-spawn detection timed out. Session was not " +
+                "registered for cooperative handoff.");
             agent.Dispose();
-            return handbackFailed && exit == 0 ? 6 : exit;
+            return exit;
         }
 
-        // SSE preempt arrived first. Detection necessarily completed
-        // (otherwise we couldn't have subscribed); detectedSid is non-null.
-        var rrEvt = await preempted.Task;
-        await copilotHost.ShutdownGracefullyAsync(TimeSpan.FromSeconds(rrEvt.Force ? 1 : 3));
-        Console.Out.Write("\r\n--- web took over this session ---\r\n");
-        Console.Out.Write($"   requester: {rrEvt.Requester}{(rrEvt.Force ? " (force)" : "")}\r\n");
-        Console.Out.Flush();
-
-        if (detectedSid is not null && leaseId is { } handoffLease)
+        try
         {
-            try { await agent.ReleaseAsync(detectedSid, handoffLease); }
-            catch (Exception ex)
-            {
-                handbackFailed = true;
-                deferredErrors.Enqueue($"magpilot: release failed: {ex.Message}");
-            }
+            await agent.FireReleaseRequestAsync(
+                detectedSid,
+                $"magpilot/{hostPid}",
+                force: false);
+            await Task.Delay(500);
         }
-        FlushDeferredErrors(deferredErrors);
-        if (handbackFailed)
+        catch (Exception ex)
         {
+            Console.Error.WriteLine(
+                "magpilot: release-request before acquire failed " +
+                $"(non-fatal): {ex.Message}");
+        }
+
+        SessionStateInfo acquired;
+        try
+        {
+            acquired = await agent.AcquireForHostAsync(
+                detectedSid,
+                hostPid,
+                force: false);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(
+                $"magpilot: acquire-for-host on detected session " +
+                $"{detectedSid} failed: {ex.Message}");
+            var exit = await copilotHost.ExitTask;
             agent.Dispose();
+            return exit == 0 ? 5 : exit;
+        }
+
+        var leaseId = acquired.HostLeaseId
+            ?? throw new InvalidOperationException(
+                "Agent acquired the session without returning a terminal lease.");
+        var result = await RunActivePtySessionAsync(
+            agent,
+            copilotHost,
+            detectedSid,
+            leaseId,
+            hostPid);
+        agent.Dispose();
+        if (result.HandbackFailed)
             return 6;
-        }
+        return result.ExitCode;
     }
-
-    // The detection-path doesn't support the post-handoff "press enter
-    // to take it back" loop -- the user's original argv (e.g. --continue)
-    // may not be re-runnable, and we'd risk landing in a different
-    // session. Exit cleanly.
-    agent.Dispose();
-    return 0;
 }
 
 static void FlushDeferredErrors(System.Collections.Concurrent.ConcurrentQueue<string> queue)

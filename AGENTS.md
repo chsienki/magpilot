@@ -2219,6 +2219,28 @@ and reintroduced exactly that symptom; keep the knock on ALL acquire
 sites. Failure of the broadcast is non-fatal; the existing 409 path still
 catches uncoordinated cases.
 
+**Interactive `/resume` transfers the terminal lease.** Copilot can switch the
+active session without replacing its process. Its old `inuse.<pid>.lock`
+remains, so a PID-only view makes both sessions look active. The launcher runs
+`PostSpawnDetector.WaitForSessionSwitchAsync` beside the SSE subscription. A
+new child lock, or activity advancing on another session already locked by the
+same child PID, triggers a transfer. As with startup detection, artifact
+activity on a session with no other live holder is the fallback for Copilot's
+empty-session case where it does not create a fresh lock:
+
+1. Politely notify and acquire the new session for the same launcher PID.
+2. Start treating the new lease/session as authoritative.
+3. Delete only the child's exact stale lock from the old session.
+4. Release the old lease so the Agent re-adopts it.
+5. Reconnect the release-request subscription to the new session.
+
+Old-session handback is serialized with the transfer. A background cleanup can
+race a quick `/resume` back to the old session and delete its newly-active
+lock. Failed handbacks retain their lease and are retried before launcher exit;
+re-acquiring that session cancels its pending cleanup. After a web round-trip,
+respawn uses `--resume=<currently active session>`, not the launch argument's
+original session.
+
 **Launcher SSE reconnect** (`Magpilot.Host/Program.cs`,
 `SubscribeWithReconnectAsync`): the launcher listens for
 `release_requested` on the session's SSE stream so a web take-over

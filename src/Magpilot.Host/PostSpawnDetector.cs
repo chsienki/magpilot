@@ -135,6 +135,187 @@ internal static class PostSpawnDetector
         return null;
     }
 
+    public static async Task<string?> WaitForSessionSwitchAsync(
+        int copilotPid,
+        string currentSessionId,
+        CancellationToken ct,
+        string? rootOverride = null)
+    {
+        var root = rootOverride ?? SessionStateRoot;
+        var baseline = SnapshotSwitchCandidates(root, copilotPid);
+        var alreadySwitched = FindNewerSession(
+            baseline,
+            currentSessionId);
+        if (alreadySwitched is not null)
+            return alreadySwitched;
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                var current = SnapshotSwitchCandidates(root, copilotPid);
+                var switched = current.Values
+                    .Where(signal =>
+                        !string.Equals(
+                            signal.SessionId,
+                            currentSessionId,
+                            StringComparison.Ordinal) &&
+                        (!baseline.TryGetValue(signal.SessionId, out var prior) ||
+                         signal.LastActivityUtc > prior.LastActivityUtc))
+                    .OrderByDescending(signal => signal.LastActivityUtc)
+                    .FirstOrDefault();
+                if (switched is not null)
+                    return switched.SessionId;
+            }
+            catch
+            {
+                // Session directories can churn while Copilot changes sessions.
+            }
+
+            try { await Task.Delay(PollInterval, ct); }
+            catch (OperationCanceledException) { return null; }
+        }
+
+        return null;
+    }
+
+    private static string? FindNewerSession(
+        IReadOnlyDictionary<string, SessionSignal> signals,
+        string currentSessionId)
+    {
+        var currentActivity = signals.TryGetValue(
+            currentSessionId,
+            out var current)
+            ? current.LastActivityUtc
+            : DateTime.MinValue;
+        return signals.Values
+            .Where(signal =>
+                !string.Equals(
+                    signal.SessionId,
+                    currentSessionId,
+                    StringComparison.Ordinal) &&
+                signal.LastActivityUtc > currentActivity)
+            .OrderByDescending(signal => signal.LastActivityUtc)
+            .Select(signal => signal.SessionId)
+            .FirstOrDefault();
+    }
+
+    public static bool RemoveSessionLock(
+        string sessionId,
+        int copilotPid,
+        string? rootOverride = null)
+    {
+        var root = rootOverride ?? SessionStateRoot;
+        var path = Path.Combine(
+            root,
+            sessionId,
+            $"inuse.{copilotPid}.lock");
+        try
+        {
+            if (!File.Exists(path))
+                return false;
+            File.Delete(path);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static string? FindMostRecentLockedSession(
+        int copilotPid,
+        string? rootOverride = null) =>
+        SnapshotSwitchCandidates(
+                rootOverride ?? SessionStateRoot,
+                copilotPid)
+            .Values
+            .Where(signal => signal.CopilotLockWriteUtc is not null)
+            .OrderByDescending(signal => signal.CopilotLockWriteUtc)
+            .Select(signal => signal.SessionId)
+            .FirstOrDefault();
+
+    private static Dictionary<string, SessionSignal> SnapshotSwitchCandidates(
+        string root,
+        int copilotPid)
+    {
+        var result = new Dictionary<string, SessionSignal>(
+            StringComparer.Ordinal);
+        foreach (var sessionDir in SafeEnumerateDirectories(root))
+        {
+            var sessionId = Path.GetFileName(sessionDir);
+            if (string.IsNullOrEmpty(sessionId))
+                continue;
+
+            var lockPath = Path.Combine(
+                sessionDir,
+                $"inuse.{copilotPid}.lock");
+            var hasCopilotLock = File.Exists(lockPath);
+            if (!hasCopilotLock &&
+                HasLiveLockOtherThan(sessionDir, copilotPid))
+            {
+                continue;
+            }
+
+            var lastActivity = hasCopilotLock
+                ? File.GetLastWriteTimeUtc(lockPath)
+                : DateTime.MinValue;
+            foreach (var artifact in new[] { "events.jsonl", "workspace.yaml" })
+            {
+                var path = Path.Combine(sessionDir, artifact);
+                if (!File.Exists(path))
+                    continue;
+                var writeTime = File.GetLastWriteTimeUtc(path);
+                if (writeTime > lastActivity)
+                    lastActivity = writeTime;
+            }
+
+            if (lastActivity == DateTime.MinValue)
+                continue;
+            result[sessionId] = new SessionSignal(
+                sessionId,
+                lastActivity,
+                hasCopilotLock
+                    ? File.GetLastWriteTimeUtc(lockPath)
+                    : null);
+        }
+
+        return result;
+    }
+
+    private static bool HasLiveLockOtherThan(
+        string sessionDir,
+        int copilotPid)
+    {
+        foreach (var lockPath in SafeEnumerateFiles(
+                     sessionDir,
+                     "inuse.*.lock"))
+        {
+            if (!TryParseLockPid(lockPath, out var pid) ||
+                pid == copilotPid)
+            {
+                continue;
+            }
+            try
+            {
+                using var process =
+                    System.Diagnostics.Process.GetProcessById(pid);
+                if (!process.HasExited)
+                    return true;
+            }
+            catch
+            {
+                // Dead holders do not exclude the fallback candidate.
+            }
+        }
+        return false;
+    }
+
+    private sealed record SessionSignal(
+        string SessionId,
+        DateTime LastActivityUtc,
+        DateTime? CopilotLockWriteUtc);
+
     /// <summary>
     /// True iff <paramref name="sessionDir"/> has at least one
     /// <c>inuse.&lt;pid&gt;.lock</c> file AND every such file names a PID

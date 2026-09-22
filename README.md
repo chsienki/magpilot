@@ -89,7 +89,9 @@ preempts cooperatively with the SPA + WhatsApp via a single-owner
 handoff (no events.jsonl forks). Its terminal layer uses current app-local
 ConPTY assets, supports granular opt-in/out controls for launcher-owned TUI
 changes, and includes repeatable capture/probe tools plus an offline theme
-editor. The **Windows installer** + autoupdate path
+editor. Interactive Copilot `/resume` switches transfer the terminal lease and
+web take-over subscription to the newly selected session. The **Windows
+installer** + autoupdate path
 (`installer/magpilot.iss`, `magpilot --magpilot-update`, hub-mediated version
 check) is in place; HENDRIK runs the agent as a scheduled task at user logon.
 The hub's Agents page reports each machine's running/update version and can
