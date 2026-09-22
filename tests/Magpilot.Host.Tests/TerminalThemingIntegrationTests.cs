@@ -127,6 +127,7 @@ public class TerminalThemingIntegrationTests
             Assert.False(manifest.ThinkingRewriteEnabled);
             Assert.False(manifest.InputBandRewriteEnabled);
             Assert.False(manifest.LegacyColorRewriteEnabled);
+            Assert.False(manifest.PaletteQueryRepliesEnabled);
             Assert.False(manifest.BannerEnabled);
         }
         finally

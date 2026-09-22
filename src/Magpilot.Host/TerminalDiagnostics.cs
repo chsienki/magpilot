@@ -29,6 +29,7 @@ internal sealed record TerminalLaunchManifest(
     bool ThinkingRewriteEnabled,
     bool InputBandRewriteEnabled,
     bool LegacyColorRewriteEnabled,
+    bool PaletteQueryRepliesEnabled,
     bool BannerEnabled,
     string? ThemeName,
     string? ThemeFile,
@@ -82,6 +83,7 @@ internal static class TerminalDiagnostics
         bool thinkingRewriteEnabled,
         bool inputBandRewriteEnabled,
         bool legacyColorRewriteEnabled,
+        bool paletteQueryRepliesEnabled,
         bool bannerEnabled,
         TimeSpan? dumpDuration)
     {
@@ -114,6 +116,7 @@ internal static class TerminalDiagnostics
             thinkingRewriteEnabled,
             inputBandRewriteEnabled,
             legacyColorRewriteEnabled,
+            paletteQueryRepliesEnabled,
             bannerEnabled,
             InstallConfig.ResolveValue("MAGPILOT_TERM_THEME"),
             InstallConfig.ResolveValue("MAGPILOT_TERM_THEME_FILE"),

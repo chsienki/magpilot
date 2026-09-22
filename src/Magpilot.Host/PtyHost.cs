@@ -20,10 +20,12 @@ public sealed class PtyHost : IAsyncDisposable
     private readonly IPtyConnection _conn;
     private readonly RawConsoleMode _raw;
     private readonly bool _resetColorsOnDispose;
+    private readonly TerminalPaletteQueryResponder? _paletteQueryResponder;
     private readonly AnsiColorRewriter? _rewriter;
     private readonly BannerTagInjector? _banner;
     private readonly TimeSpan? _dumpDuration;
     private readonly CancellationTokenSource _cts = new();
+    private readonly SemaphoreSlim _inputGate = new(1, 1);
     private readonly TaskCompletionSource _exited = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<int> _exitCode = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private Task _outputPump = Task.CompletedTask;
@@ -32,6 +34,7 @@ public sealed class PtyHost : IAsyncDisposable
         IPtyConnection conn,
         RawConsoleMode raw,
         bool resetColorsOnDispose,
+        TerminalPaletteQueryResponder? paletteQueryResponder,
         AnsiColorRewriter? rewriter,
         BannerTagInjector? banner,
         TimeSpan? dumpDuration)
@@ -39,6 +42,7 @@ public sealed class PtyHost : IAsyncDisposable
         _conn = conn;
         _raw  = raw;
         _resetColorsOnDispose = resetColorsOnDispose;
+        _paletteQueryResponder = paletteQueryResponder;
         _rewriter = rewriter;
         _banner = banner;
         _dumpDuration = dumpDuration;
@@ -88,6 +92,7 @@ public sealed class PtyHost : IAsyncDisposable
         // copilot reads as its documented dark/light fallback. An explicit
         // config value skips the probe.
         var resetColorsOnDispose = false;
+        TerminalPaletteQueryResponder? paletteQueryResponder = null;
         AnsiColorRewriter? rewriter = null;
         BannerTagInjector? banner = null;
         Rgb? thinking = null;
@@ -152,6 +157,13 @@ public sealed class PtyHost : IAsyncDisposable
             inputBand = tuiOptions.Includes(LauncherTuiOptions.InputBand)
                 ? theme.InputBand
                 : null;
+            paletteQueryResponder = tuiOptions.Includes(LauncherTuiOptions.Palette) &&
+                theme.HasPaletteOverrides
+                ? new TerminalPaletteQueryResponder(
+                    theme.Palette,
+                    theme.Foreground,
+                    theme.BackgroundColor)
+                : null;
             legacyColors = tuiOptions.Includes(LauncherTuiOptions.LegacyColors) &&
                 theme.LegacyDefaultColors;
             rewriter = thinking is not null || inputBand is not null || legacyColors
@@ -182,6 +194,7 @@ public sealed class PtyHost : IAsyncDisposable
             thinking is not null,
             inputBand is not null,
             legacyColors,
+            paletteQueryResponder is not null,
             banner is not null,
             dumpDuration);
 
@@ -206,6 +219,7 @@ public sealed class PtyHost : IAsyncDisposable
             conn,
             raw,
             resetColorsOnDispose,
+            paletteQueryResponder,
             rewriter,
             banner,
             dumpDuration);
@@ -267,6 +281,13 @@ public sealed class PtyHost : IAsyncDisposable
                 ReadOnlyMemory<byte> output,
                 CancellationToken cancellationToken)
             {
+                if (_paletteQueryResponder is not null)
+                {
+                    var transformed = _paletteQueryResponder.Transform(output.Span);
+                    output = transformed.Output;
+                    if (transformed.Reply.Length > 0)
+                        await WriteInputAsync(transformed.Reply, cancellationToken);
+                }
                 if (_banner is not null)
                     output = _banner.Transform(output.Span);
                 if (_rewriter is not null)
@@ -323,13 +344,28 @@ public sealed class PtyHost : IAsyncDisposable
                 {
                     var n = await stdin.ReadAsync(buf.AsMemory(), _cts.Token);
                     if (n <= 0) break;
-                    await _conn.WriterStream.WriteAsync(buf.AsMemory(0, n), _cts.Token);
-                    await _conn.WriterStream.FlushAsync(_cts.Token);
+                    await WriteInputAsync(buf.AsMemory(0, n), _cts.Token);
                 }
             }
             catch (OperationCanceledException) { }
             catch (Exception) { /* pty closed */ }
         });
+    }
+
+    private async ValueTask WriteInputAsync(
+        ReadOnlyMemory<byte> input,
+        CancellationToken cancellationToken)
+    {
+        await _inputGate.WaitAsync(cancellationToken);
+        try
+        {
+            await _conn.WriterStream.WriteAsync(input, cancellationToken);
+            await _conn.WriterStream.FlushAsync(cancellationToken);
+        }
+        finally
+        {
+            _inputGate.Release();
+        }
     }
 
     private void StartResizeWatcher()
@@ -377,8 +413,7 @@ public sealed class PtyHost : IAsyncDisposable
         try
         {
             var bytes = System.Text.Encoding.UTF8.GetBytes("/exit\r");
-            await _conn.WriterStream.WriteAsync(bytes, ct);
-            await _conn.WriterStream.FlushAsync(ct);
+            await WriteInputAsync(bytes, ct);
         }
         catch { /* pty might already be closed */ }
 
@@ -419,6 +454,7 @@ public sealed class PtyHost : IAsyncDisposable
         if (_resetColorsOnDispose)
             TerminalTheming.ResetPalette();
         _raw.Restore();
+        _inputGate.Dispose();
         _cts.Dispose();
     }
 }

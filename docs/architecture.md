@@ -331,16 +331,23 @@ binary stays as it is. The launcher:
    ownership flips. Without this courtesy the SPA only learns about
    the takeover when its NEXT `/messages` POST returns 409.
 7. On PTY paths, applies the configured terminal palette to the outer
-   terminal. The same output pipeline can rewrite copilot's fixed
-   composer-surface greys, faint reasoning text, and current Base-16-derived
+   terminal. The output pipeline consumes matching Copilot OSC 4/10/11 palette
+   queries and answers them inside the PTY from that same configured theme.
+   This removes the startup race where Copilot could query before the outer
+   terminal had applied the override and permanently bake a different
+   truecolor ramp into that session. Unconfigured palette entries continue to
+   query the outer terminal. The same pipeline rewrites fixed
+   composer-surface greys, faint reasoning text, and fallback Base-16-derived
    truecolor tokens when the theme configures `inputBand`, `thinking`, or
    `legacyDefaultColors`. Compatibility mode suppresses startup-banner
    injection because copilot's animated welcome card cannot account for text
-   inserted after its layout pass. `--magpilot-no-tui-changes` bypasses the
-   background probe, terminal-environment defaults and hints, palette changes,
-   output rewrites, and banner injection. Coordinated sessions retain the PTY
-   because ownership detection and graceful handoff depend on it; agentless
-   passthrough direct-execs for parity with a raw `copilot` launch.
+   inserted after its layout pass.
+   `--magpilot-no-tui-changes` bypasses the background probe,
+   terminal-environment defaults and hints, palette changes, synthetic
+   palette replies, output rewrites, and banner injection. Coordinated
+   sessions retain the PTY because ownership detection and graceful handoff
+   depend on it; agentless passthrough direct-execs for parity with a raw
+   `copilot` launch.
    `--magpilot-tui-options=<list>` independently gates `term`, `truecolor`,
    `background`, `github-theme`, `palette`, `thinking`, `input-band`,
    `legacy-colors`, and `banner`; `rewrite` enables the three rewrite stages

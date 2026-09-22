@@ -718,14 +718,15 @@ renders its own TUI, so the launcher only influences colours three ways:
 **environment hints** it passes to the child, **OSC sequences** it injects
 into the real terminal around copilot's output, and **byte-stream rewrites**
 of copilot's output as it flows through the PTY. It never writes copilot's
-own config -- env + the byte stream is the clean ring boundary.
+own config -- env, terminal query replies, and the byte stream are the clean
+ring boundary.
 
 Three launch paths, with different reach:
 
 - **ConPTY host** (agent coordination) and **PTY passthrough**
   (`Program.RunPassthroughAsync`, used when there's no agent token or the
   agent is unreachable, so plain `magpilot` works standalone): full theming
-  including the byte-stream rewrites.
+  including deterministic theme-palette replies and the byte-stream rewrites.
 - **direct-exec** (`--magpilot-skip-check`, or any redirected-stdio case):
   env + OSC theming only -- copilot owns the TTY directly, so there's no
   stream for the launcher to rewrite. (`TerminalTheming.cs` is the shared
@@ -752,10 +753,10 @@ stage independently:
 | `truecolor` | Defaults a missing `COLORTERM` to `truecolor` | No change; the real terminal environment is inherited directly |
 | `background` | Applies an explicit dark/light pin or probes OSC 11 and sets `COLORFGBG` | Applies only an explicit dark/light `COLORFGBG` pin; Copilot can perform its own OSC 11 probe |
 | `github-theme` | Sets `COPILOT_GITHUB_THEME=1` when enabled by config | Same |
-| `palette` | Applies and later resets theme OSC 4/10/11 overrides | Same |
+| `palette` | Applies/resets theme OSC 4/10/11 overrides and answers matching child queries from the same theme | Same overrides, but Copilot owns query handling |
 | `thinking` | Replaces every faint (`SGR 2`) span with the configured thinking colour | No effect because Copilot owns the output stream |
 | `input-band` | Retargets Copilot's known fixed composer-surface truecolors | No effect because Copilot owns the output stream |
-| `legacy-colors` | Retargets the known Base-16-derived truecolor ramp to classic defaults | No effect because Copilot owns the output stream |
+| `legacy-colors` | Retargets known fallback truecolor ramps from non-querying releases | No effect because Copilot owns the output stream |
 | `banner` | Enables startup-banner injection unless compatibility mode suppresses it | No effect because Copilot owns the output stream |
 
 `all` preserves the launcher's established behavior. `none` preserves the
@@ -794,7 +795,16 @@ What happens at spawn (helpers: `TerminalColor.cs` / `TerminalThemeConfig.cs`
    `{ "palette": { "0": "#1e1e1e", "4": "#3b8eea" }, "foreground": "#d4d4d4", "background": "#1e1e1e", "thinking": "#7c8a8a", "inputBand": "#073642", "legacyDefaultColors": true }`.
 3. **GitHub theme flag.** `COPILOT_GITHUB_THEME=1` is set by default so the
    GitHub colour mode is a pickable option in copilot's own `/theme`.
-4. **Byte-stream rewrites (`AnsiColorRewriter`, PTY paths only).** Three things
+4. **Deterministic palette replies (`TerminalPaletteQueryResponder`, PTY paths
+   only).** When palette overrides are active, the launcher consumes matching
+   `OSC 4;<index>;?`, `OSC 10;?`, and `OSC 11;?` queries and writes replies from
+   that same configured theme directly back into the PTY. Copilot therefore
+   derives the same semantic truecolors on every launch, regardless of whether
+   the outer terminal has already processed the OSC overrides. Queries for
+   unconfigured entries pass through to the outer terminal. Human input and
+   synthetic replies share one serialized PTY writer so their bytes cannot
+   interleave.
+5. **Byte-stream rewrites (`AnsiColorRewriter`, PTY paths only).** Three things
    copilot renders that the palette can't reach, each opt-in via a theme-file
    key:
    - `"thinking"`: copilot draws reasoning text with the terminal's **faint**
@@ -813,15 +823,12 @@ What happens at spawn (helpers: `TerminalColor.cs` / `TerminalThemeConfig.cs`
      untouched. The rewriter is an incremental SGR parser that survives
      escapes split across read buffers; it's careful to skip the literal
      `2`/`5` inside `38;2;...` / `38;5;...` selectors.
-   - `"legacyDefaultColors": true`: current copilot releases derive a dim
-     truecolor ramp for the Base-16 theme. The rewriter retargets the known
-     settled-frame token colours to the values emitted by the classic default
-     theme, preserving the current renderer/layout while restoring the
-     brighter cyan, magenta, green, blue, and neutral hierarchy. The map is
-     selector-aware, so the selected tab's blue background becomes cyan while
-     the same source blue used as foreground becomes the classic magenta
+   - `"legacyDefaultColors": true`: the rewriter retargets known dim truecolor
+     ramps emitted by releases that do not query the palette. The fallback map
+     is selector-aware, so the selected tab's blue background becomes cyan
+     while the same source blue used as foreground becomes the classic magenta
      heading colour.
-5. **Banner tag (`BannerTagInjector`, PTY paths only).** copilot opens a
+6. **Banner tag (`BannerTagInjector`, PTY paths only).** copilot opens a
    session with `Copilot v<ver> uses AI.` drawn in a fixed grey; the injector
    watches for the stable `uses AI.` phrase and appends the magpilot version
    right after it (e.g. `... uses AI. (Magpilot v0.1.13)`), so a wrapped
@@ -848,7 +855,8 @@ instead of downgrading to bright-16 under an empty ConPTY `COLORTERM`.
 settling window without stopping Copilot. `MAGPILOT_TERM_MANIFEST=<path>`
 records the exact resolved child hints, active transformation stages, shell
 markers (`MSYSTEM`, `SHELL`, `TERM_PROGRAM`, `WT_SESSION`), and .NET's
-stdin/stdout redirection view. Git Bash/MSYS and PowerShell runs are distinct
+stdin/stdout redirection view. `PaletteQueryRepliesEnabled` records whether
+compatibility replies were active. Git Bash/MSYS and PowerShell runs are distinct
 experiments even when their explicit option lists match.
 
 The repeatable black-box workflow is `scripts/capture-tui-matrix.ps1`, with

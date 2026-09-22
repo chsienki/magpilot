@@ -174,6 +174,7 @@ public class HostJsonContractTests
             false,
             false,
             false,
+            true,
             false,
             null,
             null,
@@ -196,6 +197,7 @@ public class HostJsonContractTests
         Assert.Contains("\"ConPtyImplementation\":\"app-local\"", json);
         Assert.Contains("\"MsSystem\":\"MINGW64\"", json);
         Assert.Contains("\"ColorFgBg\":\"15;0\"", json);
+        Assert.Contains("\"PaletteQueryRepliesEnabled\":true", json);
         Assert.Contains("\"Palette\":[{\"Index\":4,\"Color\":\"#268BD2\"}]", json);
     }
 

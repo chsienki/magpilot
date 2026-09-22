@@ -328,6 +328,7 @@ static async Task<int> ExecRealCopilotAsync(
         thinkingRewriteEnabled: false,
         inputBandRewriteEnabled: false,
         legacyColorRewriteEnabled: false,
+        paletteQueryRepliesEnabled: false,
         bannerEnabled: false,
         dumpDuration: TerminalDiagnostics.ResolveDumpDuration());
 
