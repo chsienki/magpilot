@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text.Json;
+using Magpilot.Agent.Runtime;
 
 namespace Magpilot.Agent.Sessions;
 
@@ -252,10 +253,10 @@ public sealed class HostOwnership : IHostedService, IDisposable
 /// <summary>
 /// What the agent had the session attached under before it handed it to a
 /// launcher: the process-scoped tool surface plus the session-scoped model and
-/// reasoning. Purely descriptive (no ACP types) so the ownership map stays a
-/// plain serialisable record; the registry turns it back into an
-/// <c>AcpFlavor</c> on handback. A null (e.g. an entry persisted by an older
-/// agent) simply falls back to the default flavor.
+/// reasoning. Purely descriptive (no runtime implementation types) so the
+/// ownership map stays a plain serialisable record; the registry turns it back
+/// into a runtime profile on handback. A null (e.g. an entry persisted by an
+/// older agent) simply falls back to the default profile.
 /// </summary>
 public sealed record HostSessionFlavor(
     bool UseAgency = false,
@@ -266,7 +267,8 @@ public sealed record HostSessionFlavor(
     string[]? AvailableTools = null,
     bool DisableBuiltinMcps = false,
     bool NoCustomInstructions = false,
-    string? CopilotHome = null);
+    string? CopilotHome = null,
+    SessionRuntimeBackend? Backend = null);
 
 public readonly record struct HostOwnerEntry(
     int HostPid,

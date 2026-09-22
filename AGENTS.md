@@ -76,11 +76,46 @@ src/
                        LastEventInfo, AcquireForHostBody,
                        ReleaseRequestBody, ReleaseFromHostBody,
                        HostOwnedResponse, ReleaseRequested SSE case.
-  Magpilot.Agent/    <- per-host daemon: ACP client + minimal HTTP/SSE API
+  Magpilot.Agent/    <- per-host daemon: session runtime + minimal HTTP/SSE API
+    Runtime/IAgentSessionRuntime.cs <- protocol-neutral contract consumed by
+                                      endpoints, registry, handoff, watchdog.
+    Runtime/SessionRuntimeRouter.cs <- hybrid ACP/SDK routing during migration.
+                                      Backend choice is per-session and remains
+                                      stable for later prompt/cancel/detach.
+    Runtime/SessionRuntimeProfile.cs <- complete generic session/process
+                                      configuration. ACP maps it to AcpFlavor;
+                                      the SDK backend consumes it directly.
+    Runtime/Sdk/SdkClientPool.cs    <- lazy Copilot SDK clients keyed by
+                                      client-wide isolation (currently
+                                      CopilotHome/BaseDirectory). Registered
+                                      but unused until the SDK backend is
+                                      selected.
+    Runtime/Sdk/SdkSessionProfileMapper.cs <- typed SDK create/resume config.
+                                      Agency and disable-all-built-in-MCP
+                                      profiles fail explicitly until parity is
+                                      proven.
+    Runtime/Sdk/SdkTurnEventMapper.cs <- stateful one-turn translator from
+                                      typed SDK events to the existing
+                                      StreamEvent SSE contract. session.idle
+                                      is the clean boundary; errors publish one
+                                      error + terminal event.
+    Runtime/Sdk/SdkPermissionBroker.cs <- bridges the SDK permission callback
+                                      into the existing approval endpoint and
+                                      yolo policy. This file alone opts into
+                                      the SDK's GHCP001 experimental permission
+                                      decision types.
+    Runtime/Sdk/SdkSessionRuntime.cs <- opt-in SDK session lifecycle:
+                                      create/resume, prompt serialization,
+                                      abort, detach, lock ownership, stream
+                                      publication, and stall recovery.
     Acp/AcpSessionManager.cs       <- the heart; ACP <-> SSE translation.
                                       Has _inFlight tracking +
                                       WaitForTurnBoundaryAsync used by
                                       AcquireForHostAsync.
+    Acp/AcpSessionManager.Runtime.cs <- explicit adapter from
+                                      IAgentSessionRuntime to the existing ACP
+                                      implementation. Gate 1 of the SDK
+                                      migration; no behavior change.
     Acp/AcpClient.cs               <- one process. Resolves exe full path
                                       (Process.Start launcher-shim fix),
                                       reads settings.json and forwards
@@ -100,7 +135,7 @@ src/
                                       /messages, /interrupt, /approvals
                                       return 409 when host-owned.
     Sessions/SessionScanner.cs     <- discovers Owned/Locked/Dormant sessions
-    Sessions/SessionRegistry.cs    <- composes scanner + ACP + HostOwnership.
+    Sessions/SessionRegistry.cs    <- composes scanner + runtime + HostOwnership.
                                       GetState / AcquireForHostAsync /
                                       ReleaseFromHostAsync.
     Sessions/HostOwnership.cs      <- AUTHORITATIVE in-memory map of
@@ -209,6 +244,78 @@ scripts/test-shim-phase1.sh <- bash acceptance test for the four shim endpoints.
 
 `Magpilot.slnx` (XML solution format) is the solution. There is no
 `.sln`. `dotnet build` / `dotnet test` understand `.slnx`.
+
+### Copilot SDK migration
+
+The Agent references `GitHub.Copilot.SDK` 1.0.14, which pins Copilot runtime
+1.0.85. SDK is the default backend for ordinary sessions. Set
+`MAGPILOT_RUNTIME_BACKEND=acp` for rollback; Agency always remains ACP.
+Backend choice is persisted through terminal handoff in `HostSessionFlavor`.
+
+`SdkClientPool` is lazy. SDK-default Agent startup launches neither SDK nor the
+default ACP child. The SDK runtime starts on the first SDK session; ACP starts
+lazily if rollback or an Agency session needs it.
+
+SDK clients use `CopilotClientMode.CopilotCli` and the supported
+out-of-process stdio transport. Each distinct `CopilotHome` becomes a distinct
+client `BaseDirectory`; model, reasoning, tools, MCP exclusions, agent, and
+working directory remain session-scoped.
+
+ACP and SDK share `Runtime/CopilotHomeLayout.cs`. A custom home must already
+exist, its `session-state` entry must link to the Agent scanner's canonical
+`~/.copilot/session-state`, and an explicitly selected custom agent requires an
+`agents/` directory. Without that shared-state link, SDK sessions would be
+created outside `SessionScanner` and disappear from the HTTP API.
+
+SDK sessions will run with streaming enabled. `SdkTurnEventMapper` maps only
+the streaming message/reasoning deltas and ignores the SDK's final duplicate
+message events. `session.idle` is the authoritative successful turn boundary.
+A session error emits `ErrorEvent` plus exactly one
+`TurnComplete("error")`; the later idle notification is suppressed.
+
+`SdkPermissionBroker` reuses `ApprovalRequired` and the existing
+`/approvals/{id}` resolution surface. Yolo and
+`MAGPILOT_AUTO_APPROVE=true` approve ordinary requests one at a time. Requests
+marked `ManagedApprovalRequired` always go to a user even when yolo is enabled.
+Pending requests fail closed when their session ends or the five-minute
+approval window expires.
+
+Enabling yolo also releases ordinary SDK approvals that are already pending.
+This is load-bearing for parallel tool calls: one permission can enter the
+pending path immediately before the toggle becomes visible while a later
+permission sees yolo and auto-approves. `YoloRegistry.Changed` wakes the
+existing request, and the broker re-checks yolo after registering each pending
+approval to close the change-vs-registration race. Managed approvals are never
+released by this mechanism.
+
+SDK runtime lock files require explicit ownership tracking because
+`CopilotClient` does not expose the spawned runtime PID. After create/resume,
+`SdkSessionRuntime` waits for the session's live lock holder(s) and records
+those PIDs as its own. Handoff checks ignore only those recorded holders; a
+later lock PID remains foreign. Without this, release treated the SDK runtime's
+own lock as a terminal writer and left the session permanently Host-owned.
+
+The SDK package emits `runtime.node` both under its wrapper name and renamed as
+an FFI library for experimental in-process hosting. Magpilot does not use
+in-process hosting, so `Magpilot.Agent.csproj` removes the byte-identical FFI
+alias from build and publish outputs. Set
+`CopilotIncludeInProcessRuntime=true` only if a future implementation actually
+uses `RuntimeConnection.ForInProcess()`.
+
+Packaging measurements from the isolated SDK canary:
+
+- Windows self-contained Agent publish: 228.95 MiB after removing the unused
+  FFI alias (311.94 MiB before).
+- Linux framework-dependent Agent publish: 127.41 MiB.
+- Generic Linux Docker image: 2.11 GB versus 1.89 GB for the deployed
+  ACP-only image, approximately 220 MB additional uncompressed size.
+
+The Linux image was built and run as a separate bridge-network container with
+no published ports and a separate home. Health and an authenticated
+`LINUX-SDK-OK` quick prompt passed using the bundled runtime; process inspection
+showed Agent + `copilot-runtime` and no ACP child. The container, image, source
+checkout, and home were removed after the test. Keep the npm-installed CLI in
+the image while ACP rollback remains supported.
 
 ## Build, run, deploy
 
@@ -448,9 +555,10 @@ and bootstrap hooks.
 | `MAGPILOT_AGENT_NAME` | agent (optional) | Source label used for central log forwarding. Defaults to hostname. |
 | `MAGPILOT_HUB_URL` | agent (optional) | Hub base URL the agent posts forwarded logs to (e.g. `http://192.168.1.239:7088`). Forwarder is a no-op if unset. |
 | `MAGPILOT_HUB_BEARER` | hub + non-cookie clients | Bearer secret the hub validates for API calls without a session cookie (agents, sidecars, curl, MAUI app). Required for `/api/log` ingest from non-SPA sources. **In active use** -- set it. |
-| `MAGPILOT_AUTO_APPROVE` | agent (optional) | When `"true"`, the agent auto-picks an allow-flavored option for every Copilot `session/request_permission` callback (prefers `allow_always`, falls back to `allow_once`, then any "allow" option). Intended for always-on autonomous agents like Magnus where `/quick-prompt` callers (WhatsApp, cron) have no human to click "approve". Without it, permission requests fan out to SSE subscribers that have no UI to answer, and time out after 5 minutes to a deny. **Don't set this on agents that share a host with the user** (e.g. HENDRIK); only on dedicated agent containers where the trust boundary is the container itself. Superseded for granular use by the per-session yolo toggle (see `MAGPILOT_YOLO_DISABLED` below) but still honoured for backward compat. |
+| `MAGPILOT_AUTO_APPROVE` | agent (optional) | When `"true"`, the agent auto-approves ordinary permission requests through the active backend's native decision surface. SDK returns typed approval decisions; ACP fallback selects its advertised allow option. Intended for always-on autonomous agents like Magnus where `/quick-prompt` callers (WhatsApp, cron) have no human to click "approve". Managed-required SDK requests are never auto-approved. **Don't set this on agents that share a host with the user** (e.g. HENDRIK); only on dedicated agent containers where the trust boundary is the container itself. Superseded for granular use by the per-session yolo toggle (see `MAGPILOT_YOLO_DISABLED` below) but still honoured for backward compatibility. |
 | `MAGPILOT_YOLO_DISABLED` | agent (optional) | When `"true"`, the per-session yolo toggle is refused with 403; the SPA greys out the YOLO switch and shows a tooltip explaining why. The legacy `MAGPILOT_AUTO_APPROVE` env var is unaffected (it's a separate code path). Set this on user-account agents like HENDRIK where the agent runs with the user's full permissions and unattended auto-approve would be dangerous; leave unset (default-allow) on dedicated container agents like Magnus. |
-| `MAGPILOT_STALE_RECYCLE` | agent (optional) | When set (`1`/`true`/`yes`/`on`), a resume the agent detects as **stale** (the session's `events.jsonl` grew past what our ACP child last synced -- a foreign process advanced it) triggers a **whole-child recycle**: kill the multiplexing `copilot --acp` child, respawn a fresh one, and `session/load` the session from disk so current state is served. Default off; enable per host after soak. Recycle is refused while any co-hosted session has a turn in flight (never kills a live turn); other co-hosted sessions reload from disk on next use. See the `session/close` ACP gotcha for why in-place reload is impossible. |
+| `MAGPILOT_STALE_RECYCLE` | agent (optional) | ACP-backend recovery only. When set (`1`/`true`/`yes`/`on`), a resume the agent detects as **stale** triggers a whole ACP-child recycle and disk reload. Default off. SDK sessions disconnect/resume through the runtime API and do not use this ACP workaround. |
+| `MAGPILOT_RUNTIME_BACKEND` | agent (optional) | `sdk` (default) or `acp` (rollback). Selects the backend for ordinary create/adopt operations. Agency always routes to ACP. Invalid values fail Agent startup explicitly. Changing the value requires an Agent restart; attached sessions never switch backend in place. |
 | `MAGPILOT_TURN_STALL_SECONDS` | agent (optional) | Stall threshold in seconds (default `90`) for the **turn watchdog** (`Acp/TurnWatchdog.cs`, a `BackgroundService`). An in-flight `PromptAsync` turn that emits no ACP activity (no message chunk, no tool call) for this long is treated as a wedged child (hung model request that never returns and ignores `session/cancel`): the watchdog fails the turn with an `ErrorEvent` so the caller stops spinning, then recycles the ACP child holding it (respawn + `session/load` on the session's own flavor). A live-but-slow turn keeps emitting updates (resetting the clock), and a turn **waiting on a tool it invoked** -- a long shell command or slow MCP call, silent between the tool's `tool_call`/`tool_call_update:completed` events -- is exempt entirely, so neither is ever killed. A co-hosted session with a still-progressing (or tool-waiting) turn also vetoes the recycle. Sweeps every `max(15, threshold/3)`s. Set lower to recover faster, higher if legitimately long first-token latencies trip it. |
 | `MAGPILOT_DEV_BYPASS_AUTH` | hub | When `"true"`, skips OAuth (dev only -- redirects `/login` to `/dev-login`). |
 | `MAGPILOT_HUB_DATA` | hub | Directory for `hub.db` and `logs.db`. Defaults to `./data`. |

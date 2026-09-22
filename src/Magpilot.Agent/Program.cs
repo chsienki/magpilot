@@ -2,6 +2,8 @@ using Magpilot.Agent.Acp;
 using Magpilot.Agent.Api;
 using Magpilot.Agent.Discovery;
 using Magpilot.Agent.Logging;
+using Magpilot.Agent.Runtime;
+using Magpilot.Agent.Runtime.Sdk;
 using Magpilot.Agent.Sessions;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.Extensions.Options;
@@ -36,8 +38,17 @@ if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ASPNETCORE_URLS"))
 builder.Logging.AddProvider(new HubLoggerProvider());
 
 builder.Services.AddSingleton<FlavorCapabilities>();
+builder.Services.AddSingleton(
+    SessionRuntimeBackendOptions.FromEnvironment());
 builder.Services.AddSingleton<AcpFlavorPool>();
 builder.Services.AddSingleton<AcpSessionManager>();
+builder.Services.AddSingleton<SdkClientPool>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<SdkClientPool>());
+builder.Services.AddSingleton<SdkPermissionBroker>();
+builder.Services.AddSingleton<SdkSessionRuntime>();
+builder.Services.AddSingleton<SessionRuntimeRouter>();
+builder.Services.AddSingleton<IAgentSessionRuntime>(
+    sp => sp.GetRequiredService<SessionRuntimeRouter>());
 builder.Services.AddSingleton<SessionScanner>();
 builder.Services.AddSingleton<HostOwnership>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<HostOwnership>());
@@ -153,11 +164,20 @@ internal sealed class BearerHandler(
 internal sealed class AcpStarter(
     AcpFlavorPool pool,
     AcpSessionManager mgr,
+    SessionRuntimeBackendOptions runtimeOptions,
     ILoggerFactory loggerFactory,
     ILogger<AcpStarter> log) : IHostedService
 {
     public async Task StartAsync(CancellationToken ct)
     {
+        if (runtimeOptions.DefaultBackend == SessionRuntimeBackend.Sdk)
+        {
+            log.LogInformation(
+                "Skipping eager default ACP child because the SDK backend is selected; ACP remains available lazily for rollback and Agency sessions.");
+            _ = mgr;
+            return;
+        }
+
         log.LogInformation("Starting default ACP child process...");
         // Eagerly start the default flavor and pre-register it so the pool
         // doesn't try to spawn a duplicate on first use.

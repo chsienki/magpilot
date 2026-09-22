@@ -4,11 +4,11 @@ namespace Magpilot.Agent.Sessions;
 
 /// <summary>
 /// Per-session "yolo mode" flag. When a session is yolo-enabled, the
-/// agent auto-approves every <c>session/request_permission</c> callback
-/// for it (picking an allow-flavored option), the same way the
-/// env-wide <c>MAGPILOT_AUTO_APPROVE=true</c> short-circuits the SSE
-/// approval round-trip -- but scoped to one session that the user
-/// explicitly opted in via the SPA toggle.
+/// agent auto-approves permission callbacks through the active backend's
+/// native decision surface. The env-wide
+/// <c>MAGPILOT_AUTO_APPROVE=true</c> applies the same policy globally; this
+/// registry scopes it to one session that the user explicitly opted in via
+/// the SPA toggle.
 ///
 /// State is in-memory only: not written to <c>workspace.yaml</c>
 /// (the Copilot CLI owns that file), not survived across agent
@@ -27,6 +27,8 @@ public sealed class YoloRegistry
 {
     private readonly ILogger<YoloRegistry> _logger;
     private readonly ConcurrentDictionary<string, byte> _enabled = new();
+
+    public event Action<string, bool>? Changed;
 
     public YoloRegistry(ILogger<YoloRegistry> logger)
     {
@@ -69,10 +71,14 @@ public sealed class YoloRegistry
         {
             _enabled[sessionId] = 0;
             _logger.LogInformation("Yolo ENABLED for session {Sid}", sessionId);
+            Changed?.Invoke(sessionId, true);
             return true;
         }
         if (_enabled.TryRemove(sessionId, out _))
+        {
             _logger.LogInformation("Yolo DISABLED for session {Sid}", sessionId);
+            Changed?.Invoke(sessionId, false);
+        }
         return false;
     }
 
@@ -84,6 +90,9 @@ public sealed class YoloRegistry
     public void Clear(string sessionId)
     {
         if (_enabled.TryRemove(sessionId, out _))
+        {
             _logger.LogDebug("Yolo cleared (lifecycle) for session {Sid}", sessionId);
+            Changed?.Invoke(sessionId, false);
+        }
     }
 }

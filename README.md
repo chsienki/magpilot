@@ -45,11 +45,10 @@ What he wants from his phone:
 ## How (one paragraph)
 
 A small **per-host agent** daemon runs on each computer. It speaks
-the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/)
-to a single `copilot --acp --port <N>` child, which gives us
-JSON-RPC access to the full Copilot CLI agent — first-class
-sessions, structured streaming, real per-tool approvals. The agent
-exposes a tiny HTTP+SSE API to the LAN.
+the public GitHub Copilot SDK to the native Copilot runtime, which gives us
+first-class sessions, structured streaming, typed tool permissions, and
+resumable state. ACP remains an explicit rollback path and powers the Agency
+flavor. The agent exposes a tiny HTTP+SSE API to the LAN.
 
 A central **hub** daemon runs on the docker LXC. It auto-discovers
 agents via UDP broadcast, aggregates their sessions, proxies
@@ -70,7 +69,7 @@ codebase** (MAUI Blazor Hybrid):
 
 | Name              | What                                                     | Where it runs              |
 |-------------------|----------------------------------------------------------|----------------------------|
-| `Magpilot.Agent`  | ACP-to-HTTP/SSE adapter, one per machine                 | HENDRIK, Linux container, etc. |
+| `Magpilot.Agent`  | Copilot SDK/ACP runtime adapter, one per machine         | HENDRIK, Linux container, etc. |
 | `Magpilot.Hub`    | Aggregator, discovery, OAuth, central log, serves the web SPA | docker LXC (CT 102)   |
 | `Magpilot.UI`     | Shared Blazor UI library (chat, sessions, theme)         | Future MAUI WebView + browser |
 | `Magpilot.Web`    | Blazor WASM shell for browsers                           | Browser, served by hub     |
@@ -81,7 +80,7 @@ codebase** (MAUI Blazor Hybrid):
 **Live since 2026-04** at `https://magpilot.home.sienkiewi.cz`. The hub
 runs on a docker LXC (CT 102), agents on each host (HENDRIK + a Linux
 container called `magnus`). Day-to-day usage covers chatting from any
-browser, hopping between Owned / Locked / Dormant sessions, full ACP
+browser, hopping between Owned / Locked / Dormant sessions, full SDK
 tool-call streaming, central log viewer at `/admin/logs`. As of
 2026-05-14, **GitHub OAuth** is wired (allowlisted username); the
 **`magpilot` launcher** ships a coordinated `copilot` shim that
@@ -94,7 +93,8 @@ editor. The **Windows installer** + autoupdate path
 check) is in place; HENDRIK runs the agent as a scheduled task at user logon.
 The hub's Agents page reports each machine's running/update version and can
 force an immediate hub + agent update check without remotely installing
-anything.
+anything. The Agent uses the Copilot SDK runtime by default; set
+`MAGPILOT_RUNTIME_BACKEND=acp` for rollback. Agency sessions remain on ACP.
 
 What is **NOT yet wired**: the MAUI Android shell (the original phone
 target), real FCM/Web Push delivery, TLS for hub<->agents (still LAN +
@@ -114,7 +114,7 @@ magpilot/
    scripts/test-shim-phase1.sh <- bash acceptance test for the shim endpoints
    src/
       Magpilot.Shared/      <- DTOs, SSE event types (incl. shim contract)
-      Magpilot.Agent/       <- per-host daemon (ACP wrapper + HTTP/SSE API
+      Magpilot.Agent/       <- per-host daemon (SDK/ACP runtime + HTTP/SSE API
                                 + HostOwnership for the cooperative handoff)
       Magpilot.Hub/         <- central daemon (proxy, OAuth, SPA host,
                                 central /api/log sink + viewer)

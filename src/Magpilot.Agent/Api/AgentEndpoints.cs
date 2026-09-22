@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Magpilot.Agent.Acp;
+using Magpilot.Agent.Runtime;
 using Magpilot.Agent.Sessions;
 using Magpilot.Agent.Update;
 using Magpilot.Shared;
@@ -102,7 +103,11 @@ public static class AgentEndpoints
             return Results.Ok(reader.ReadTail(id, tail ?? 50));
         });
 
-        api.MapPost("/sessions", async (NewSessionRequest req, SessionRegistry reg, AcpSessionManager acp, CancellationToken ct) =>
+        api.MapPost("/sessions", async (
+            NewSessionRequest req,
+            SessionRegistry reg,
+            IAgentSessionRuntime runtime,
+            CancellationToken ct) =>
         {
             SessionInfo info;
             try
@@ -122,7 +127,7 @@ public static class AgentEndpoints
                     copilotHome: req.CopilotHome);
             }
             catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
-            catch (SessionConfigurationException ex)
+            catch (SessionRuntimeConfigurationException ex)
             {
                 return Results.Json(
                     new
@@ -139,7 +144,10 @@ public static class AgentEndpoints
             // stream to watch it run, or hand the user off to the SPA.
             if (!string.IsNullOrEmpty(req.InitialPrompt))
             {
-                _ = Task.Run(() => acp.PromptAsync(info.Id, req.InitialPrompt, CancellationToken.None));
+                _ = Task.Run(() => runtime.PromptAsync(
+                    info.Id,
+                    req.InitialPrompt,
+                    CancellationToken.None));
             }
 
             return Results.Ok(info);
@@ -150,7 +158,9 @@ public static class AgentEndpoints
         // completes, and returns the result as a single JSON response. External
         // clients can use this without having to consume the SSE wire format.
         api.MapPost("/quick-prompt", async (
-            QuickPromptRequest req, SessionRegistry reg, AcpSessionManager acp,
+            QuickPromptRequest req,
+            SessionRegistry reg,
+            IAgentSessionRuntime runtime,
             ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
             if (req.Prompt is null)
@@ -171,7 +181,7 @@ public static class AgentEndpoints
                 {
                     await reg.AdoptAsync(req.SessionId, force: false, cts.Token);
                 }
-                catch (SessionConfigurationException ex)
+                catch (SessionRuntimeConfigurationException ex)
                 {
                     return Results.Json(
                         new
@@ -239,7 +249,7 @@ public static class AgentEndpoints
                 // PromptAsync publishes the tagged UserDelta instead, so skip
                 // this to avoid a double render.
                 if (string.IsNullOrEmpty(req.Source))
-                    acp.PublishToSubscribers(sid, new UserDelta(req.Prompt));
+                    runtime.PublishToSubscribers(sid, new UserDelta(req.Prompt));
             }
             else
             {
@@ -248,7 +258,7 @@ public static class AgentEndpoints
                 {
                     info = await reg.CreateAsync(req.Cwd, useAgency: false, cts.Token);
                 }
-                catch (SessionConfigurationException ex)
+                catch (SessionRuntimeConfigurationException ex)
                 {
                     return Results.Json(
                         new
@@ -277,14 +287,14 @@ public static class AgentEndpoints
             }
 
             // Subscribe BEFORE sending the prompt so we don't race the first delta.
-            var reader = acp.Subscribe(sid);
+            var reader = runtime.Subscribe(sid);
             var responseText = new System.Text.StringBuilder();
             var stopReason = "unknown";
             string? errorMessage = null;
             try
             {
                 // Fire the prompt; PromptAsync resolves when the turn ends.
-                _ = await acp.StartPromptAsync(
+                _ = await runtime.StartPromptAsync(
                     sid,
                     req.Prompt,
                     cts.Token,
@@ -319,7 +329,7 @@ public static class AgentEndpoints
             }
             finally
             {
-                acp.Unsubscribe(sid, reader);
+                runtime.Unsubscribe(sid, reader);
                 // Only detach when we created an ephemeral session AND the caller
                 // didn't ask us to keep it. Pinned sessions (SessionId set) are
                 // owned by the caller; we never tear them down.
@@ -359,7 +369,7 @@ public static class AgentEndpoints
                 return Results.Ok(info);
             }
             catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
-            catch (SessionConfigurationException ex)
+            catch (SessionRuntimeConfigurationException ex)
             {
                 return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status502BadGateway);
             }
@@ -405,7 +415,11 @@ public static class AgentEndpoints
             return state is null ? Results.NotFound(new { error = $"Session {id} not on disk" }) : Results.Ok(state);
         });
 
-        api.MapPost("/sessions/{id}/release-request", (string id, ReleaseRequestBody body, SessionRegistry reg, AcpSessionManager acp) =>
+        api.MapPost("/sessions/{id}/release-request", (
+            string id,
+            ReleaseRequestBody body,
+            SessionRegistry reg,
+            IAgentSessionRuntime runtime) =>
         {
             // Verify the session exists, then broadcast the ReleaseRequested
             // event on its SSE stream so any subscribed magpilot launcher can
@@ -413,7 +427,7 @@ public static class AgentEndpoints
             // session (or no host is subscribed), the event is a no-op.
             if (reg.Get(id) is null)
                 return Results.NotFound(new { error = $"Session {id} not on disk" });
-            acp.PublishToSubscribers(id, new ReleaseRequested(body.Requester, body.Force));
+            runtime.PublishToSubscribers(id, new ReleaseRequested(body.Requester, body.Force));
             return Results.Accepted();
         });
 
@@ -470,7 +484,7 @@ public static class AgentEndpoints
         api.MapPost("/sessions/{id}/messages", async (
             string id,
             PromptRequest req,
-            AcpSessionManager acp,
+            IAgentSessionRuntime runtime,
             HostOwnership hostOwn,
             CancellationToken ct) =>
         {
@@ -498,7 +512,7 @@ public static class AgentEndpoints
             // configuration the agent did not promise. Refuse synchronously rather
             // than accept the turn and fail it asynchronously; re-adopting with the
             // intended model/reasoning clears the quarantine.
-            if (acp.IsQuarantined(id))
+            if (runtime.IsQuarantined(id))
                 return Results.Conflict(new
                 {
                     error = $"Session {id} is quarantined: its ACP session configuration could not be " +
@@ -506,7 +520,7 @@ public static class AgentEndpoints
                     needsReadopt = true,
                 });
 
-            if (!acp.IsAttached(id))
+            if (!runtime.IsAttached(id))
                 return Results.Conflict(new
                 {
                     error = $"Session {id} is not attached to an ACP child. Re-adopt it before prompting.",
@@ -519,7 +533,7 @@ public static class AgentEndpoints
                 // detach and shared-child recycle. Returning 202 now means the
                 // prompt is actually in flight; a route cannot disappear between
                 // this check and the background call starting.
-                _ = await acp.StartPromptAsync(
+                _ = await runtime.StartPromptAsync(
                     id,
                     req.Text,
                     ct,
@@ -534,7 +548,11 @@ public static class AgentEndpoints
             }
         });
 
-        api.MapPost("/sessions/{id}/interrupt", async (string id, AcpSessionManager acp, HostOwnership hostOwn, CancellationToken ct) =>
+        api.MapPost("/sessions/{id}/interrupt", async (
+            string id,
+            IAgentSessionRuntime runtime,
+            HostOwnership hostOwn,
+            CancellationToken ct) =>
         {
             if (hostOwn.TryGet(id, out var entry))
                 return Results.Conflict(new HostOwnedResponse(
@@ -542,11 +560,16 @@ public static class AgentEndpoints
                     NeedsRelease: true,
                     HostPid: entry.HostPid));
 
-            await acp.CancelAsync(id, ct);
+            await runtime.CancelAsync(id, ct);
             return Results.NoContent();
         });
 
-        api.MapPost("/sessions/{id}/approvals/{approvalId}", (string id, string approvalId, ApprovalResponse resp, AcpSessionManager acp, HostOwnership hostOwn) =>
+        api.MapPost("/sessions/{id}/approvals/{approvalId}", (
+            string id,
+            string approvalId,
+            ApprovalResponse resp,
+            IAgentSessionRuntime runtime,
+            HostOwnership hostOwn) =>
         {
             if (hostOwn.TryGet(id, out var entry))
                 return Results.Conflict(new HostOwnedResponse(
@@ -554,11 +577,16 @@ public static class AgentEndpoints
                     NeedsRelease: true,
                     HostPid: entry.HostPid));
 
-            var ok = acp.ResolveApproval(approvalId, resp.OptionId);
+            var ok = runtime.ResolveApproval(approvalId, resp.OptionId);
             return ok ? Results.NoContent() : Results.NotFound();
         });
 
-        api.MapGet("/sessions/{id}/stream", async (string id, AcpSessionManager acp, SessionRegistry reg, HttpContext ctx, CancellationToken ct) =>
+        api.MapGet("/sessions/{id}/stream", async (
+            string id,
+            IAgentSessionRuntime runtime,
+            SessionRegistry reg,
+            HttpContext ctx,
+            CancellationToken ct) =>
         {
             ctx.Response.Headers.ContentType = "text/event-stream";
             ctx.Response.Headers.CacheControl = "no-cache";
@@ -570,7 +598,7 @@ public static class AgentEndpoints
             var outbound = System.Threading.Channels.Channel.CreateUnbounded<StreamEvent>(
                 new System.Threading.Channels.UnboundedChannelOptions { SingleReader = true });
 
-            var reader = acp.Subscribe(id);
+            var reader = runtime.Subscribe(id);
 
             // Commit response headers immediately so the client's fetch promise
             // resolves before the first heartbeat.
@@ -634,7 +662,7 @@ public static class AgentEndpoints
             catch (OperationCanceledException) { }
             finally
             {
-                acp.Unsubscribe(id, reader);
+                runtime.Unsubscribe(id, reader);
             }
         });
     }
