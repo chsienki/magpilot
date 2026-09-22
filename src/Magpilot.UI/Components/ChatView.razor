@@ -168,6 +168,10 @@
     </div>
 
     <MudPaper Elevation="0" Square="true" Class="composer-mud pa-2">
+        @if (ShowComposerToolbar && ComposerToolbarContent is not null)
+        {
+            <div class="composer-toolbar-content">@ComposerToolbarContent</div>
+        }
         @if (QueuedMessages is { Count: > 0 })
         {
             <div class="composer-queue mb-1">
@@ -237,6 +241,12 @@
     /// <summary>Optional content rendered at the start of the composer row, before the
     /// text field (e.g. a microphone / voice-input button).</summary>
     [Parameter] public RenderFragment? ComposerLeadingContent { get; set; }
+
+    /// <summary>Optional controls rendered directly above the composer row.</summary>
+    [Parameter] public RenderFragment? ComposerToolbarContent { get; set; }
+
+    /// <summary>Whether <see cref="ComposerToolbarContent"/> is visible.</summary>
+    [Parameter] public bool ShowComposerToolbar { get; set; } = true;
 
     /// <summary>
     /// True while a turn is in flight. Swaps the Send icon for a

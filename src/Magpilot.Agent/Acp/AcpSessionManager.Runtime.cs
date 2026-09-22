@@ -9,6 +9,29 @@ public sealed partial class AcpSessionManager
     SessionRuntimeProfile? IAgentSessionRuntime.EffectiveProfile(string sessionId) =>
         EffectiveFlavor(sessionId)?.ToRuntimeProfile();
 
+    SessionRuntimeStatus? IAgentSessionRuntime.RuntimeStatus(string sessionId)
+    {
+        var profile = EffectiveFlavor(sessionId)?.ToRuntimeProfile();
+        return profile is null
+            ? null
+            : new SessionRuntimeStatus(
+                "acp",
+                profile.Model,
+                profile.Model,
+                profile.ReasoningEffort,
+                CurrentTokens: null,
+                TokenLimit: null,
+                AiCreditsUsed: null,
+                CanEditModel: false,
+                DateTimeOffset.UtcNow);
+    }
+
+    Task<IReadOnlyList<SessionModelOption>>
+        IAgentSessionRuntime.ListModelOptionsAsync(
+            string sessionId,
+            CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<SessionModelOption>>([]);
+
     bool IAgentSessionRuntime.IsTurnInFlight(
         string sessionId,
         out SessionInFlightEntry entry)

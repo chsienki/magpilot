@@ -6,6 +6,7 @@
 @inject NavigationManager Nav
 @inject IJSRuntime JS
 @inject ILogger<Home> Log
+@inject IDialogService DialogService
 @implements IAsyncDisposable
 @using System.Collections.ObjectModel
 @using System.Text.Json
@@ -648,6 +649,9 @@
                 <MudSwitch T="bool" Color="Color.Primary" Size="Size.Small"
                            Value="_showThoughts" ValueChanged="@SetShowThoughts"
                            Label="Show thinking" />
+                <MudSwitch T="bool" Color="Color.Primary" Size="Size.Small"
+                           Value="_showSessionInfo" ValueChanged="@SetShowSessionInfo"
+                           Label="Show session info" Class="ml-3" />
                 @{
                     var yoloDisabledOnHost = _yoloDisabledHosts.Contains(Agent ?? "");
                     var currentYolo = _sessions?.FirstOrDefault(s => s.Id == SessionId)?.Yolo == true;
@@ -660,7 +664,7 @@
                                Label="YOLO" Class="ml-3" />
                 </MudTooltip>
                 <MudSpacer />
-                <MudTooltip Text="Release this session. Drops the agent's ACP copy back to Dormant; reopening adopts it again. Use this to free the agent's slot or before driving the session from a terminal."
+                <MudTooltip Text="Release this session. Drops the agent's runtime copy back to Dormant; reopening adopts it again. Use this to free the agent's slot or before driving the session from a terminal."
                             Placement="Placement.Bottom">
                     <MudIconButton Icon="@Icons.Material.Filled.Logout" Size="Size.Small"
                                    Color="Color.Default"
@@ -798,7 +802,14 @@
                       DraftText="@_currentDraft"
                       SessionKey="@_streamingFor"
                       OnDraftChanged="HandleDraftChanged"
-                      OnApproval="HandleApproval" />
+                      OnApproval="HandleApproval"
+                      ShowComposerToolbar="_showSessionInfo">
+                <ComposerToolbarContent>
+                    <SessionStatusBar Status="_runtimeStatus"
+                                      CanEdit="@CanEditRuntimeStatus"
+                                      EditRequested="OpenModelSettingsAsync" />
+                </ComposerToolbarContent>
+            </ChatView>
         }
         else
         {
@@ -845,6 +856,8 @@
     private ApprovalRequired? _pendingApproval;
     private CancellationTokenSource? _streamCts;
     private bool _busy;
+    private bool _modelSettingsBusy;
+    private SessionRuntimeStatus? _runtimeStatus;
     private bool _loading;
     // Set true when OnParametersSetAsync detects a session switch, cleared
     // by StartStreamingAsync once the new session's content is ready to
@@ -1083,7 +1096,9 @@
     // session and refreshed on every Apply() while viewing it.
     private readonly Dictionary<string, List<ChatMessage>> _msgCache = new();
     private bool _showThoughts = true;
+    private bool _showSessionInfo = true;
     private const string ShowThoughtsKey = "magpilot.showThoughts";
+    private const string ShowSessionInfoKey = "magpilot.showSessionInfo";
 
     protected override async Task OnInitializedAsync()
     {
@@ -1116,6 +1131,14 @@
             if (stored is not null) _showThoughts = stored == "true";
         }
         catch { }
+        try
+        {
+            var stored = await JS.InvokeAsync<string?>(
+                "localStorage.getItem",
+                ShowSessionInfoKey);
+            if (stored is not null) _showSessionInfo = stored == "true";
+        }
+        catch { }
     }
 
     private async Task ToggleShowThoughts(ChangeEventArgs e)
@@ -1129,6 +1152,19 @@
     {
         _showThoughts = value;
         try { await JS.InvokeVoidAsync("localStorage.setItem", ShowThoughtsKey, value ? "true" : "false"); }
+        catch { }
+    }
+
+    private async Task SetShowSessionInfo(bool value)
+    {
+        _showSessionInfo = value;
+        try
+        {
+            await JS.InvokeVoidAsync(
+                "localStorage.setItem",
+                ShowSessionInfoKey,
+                value ? "true" : "false");
+        }
         catch { }
     }
 
@@ -1515,6 +1551,7 @@
             _hostTakeoverRequester = null;
             _hostTakeoverPid = null;
             _takeBackNeedsForce = false;
+            _runtimeStatus = null;
 
             var info = _sessions?.FirstOrDefault(s => s.Id == SessionId);
 
@@ -1540,6 +1577,7 @@
                     && probedSid == SessionId
                     && state is not null)
                 {
+                    _runtimeStatus = state.RuntimeStatus;
                     if (state.Owner == SessionOwner.Host)
                     {
                         _hostHasTakenOver = true;
@@ -1618,6 +1656,7 @@
                 var fromDisk = await TryLoadTailHistoryAsync(50);
                 await StartStreamingAsync(load: true, force: false, restoreFrom: fromDisk);
             }
+            await RefreshRuntimeStatusAsync(Agent!, SessionId!);
 
             // Restore the in-flight indicator if the agent reported a turn
             // running when we probed /state above. The live stream refines
@@ -2532,6 +2571,8 @@
                 // so the sidebar entry + AppBar title pick up the new
                 // metadata without the user having to do anything.
                 _ = InvokeAsync(RefreshSessionsSilentAsync);
+                if (Agent is not null && SessionId is not null)
+                    _ = RefreshRuntimeStatusAsync(Agent, SessionId);
                 // Drain the queue FIFO so the next typed-while-busy
                 // message fires automatically without the user having
                 // to click anything. Each drained message starts a
@@ -3042,6 +3083,7 @@
             try { state = await Hub.GetStateAsync(agent, sid); }
             catch (Exception ex) { Log.LogTrace("[stream] reconnect /state failed: {Msg}", ex.Message); }
             if (_disposed || _streamingFor != $"{agent}/{sid}") return; // navigated away mid-await
+            _runtimeStatus = state?.RuntimeStatus;
 
             // A launcher may have acquired the session while we were gone.
             if (state is { Owner: SessionOwner.Host })
@@ -3199,6 +3241,118 @@
             }
         }
         finally { _healthTicking = false; }
+    }
+
+    private bool CanEditRuntimeStatus =>
+        _runtimeStatus?.CanEditModel == true
+        && !_busy
+        && !_loading
+        && !_switchingSession
+        && !_modelSettingsBusy
+        && !_hostHasTakenOver
+        && _streamStatus == StreamStatus.Connected;
+
+    private async Task RefreshRuntimeStatusAsync(
+        string agent,
+        string sessionId)
+    {
+        try
+        {
+            var state = await Hub.GetStateAsync(agent, sessionId);
+            if (_disposed
+                || !string.Equals(agent, Agent, StringComparison.OrdinalIgnoreCase)
+                || sessionId != SessionId)
+            {
+                return;
+            }
+
+            _runtimeStatus = state?.RuntimeStatus;
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            Log.LogTrace(
+                "Runtime status refresh for {Agent}/{SessionId} failed: {Message}",
+                agent,
+                sessionId,
+                ex.Message);
+        }
+    }
+
+    private async Task OpenModelSettingsAsync()
+    {
+        if (!CanEditRuntimeStatus
+            || Agent is null
+            || SessionId is null
+            || _runtimeStatus is null)
+        {
+            return;
+        }
+
+        var agent = Agent;
+        var sessionId = SessionId;
+        _modelSettingsBusy = true;
+        try
+        {
+            var options = await Hub.GetModelOptionsAsync(agent, sessionId);
+            if (options.Count == 0)
+            {
+                Snackbar.Add(
+                    "The current runtime did not advertise any model options.",
+                    Severity.Warning);
+                return;
+            }
+
+            var parameters = new DialogParameters<SessionModelDialog>
+            {
+                { dialog => dialog.Options, options },
+                { dialog => dialog.CurrentModel, _runtimeStatus.ModelId },
+                { dialog => dialog.CurrentReasoning, _runtimeStatus.ReasoningEffort },
+            };
+            var dialog = await DialogService.ShowAsync<SessionModelDialog>(
+                "Session model",
+                parameters,
+                new DialogOptions
+                {
+                    CloseButton = true,
+                    MaxWidth = MaxWidth.Small,
+                    FullWidth = true,
+                });
+            var result = await dialog.Result;
+            if (result is not { Canceled: false, Data: SessionModelUpdateRequest update })
+                return;
+
+            var state = await Hub.UpdateModelAsync(
+                agent,
+                sessionId,
+                update.Model,
+                update.ReasoningEffort);
+            if (!string.Equals(agent, Agent, StringComparison.OrdinalIgnoreCase)
+                || sessionId != SessionId)
+            {
+                return;
+            }
+
+            _runtimeStatus = state.RuntimeStatus;
+            Snackbar.Add(
+                $"Model changed to {_runtimeStatus?.ModelName ?? update.Model}.",
+                Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            HubLog.LogError(
+                $"Session model update failed: {ex.Message}",
+                ex.ToString(),
+                category: nameof(Home),
+                sessionId: sessionId,
+                extra: new { agent });
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _modelSettingsBusy = false;
+            await InvokeAsync(StateHasChanged);
+        }
     }
 
     private string StreamStatusTooltip() => _streamStatus switch

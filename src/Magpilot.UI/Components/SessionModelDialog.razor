@@ -1,0 +1,117 @@
+<MudDialog>
+    <DialogContent>
+        <MudStack Spacing="3">
+            <MudSelect T="string"
+                       Label="Model"
+                       Value="_model"
+                       ValueChanged="OnModelChanged"
+                       Variant="Variant.Outlined"
+                       Dense="true">
+                @foreach (var option in Options)
+                {
+                    <MudSelectItem T="string" Value="@option.Id">
+                        @option.Name
+                    </MudSelectItem>
+                }
+            </MudSelect>
+
+            <MudSelect T="string"
+                       Label="Reasoning"
+                       Value="_reasoning"
+                       ValueChanged="@((string value) => _reasoning = value)"
+                       Variant="Variant.Outlined"
+                       Dense="true"
+                       Disabled="@(Selected?.SupportedReasoningEfforts.Count == 0)">
+                @if (Selected?.SupportedReasoningEfforts.Count > 0)
+                {
+                    @foreach (var effort in Selected.SupportedReasoningEfforts)
+                    {
+                        <MudSelectItem T="string" Value="@effort">
+                            @effort
+                        </MudSelectItem>
+                    }
+                }
+                else
+                {
+                    <MudSelectItem T="string" Value="@("")">
+                        Not configurable
+                    </MudSelectItem>
+                }
+            </MudSelect>
+
+            <MudText Typo="Typo.caption" Color="Color.Default">
+                Model and reasoning changes apply to the next turn. Conversation history is preserved.
+            </MudText>
+        </MudStack>
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Cancel">Cancel</MudButton>
+        <MudButton Color="Color.Primary"
+                   Variant="Variant.Filled"
+                   Disabled="@(Selected is null)"
+                   OnClick="Apply">
+            Apply
+        </MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] private IMudDialogInstance Dialog { get; set; } = null!;
+    [Parameter] public IReadOnlyList<SessionModelOption> Options { get; set; } = [];
+    [Parameter] public string? CurrentModel { get; set; }
+    [Parameter] public string? CurrentReasoning { get; set; }
+
+    private string? _model;
+    private string _reasoning = "";
+
+    private SessionModelOption? Selected =>
+        Options.FirstOrDefault(option =>
+            string.Equals(option.Id, _model, StringComparison.OrdinalIgnoreCase));
+
+    protected override void OnParametersSet()
+    {
+        _model ??= Options.FirstOrDefault(option =>
+                string.Equals(
+                    option.Id,
+                    CurrentModel,
+                    StringComparison.OrdinalIgnoreCase))
+            ?.Id
+            ?? Options.FirstOrDefault()?.Id;
+        ResolveReasoning();
+    }
+
+    private void OnModelChanged(string value)
+    {
+        _model = value;
+        ResolveReasoning();
+    }
+
+    private void ResolveReasoning()
+    {
+        if (Selected is not { } selected)
+        {
+            _reasoning = "";
+            return;
+        }
+
+        _reasoning = selected.SupportedReasoningEfforts.FirstOrDefault(effort =>
+                string.Equals(
+                    effort,
+                    CurrentReasoning,
+                    StringComparison.OrdinalIgnoreCase))
+            ?? selected.DefaultReasoningEffort
+            ?? "";
+    }
+
+    private void Cancel() => Dialog.Cancel();
+
+    private void Apply()
+    {
+        if (Selected is not { } selected)
+            return;
+
+        Dialog.Close(DialogResult.Ok(new SessionModelUpdateRequest(
+            selected.Id,
+            string.IsNullOrWhiteSpace(_reasoning) ? null : _reasoning)));
+    }
+}

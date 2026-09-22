@@ -415,6 +415,73 @@ public static class AgentEndpoints
             return state is null ? Results.NotFound(new { error = $"Session {id} not on disk" }) : Results.Ok(state);
         });
 
+        api.MapGet("/sessions/{id}/model-options", async (
+            string id,
+            SessionRegistry reg,
+            CancellationToken ct) =>
+        {
+            try
+            {
+                return Results.Ok(await reg.ListModelOptionsAsync(id, ct));
+            }
+            catch (FileNotFoundException ex)
+            {
+                return Results.NotFound(new { error = ex.Message });
+            }
+            catch (SessionModelUpdateException ex)
+            {
+                return Results.Json(
+                    new { error = ex.Message },
+                    statusCode: StatusCodes.Status422UnprocessableEntity);
+            }
+            catch (SessionRuntimeConfigurationException ex)
+            {
+                return Results.Json(
+                    new { error = ex.Message },
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.Conflict(new { error = ex.Message });
+            }
+        });
+
+        api.MapPost("/sessions/{id}/model", async (
+            string id,
+            SessionModelUpdateRequest body,
+            SessionRegistry reg,
+            CancellationToken ct) =>
+        {
+            try
+            {
+                return Results.Ok(await reg.UpdateModelAsync(id, body, ct));
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+            catch (FileNotFoundException ex)
+            {
+                return Results.NotFound(new { error = ex.Message });
+            }
+            catch (SessionModelUpdateException ex)
+            {
+                return Results.Json(
+                    new { error = ex.Message },
+                    statusCode: StatusCodes.Status422UnprocessableEntity);
+            }
+            catch (SessionRuntimeConfigurationException ex)
+            {
+                return Results.Json(
+                    new { error = ex.Message },
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.Conflict(new { error = ex.Message });
+            }
+        });
+
         api.MapPost("/sessions/{id}/release-request", (
             string id,
             ReleaseRequestBody body,

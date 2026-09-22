@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Magpilot.Agent.Runtime;
 
 namespace Magpilot.Agent.Sessions;
 
@@ -24,29 +25,62 @@ namespace Magpilot.Agent.Sessions;
 /// robustness. The <c>HostOwnership</c> PID-liveness sweep still evicts the
 /// entry when the launcher exits.</para>
 /// </summary>
-public sealed class HostOwnershipReconciler(
-    SessionScanner scanner,
-    HostOwnership hostOwnership,
-    ILogger<HostOwnershipReconciler> logger,
-    IConfiguration config) : BackgroundService
+public sealed class HostOwnershipReconciler : BackgroundService
 {
-    private readonly TimeSpan _interval =
-        TimeSpan.FromSeconds(config.GetValue("Agent:HostOwnershipReconcileSec", 60));
+    private readonly SessionScanner _scanner;
+    private readonly HostOwnership _hostOwnership;
+    private readonly ILogger<HostOwnershipReconciler> _logger;
+    private readonly Func<string, bool> _isRuntimeResident;
+    private readonly Func<int, (bool Found, int LauncherPid)> _findLauncher;
+    private readonly TimeSpan _interval;
+
+    public HostOwnershipReconciler(
+        SessionScanner scanner,
+        HostOwnership hostOwnership,
+        ILogger<HostOwnershipReconciler> logger,
+        IConfiguration config,
+        IAgentSessionRuntime runtime)
+        : this(
+            scanner,
+            hostOwnership,
+            logger,
+            config,
+            runtime.IsResident,
+            FindLauncher)
+    {
+    }
+
+    internal HostOwnershipReconciler(
+        SessionScanner scanner,
+        HostOwnership hostOwnership,
+        ILogger<HostOwnershipReconciler> logger,
+        IConfiguration config,
+        Func<string, bool> isRuntimeResident,
+        Func<int, (bool Found, int LauncherPid)> findLauncher)
+    {
+        _scanner = scanner;
+        _hostOwnership = hostOwnership;
+        _logger = logger;
+        _isRuntimeResident = isRuntimeResident;
+        _findLauncher = findLauncher;
+        _interval = TimeSpan.FromSeconds(
+            config.GetValue("Agent:HostOwnershipReconcileSec", 60));
+    }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)
         {
             try { Reconcile(); }
-            catch (Exception ex) { logger.LogWarning(ex, "Host-ownership reconcile failed"); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Host-ownership reconcile failed"); }
             try { await Task.Delay(_interval, stoppingToken); }
             catch (OperationCanceledException) { break; }
         }
     }
 
-    private void Reconcile()
+    internal void Reconcile()
     {
-        var root = scanner.Root;
+        var root = _scanner.Root;
         if (!Directory.Exists(root)) return;
 
         foreach (var dir in Directory.EnumerateDirectories(root))
@@ -58,11 +92,17 @@ public sealed class HostOwnershipReconciler(
             // so dead holders don't accumulate or later masquerade as a live
             // contention signal.
             SessionLocks.ReapDead(dir, f =>
-                logger.LogInformation("Reaped stale session lock {File} (owner process gone)", f));
+                _logger.LogInformation("Reaped stale session lock {File} (owner process gone)", f));
 
             // Already host-owned (persisted map, or a prior reconcile). TryGet
             // also prunes the entry if its holder has since died.
-            if (hostOwnership.TryGet(sid, out _)) continue;
+            if (_hostOwnership.TryGet(sid, out _)) continue;
+
+            // A runtime-owned lock can still have a magpilot ancestor in
+            // development, where Magpilot.Agent is launched from a terminal
+            // session. Runtime residency is authoritative; never reinterpret
+            // the active agent's own session as terminal-owned.
+            if (_isRuntimeResident(sid)) continue;
 
             var lockFile = SafeFirstLock(dir);
             if (lockFile is null) continue;
@@ -72,15 +112,24 @@ public sealed class HostOwnershipReconciler(
             // agent's own `copilot --acp` child is parented under
             // Magpilot.Agent, and a bare terminal copilot under a shell, so
             // neither false-matches here.
-            if (ProcessAncestry.TryFindAncestorPidByName(lockPid, "magpilot", out var launcherPid))
+            var (found, launcherPid) = _findLauncher(lockPid);
+            if (found)
             {
-                hostOwnership.Set(sid, launcherPid);
-                logger.LogInformation(
+                _hostOwnership.Set(sid, launcherPid);
+                _logger.LogInformation(
                     "Reconciled host ownership via process ancestry: sid={Sid} launcher={LauncherPid} copilot={LockPid}",
                     sid, launcherPid, lockPid);
             }
         }
     }
+
+    private static (bool Found, int LauncherPid) FindLauncher(int lockPid) =>
+        ProcessAncestry.TryFindAncestorPidByName(
+            lockPid,
+            "magpilot",
+            out var launcherPid)
+            ? (true, launcherPid)
+            : (false, 0);
 
     private static string? SafeFirstLock(string dir)
     {

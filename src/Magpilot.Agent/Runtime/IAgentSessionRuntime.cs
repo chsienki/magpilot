@@ -24,6 +24,10 @@ public interface IAgentSessionRuntime
     bool IsAttached(string sessionId);
     bool IsResident(string sessionId);
     SessionRuntimeProfile? EffectiveProfile(string sessionId);
+    SessionRuntimeStatus? RuntimeStatus(string sessionId);
+    Task<IReadOnlyList<SessionModelOption>> ListModelOptionsAsync(
+        string sessionId,
+        CancellationToken ct);
     bool IsTurnInFlight(string sessionId, out SessionInFlightEntry entry);
     Task WaitForTurnBoundaryAsync(string sessionId, CancellationToken ct);
     Task BeginSessionDrainAsync(string sessionId, CancellationToken ct);

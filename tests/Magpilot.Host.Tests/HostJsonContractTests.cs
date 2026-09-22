@@ -66,7 +66,18 @@ public class HostJsonContractTests
           "hostPid": 999,
           "activity": "InFlight",
           "inFlight": { "driver": "spa", "startedAtMs": 100, "preview": "hi" },
-          "lastEvent": { "type": "assistant_delta", "id": "e1", "timestamp": null }
+          "lastEvent": { "type": "assistant_delta", "id": "e1", "timestamp": null },
+          "runtimeStatus": {
+            "backend": "sdk",
+            "modelId": "model-1",
+            "modelName": "Model One",
+            "reasoningEffort": "high",
+            "currentTokens": 250,
+            "tokenLimit": 1000,
+            "aiCreditsUsed": 0.125,
+            "canEditModel": true,
+            "updatedAt": "2026-09-19T00:00:00Z"
+          }
         }
         """;
 
@@ -80,6 +91,9 @@ public class HostJsonContractTests
         Assert.Equal(SessionActivity.InFlight, state.Activity);
         Assert.Equal("spa", state.InFlight!.Driver);
         Assert.Equal("assistant_delta", state.LastEvent!.Type);
+        Assert.Equal("Model One", state.RuntimeStatus!.ModelName);
+        Assert.Equal(0.125, state.RuntimeStatus.AiCreditsUsed);
+        Assert.True(state.RuntimeStatus.CanEditModel);
     }
 
     // UDP discovery replies are parsed with the General context; the property

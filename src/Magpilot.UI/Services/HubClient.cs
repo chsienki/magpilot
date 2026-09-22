@@ -288,6 +288,36 @@ public sealed class HubClient
         return await resp.Content.ReadFromJsonAsync<SessionStateInfo>(cancellationToken: ct);
     }
 
+    public async Task<IReadOnlyList<SessionModelOption>> GetModelOptionsAsync(
+        string agent,
+        string id,
+        CancellationToken ct = default)
+    {
+        var resp = await _http.GetAsync(
+            $"api/agents/{agent}/sessions/{id}/model-options",
+            ct);
+        await EnsureSuccessWithMessageAsync(resp, ct);
+        return await resp.Content.ReadFromJsonAsync<List<SessionModelOption>>(
+                cancellationToken: ct)
+            ?? [];
+    }
+
+    public async Task<SessionStateInfo> UpdateModelAsync(
+        string agent,
+        string id,
+        string model,
+        string? reasoningEffort,
+        CancellationToken ct = default)
+    {
+        var resp = await _http.PostAsJsonAsync(
+            $"api/agents/{agent}/sessions/{id}/model",
+            new SessionModelUpdateRequest(model, reasoningEffort),
+            ct);
+        await EnsureSuccessWithMessageAsync(resp, ct);
+        return (await resp.Content.ReadFromJsonAsync<SessionStateInfo>(
+            cancellationToken: ct))!;
+    }
+
     /// <summary>
     /// Broadcast a <c>release_requested</c> SSE event so any subscribed
     /// magpilot launcher can begin its graceful shutdown.
@@ -349,6 +379,30 @@ public sealed class HubClient
             $"api/agents/{agent}/sessions/{id}/approvals/{approvalId}",
             new ApprovalResponse(optionId), ct);
         resp.EnsureSuccessStatusCode();
+    }
+
+    private static async Task EnsureSuccessWithMessageAsync(
+        HttpResponseMessage response,
+        CancellationToken ct)
+    {
+        if (response.IsSuccessStatusCode)
+            return;
+
+        string? message = null;
+        try
+        {
+            using var json = await System.Text.Json.JsonDocument.ParseAsync(
+                await response.Content.ReadAsStreamAsync(ct),
+                cancellationToken: ct);
+            if (json.RootElement.TryGetProperty("error", out var error))
+                message = error.GetString();
+        }
+        catch
+        {
+        }
+
+        throw new InvalidOperationException(
+            message ?? $"Request failed with status {(int)response.StatusCode}.");
     }
 
     public async IAsyncEnumerable<StreamEvent> StreamAsync(

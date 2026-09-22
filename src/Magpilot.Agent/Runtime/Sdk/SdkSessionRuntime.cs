@@ -37,8 +37,36 @@ internal sealed class SdkSessionRuntime(
 
     public SessionRuntimeProfile? EffectiveProfile(string sessionId) =>
         _sessions.TryGetValue(sessionId, out var attached)
-            ? attached.Profile
+            ? attached.Status.Profile
             : null;
+
+    public SessionRuntimeStatus? RuntimeStatus(string sessionId) =>
+        _sessions.TryGetValue(sessionId, out var attached)
+            ? attached.Status.Snapshot
+            : null;
+
+    public async Task<IReadOnlyList<SessionModelOption>> ListModelOptionsAsync(
+        string sessionId,
+        CancellationToken ct)
+    {
+        try
+        {
+            var attached = SessionFor(sessionId);
+            if (attached.Status.ModelOptions.Count == 0)
+            {
+                var models = await attached.Host.Client.ListModelsAsync(ct);
+                attached.Status.SetModels(models);
+            }
+            return attached.Status.ModelOptions;
+        }
+        catch (Exception ex) when (ex is not SessionRuntimeConfigurationException)
+        {
+            throw WrapConfigurationFailure(
+                $"SDK model discovery failed for session {sessionId}.",
+                sessionId,
+                ex);
+        }
+    }
 
     public bool IsTurnInFlight(
         string sessionId,
@@ -126,6 +154,7 @@ internal sealed class SdkSessionRuntime(
                 $"Session {sessionId} was attached twice.");
         }
 
+        await InitializeStatusAsync(attached, ct);
         await MarkOurRuntimeHoldersAsync(sessionId, ct);
         onAttached?.Invoke(sessionId);
         log.LogInformation(
@@ -181,6 +210,7 @@ internal sealed class SdkSessionRuntime(
                 $"Session {sessionId} was attached twice.");
         }
 
+        await InitializeStatusAsync(attached, ct);
         await MarkOurRuntimeHoldersAsync(sessionId, ct);
         onAttached?.Invoke(sessionId);
         log.LogInformation(
@@ -201,7 +231,7 @@ internal sealed class SdkSessionRuntime(
         try
         {
             var attached = SessionFor(sessionId);
-            var current = attached.Profile;
+            var current = attached.Status.Profile;
             if (requested.Backend != current.Backend)
             {
                 throw new SessionRuntimeConfigurationException(
@@ -245,11 +275,7 @@ internal sealed class SdkSessionRuntime(
                     ct);
             }
 
-            attached.Profile = current with
-            {
-                Model = model,
-                ReasoningEffort = reasoning,
-            };
+            attached.Status.SetAppliedProfile(model!, reasoning);
         }
         catch (SessionRuntimeConfigurationException ex)
         {
@@ -453,7 +479,7 @@ internal sealed class SdkSessionRuntime(
                 await DisposeAttachedStateAsync(attached);
                 _ourSessionPids.TryRemove(sessionId, out _);
             }
-            return attached.Profile;
+            return attached.Status.Profile;
         }
         finally
         {
@@ -568,14 +594,28 @@ internal sealed class SdkSessionRuntime(
             profile,
             lifetime);
         attached.Subscription = session.On<SessionEvent>(
-            evt => HandleEvent(session.SessionId, evt));
+            evt => HandleEvent(session.SessionId, attached, evt));
         return attached;
     }
 
-    private void HandleEvent(string sessionId, SessionEvent evt)
+    private void HandleEvent(
+        string sessionId,
+        AttachedSession attached,
+        SessionEvent evt)
     {
+        attached.Status.Apply(evt);
         if (!_activeTurns.TryGetValue(sessionId, out var turn))
             return;
+
+        if (evt is SessionIdleEvent idle)
+        {
+            _ = CompleteIdleAfterStatusRefreshAsync(
+                sessionId,
+                attached,
+                turn,
+                idle);
+            return;
+        }
 
         IReadOnlyList<StreamEvent> mapped;
         lock (turn.Sync)
@@ -601,6 +641,73 @@ internal sealed class SdkSessionRuntime(
 
         if (mapped.Any(static evt => evt is TurnComplete))
             CompleteTurn(sessionId, turn);
+    }
+
+    private async Task CompleteIdleAfterStatusRefreshAsync(
+        string sessionId,
+        AttachedSession attached,
+        ActiveTurn turn,
+        SessionIdleEvent idle)
+    {
+        await RefreshStatusAsync(attached, CancellationToken.None);
+
+        IReadOnlyList<StreamEvent> mapped;
+        lock (turn.Sync)
+        {
+            turn.LastEventAt = DateTimeOffset.UtcNow;
+            mapped = turn.Mapper.Map(idle);
+        }
+
+        foreach (var streamEvent in mapped)
+            Publish(sessionId, streamEvent);
+
+        if (mapped.Any(static evt => evt is TurnComplete))
+            CompleteTurn(sessionId, turn);
+    }
+
+    private async Task InitializeStatusAsync(
+        AttachedSession attached,
+        CancellationToken ct)
+    {
+        try
+        {
+            var models = await attached.Host.Client.ListModelsAsync(ct);
+            attached.Status.SetModels(models);
+
+            var events = await attached.Session.GetEventsAsync(ct);
+            if (events.OfType<SessionUsageInfoEvent>().LastOrDefault() is { } usage)
+                attached.Status.Apply(usage);
+
+            await RefreshStatusAsync(attached, ct);
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(
+                ex,
+                "Could not initialize runtime status for SDK session {SessionId}",
+                attached.Session.SessionId);
+        }
+    }
+
+    private async Task RefreshStatusAsync(
+        AttachedSession attached,
+        CancellationToken ct)
+    {
+        try
+        {
+            var current = await attached.Session.Rpc.Model.GetCurrentAsync(ct);
+            attached.Status.Apply(current);
+
+            var usage = await attached.Session.Rpc.Usage.GetMetricsAsync(ct);
+            attached.Status.Apply(usage);
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(
+                ex,
+                "Could not refresh runtime status for SDK session {SessionId}",
+                attached.Session.SessionId);
+        }
     }
 
     private bool FailTurn(
@@ -773,7 +880,7 @@ internal sealed class SdkSessionRuntime(
     {
         public CopilotSession Session { get; } = session;
         public ISdkClientHost Host { get; } = host;
-        public SessionRuntimeProfile Profile { get; set; } = profile;
+        public SdkSessionStatusTracker Status { get; } = new(profile);
         public CancellationTokenSource Lifetime { get; } = lifetime;
         public IDisposable? Subscription { get; set; }
     }

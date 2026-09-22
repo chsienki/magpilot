@@ -104,6 +104,10 @@ src/
                                       yolo policy. This file alone opts into
                                       the SDK's GHCP001 experimental permission
                                       decision types.
+    Runtime/Sdk/SdkSessionStatusTracker.cs <- cached authoritative model,
+                                      reasoning, context-window, and session
+                                      AI Credit status. Reconciles SDK events
+                                      with model/usage RPC snapshots.
     Runtime/Sdk/SdkSessionRuntime.cs <- opt-in SDK session lifecycle:
                                       create/resume, prompt serialization,
                                       abort, detach, lock ownership, stream
@@ -198,6 +202,13 @@ src/
                                       Reconnecting / Offline) via Color +
                                       Indeterminate; drawer-header variant is
                                       plain inline.
+    Components/SessionStatusBar.razor <- compact selected-session
+                                      model(reasoning), context %, and AIC
+                                      display. The combined model control opens
+                                      SessionModelDialog when the SDK session is
+                                      idle.
+    Components/SessionModelDialog.razor <- runtime-advertised model/reasoning
+                                      picker; never uses a hard-coded catalog.
     Pages/Home.razor               <- main chat (per-session cache, SSE consumer,
                                       three-way Owned routing, auto-reconnect on
                                       backgrounded-tab disconnects -- see SPA section).
@@ -287,6 +298,22 @@ permission sees yolo and auto-approves. `YoloRegistry.Changed` wakes the
 existing request, and the broker re-checks yolo after registering each pending
 approval to close the change-vs-registration race. Managed approvals are never
 released by this mechanism.
+
+`SdkSessionStatusTracker` keeps the selected session's current model,
+reasoning effort, context token count/limit, and accumulated session AI Credits.
+It seeds from `model.getCurrent`, `usage.getMetrics`, and the latest
+`session.usage_info`, updates from typed SDK events, then reconciles the
+authoritative model/usage RPCs before publishing `TurnComplete`. `/state` reads
+only this cache, so the launcher and SPA do not turn a cheap ownership probe
+into a runtime RPC. `TotalNanoAiu / 1_000_000_000` is the session AIC value.
+
+The additive `SessionStateInfo.RuntimeStatus` field is null when unavailable.
+ACP and Agency sessions expose their known model/reasoning but leave context
+and AIC null and refuse live model editing. SDK model options come from
+`ListModelsAsync`; `POST /sessions/{id}/model` is accepted only while the
+session is agent-owned and idle. It applies model + reasoning atomically under
+the existing session/lifecycle gates and updates the handoff profile, so a
+terminal round trip restores the selection.
 
 SDK runtime lock files require explicit ownership tracking because
 `CopilotClient` does not expose the spawned runtime PID. After create/resume,
@@ -1701,7 +1728,7 @@ already burned us in production.
 | Client name      | Default timeout | Tunable                        | Used for                                                                 |
 |------------------|-----------------|--------------------------------|--------------------------------------------------------------------------|
 | `agent`          | 10s             | `Hub:AgentHttpTimeoutSec`      | Fast read-only control-plane (GET `/api/sessions`, `/api/info`, etc.)    |
-| `agent-action`   | 90s             | `Hub:AgentActionTimeoutSec`    | Mutating ACP-driving calls (`POST /api/sessions`, `/sessions/{id}/adopt`, `/acquire-for-host`, `/release`) |
+| `agent-action`   | 90s             | `Hub:AgentActionTimeoutSec`    | Mutating runtime calls (`POST /api/sessions`, `/sessions/{id}/adopt`, `/model`, `/acquire-for-host`, `/release`) |
 | `agent-stream`   | infinite        | (n/a)                          | SSE proxy and `/quick-prompt` (turns can run minutes)                    |
 
 Pick via the `AgentClientKind` enum on `AgentHttpClient.ClientFor(name, kind)`:
@@ -1973,10 +2000,13 @@ Owned=0, Locked=1, Dormant=2.)
 > process tree up from the lock PID (`ProcessAncestry`, a Toolhelp
 > snapshot). If a process named `magpilot` (the launcher;
 > `AssemblyName=magpilot`) is an ancestor, it `HostOwnership.Set`s the
-> session to that launcher PID. This is safe because the agent's own
-> `copilot --acp` child is parented under `Magpilot.Agent` (not
-> `magpilot`) and a bare terminal copilot under a shell, so neither
-> false-matches. Under `--magpilot-agency` the chain is
+> session to that launcher PID. Before inspecting ancestry it skips
+> any session for which `IAgentSessionRuntime.IsResident` is true.
+> Runtime residency is authoritative: a development Agent can itself
+> be launched from a Magpilot terminal, making its SDK/ACP child a
+> descendant of `magpilot`; without this guard the periodic sweep
+> reclassified the Agent's own session as Host-owned after 60 seconds.
+> Under `--magpilot-agency` the genuine terminal chain is
 > `magpilot -> agency -> copilot`, still a walkable descendant. No
 > SPA/`SessionInfo`/`GetState` change is needed: once the map is
 > populated, `GET /state` reports `owner: "Host"` and the SPA's
@@ -2419,6 +2449,17 @@ config; do NOT enable Caching in the NPM UI.
     status (the AppBar pill already covers that). Used in the
     sessions-pane back-arrow header for orientation only.
   Don't double-encode status: drawer header doesn't render a dot.
+- **Session status row** (`Magpilot.UI/Components/SessionStatusBar.razor`):
+  is a separate bar inside the composer directly above the textarea. The
+  original Show thinking / YOLO / Release toolbar stays at the top of the chat
+  pane. Model + reasoning are one clickable value (`Model Name (effort)`)
+  because they open the same settings dialog; context percentage and session
+  AIC remain separate read-only values. The status bar wraps on narrow screens
+  instead of scrolling horizontally. `Show session info` in the top toolbar
+  hides/shows the bottom bar and persists to
+  `localStorage["magpilot.showSessionInfo"]`. Editing is enabled only for an
+  online, agent-owned, idle SDK session. Missing ACP/older-agent telemetry
+  renders as `N/A`, never zero.
 - **Clipping a MudChip's text** (or any MudBlazor component that
   renders content into an inner slot) needs three things together
   -- any one missing and the chip stays wider than the parent
@@ -2623,7 +2664,9 @@ project files in chsienki/copilot-context/ideas/projects/:
   etc). /commands aren't routed through `--acp` so these need to be
   UI affordances rather than slash syntax. Distinct from preflight,
   which solves the *pre-session* "load context" case as a separate
-  site -- this is the *during-session* case inside the SPA.
+  site -- this is the *during-session* case inside the SPA. The first
+  SDK-backed slice is implemented: the chat shows model/context/AIC/reasoning
+  and allows idle SDK sessions to change model + reasoning.
 - **magpilot-brand-sweep** -- SHIPPED 2026-05-11. Single
   `MagpieMark` component in Magpilot.UI; brand-themed loader; bird
   on agents-list bullets + empty states.

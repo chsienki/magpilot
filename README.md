@@ -95,6 +95,9 @@ The hub's Agents page reports each machine's running/update version and can
 force an immediate hub + agent update check without remotely installing
 anything. The Agent uses the Copilot SDK runtime by default; set
 `MAGPILOT_RUNTIME_BACKEND=acp` for rollback. Agency sessions remain on ACP.
+SDK-backed chats show the active model, context-window percentage, session AI
+Credits, and reasoning effort in the SPA; idle sessions can change model and
+reasoning from the same status row.
 
 What is **NOT yet wired**: the MAUI Android shell (the original phone
 target), real FCM/Web Push delivery, TLS for hub<->agents (still LAN +
@@ -123,7 +126,8 @@ magpilot/
                                 is driven by exactly one process at a time.
       Magpilot.UI/          <- shared Blazor components (chat, sessions,
                                 MagpilotTheme, MagpieMark, ChatView,
-                                HubClient, HubLogClient, JsErrorBridge)
+                                SessionStatusBar, HubClient, HubLogClient,
+                                JsErrorBridge)
       Magpilot.Web/         <- Blazor WASM shell for the browser
    deploy/                   <- hub compose plus hub/agent GHCR publishing notes
 ```

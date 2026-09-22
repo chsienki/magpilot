@@ -51,6 +51,18 @@ internal sealed class SessionRuntimeRouter : IAgentSessionRuntime
             ?? Other(runtime).EffectiveProfile(sessionId);
     }
 
+    public SessionRuntimeStatus? RuntimeStatus(string sessionId)
+    {
+        var runtime = RuntimeForSession(sessionId);
+        return runtime.RuntimeStatus(sessionId)
+            ?? Other(runtime).RuntimeStatus(sessionId);
+    }
+
+    public Task<IReadOnlyList<SessionModelOption>> ListModelOptionsAsync(
+        string sessionId,
+        CancellationToken ct) =>
+        RuntimeForSession(sessionId).ListModelOptionsAsync(sessionId, ct);
+
     public bool IsTurnInFlight(
         string sessionId,
         out SessionInFlightEntry entry) =>

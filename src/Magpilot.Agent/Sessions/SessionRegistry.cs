@@ -65,6 +65,87 @@ public sealed class SessionRegistry
 
     public SessionInfo? Get(string id) => WithYolo(_scanner.Get(id, Owned));
 
+    public async Task<IReadOnlyList<SessionModelOption>> ListModelOptionsAsync(
+        string sessionId,
+        CancellationToken ct)
+    {
+        var state = GetState(sessionId)
+            ?? throw new FileNotFoundException($"Session {sessionId} not on disk");
+        if (state.Owner != SessionOwner.Agent)
+        {
+            throw new InvalidOperationException(
+                $"Session {sessionId} must be agent-owned before its model options can be read.");
+        }
+        if (state.RuntimeStatus?.CanEditModel != true)
+        {
+            throw new SessionModelUpdateException(
+                $"Session {sessionId} does not support live model changes on its current runtime.");
+        }
+
+        return await _runtime.ListModelOptionsAsync(sessionId, ct);
+    }
+
+    public async Task<SessionStateInfo> UpdateModelAsync(
+        string sessionId,
+        SessionModelUpdateRequest request,
+        CancellationToken ct)
+    {
+        var gate = await AcquireLifecycleGateAsync(sessionId, ct);
+        try
+        {
+            var state = GetState(sessionId)
+                ?? throw new FileNotFoundException($"Session {sessionId} not on disk");
+            if (state.Owner != SessionOwner.Agent)
+            {
+                throw new InvalidOperationException(
+                    $"Session {sessionId} must be agent-owned before changing its model.");
+            }
+            if (state.Activity == SessionActivity.InFlight)
+            {
+                throw new InvalidOperationException(
+                    $"Session {sessionId} cannot change model while a turn is in flight.");
+            }
+            if (state.RuntimeStatus?.CanEditModel != true)
+            {
+                throw new SessionModelUpdateException(
+                    $"Session {sessionId} does not support live model changes on its current runtime.");
+            }
+
+            var options = await _runtime.ListModelOptionsAsync(sessionId, ct);
+            var selected = options.FirstOrDefault(option =>
+                string.Equals(option.Id, request.Model, StringComparison.OrdinalIgnoreCase));
+            if (selected is null)
+            {
+                throw new SessionModelUpdateException(
+                    $"Model '{request.Model}' is not available for session {sessionId}.");
+            }
+
+            var current = _runtime.EffectiveProfile(sessionId)
+                ?? throw new InvalidOperationException(
+                    $"Session {sessionId} has no effective runtime profile.");
+            var reasoning = SessionModelSelection.ResolveReasoningEffort(
+                request.ReasoningEffort,
+                current.ReasoningEffort,
+                selected);
+            await _runtime.ApplyOwnedConfigurationAsync(
+                sessionId,
+                current with
+                {
+                    Model = selected.Id,
+                    ReasoningEffort = reasoning,
+                },
+                processScopeSpecified: false,
+                ct);
+
+            return GetState(sessionId)
+                ?? throw new FileNotFoundException($"Session {sessionId} not on disk");
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
     // SessionInfo is on-disk-derived; Yolo lives in-memory in YoloRegistry.
     // Decorate at the read boundary so callers (HTTP, SPA) see a single
     // consistent record without scattering YoloRegistry lookups across the
@@ -542,7 +623,14 @@ public sealed class SessionRegistry
 
         var lastEvent = TryReadLastEvent(sessionId);
 
-        return new SessionStateInfo(info, owner, hostPid, activity, inFlight, lastEvent);
+        return new SessionStateInfo(
+            info,
+            owner,
+            hostPid,
+            activity,
+            inFlight,
+            lastEvent,
+            _runtime.RuntimeStatus(sessionId));
     }
 
     /// <summary>

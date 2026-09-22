@@ -122,6 +122,75 @@ public sealed class SessionRuntimeRoutingTests : IDisposable
                 CancellationToken.None));
     }
 
+    [Fact]
+    public async Task Registry_updates_idle_sdk_model_and_preserves_supported_reasoning()
+    {
+        var runtime = new RecordingRuntime
+        {
+            ModelOptions =
+            [
+                new SessionModelOption(
+                    "new-model",
+                    "New Model",
+                    ["low", "high"],
+                    "low"),
+            ],
+        };
+        var registry = CreateRegistry(
+            runtime,
+            new SessionRuntimeBackendOptions(SessionRuntimeBackend.Sdk));
+        var session = await registry.CreateAsync(
+            _root,
+            useAgency: false,
+            CancellationToken.None,
+            model: "old-model",
+            reasoningEffort: "high");
+
+        var state = await registry.UpdateModelAsync(
+            session.Id,
+            new SessionModelUpdateRequest("new-model"),
+            CancellationToken.None);
+
+        Assert.Equal("new-model", runtime.LastProfile!.Model);
+        Assert.Equal("high", runtime.LastProfile.ReasoningEffort);
+        Assert.Equal("new-model", state.RuntimeStatus!.ModelId);
+    }
+
+    [Fact]
+    public async Task Registry_rejects_model_changes_while_a_turn_is_active()
+    {
+        var runtime = new RecordingRuntime
+        {
+            TurnInFlight = true,
+            ModelOptions =
+            [
+                new SessionModelOption(
+                    "new-model",
+                    "New Model",
+                    ["low"],
+                    "low"),
+            ],
+        };
+        var registry = CreateRegistry(
+            runtime,
+            new SessionRuntimeBackendOptions(SessionRuntimeBackend.Sdk));
+        var session = await registry.CreateAsync(
+            _root,
+            useAgency: false,
+            CancellationToken.None,
+            model: "old-model",
+            reasoningEffort: "low");
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            registry.UpdateModelAsync(
+                session.Id,
+                new SessionModelUpdateRequest("new-model"),
+                CancellationToken.None));
+
+        Assert.Contains("turn is in flight", error.Message);
+        Assert.Equal("old-model", runtime.LastProfile!.Model);
+    }
+
     public void Dispose() => Directory.Delete(_root, recursive: true);
 
     private SessionRegistry CreateRegistry(
@@ -147,15 +216,37 @@ public sealed class SessionRuntimeRoutingTests : IDisposable
 
         public SessionRuntimeProfile? LastProfile { get; private set; }
         public int CancelCount { get; private set; }
+        public bool TurnInFlight { get; init; }
+        public IReadOnlyList<SessionModelOption> ModelOptions { get; init; } = [];
 
         public bool IsQuarantined(string id) => false;
         public bool IsAttached(string id) => true;
         public bool IsResident(string id) => true;
         public SessionRuntimeProfile? EffectiveProfile(string id) => LastProfile;
+        public SessionRuntimeStatus? RuntimeStatus(string id) =>
+            LastProfile is null
+                ? null
+                : new SessionRuntimeStatus(
+                    LastProfile.Backend.ToString().ToLowerInvariant(),
+                    LastProfile.Model,
+                    LastProfile.Model,
+                    LastProfile.ReasoningEffort,
+                    null,
+                    null,
+                    null,
+                    LastProfile.Backend == SessionRuntimeBackend.Sdk
+                        && ModelOptions.Count > 0,
+                    DateTimeOffset.UtcNow);
+        public Task<IReadOnlyList<SessionModelOption>> ListModelOptionsAsync(
+            string id,
+            CancellationToken ct) =>
+            Task.FromResult(ModelOptions);
         public bool IsTurnInFlight(string id, out SessionInFlightEntry entry)
         {
-            entry = default;
-            return false;
+            entry = TurnInFlight
+                ? new SessionInFlightEntry("test", DateTimeOffset.UtcNow)
+                : default;
+            return TurnInFlight;
         }
         public Task WaitForTurnBoundaryAsync(string id, CancellationToken ct) =>
             Task.CompletedTask;
@@ -169,6 +260,11 @@ public sealed class SessionRuntimeRoutingTests : IDisposable
             Action<string>? onAttached = null)
         {
             LastProfile = profile;
+            var directory = Directory.CreateDirectory(
+                Path.Combine(cwd, sessionId));
+            File.WriteAllText(
+                Path.Combine(directory.FullName, "workspace.yaml"),
+                $"cwd: {cwd}{Environment.NewLine}");
             onAttached?.Invoke(sessionId);
             return Task.FromResult(sessionId);
         }

@@ -1,0 +1,52 @@
+.session-status-bar {
+    align-items: stretch;
+    background: color-mix(in srgb, var(--mud-palette-surface) 94%, var(--mud-palette-primary) 6%);
+    border-bottom: 1px solid var(--mud-palette-divider);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    justify-content: flex-end;
+    min-width: 0;
+    padding: 0.35rem 0.75rem;
+}
+
+.session-status-item {
+    align-items: baseline;
+    background: transparent;
+    border: 1px solid var(--mud-palette-lines-default);
+    border-radius: 0.45rem;
+    color: var(--mud-palette-text-primary);
+    display: inline-flex;
+    font: inherit;
+    gap: 0.35rem;
+    min-width: 0;
+    padding: 0.2rem 0.5rem;
+}
+
+.session-status-action:not(:disabled) {
+    cursor: pointer;
+}
+
+.session-status-action:not(:disabled):hover {
+    background: var(--mud-palette-action-default-hover);
+    border-color: var(--mud-palette-primary);
+}
+
+.session-status-action:disabled {
+    opacity: 1;
+}
+
+.session-status-label {
+    color: var(--mud-palette-text-secondary);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+}
+
+.session-status-value {
+    font-size: 0.78rem;
+    font-weight: 600;
+    max-width: 13rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}

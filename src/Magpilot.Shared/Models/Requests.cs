@@ -25,6 +25,9 @@ public sealed record AdoptRequest(
     bool? NoCustomInstructions = null,
     string? CopilotHome = null);
 public sealed record ApprovalResponse(string OptionId);
+public sealed record SessionModelUpdateRequest(
+    string Model,
+    string? ReasoningEffort = null);
 
 public sealed record SessionDetails(SessionInfo Info, string? AcpSessionId);
 

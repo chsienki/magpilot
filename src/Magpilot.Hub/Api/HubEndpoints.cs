@@ -387,6 +387,24 @@ public static class HubEndpoints
                     return await Forward(resp);
                 }));
 
+        api.MapGet("/agents/{name}/sessions/{id}/model-options",
+            (string name, string id, AgentHttpClient http, AgentRegistry reg, CancellationToken ct) =>
+                Proxy(name, reg, async () =>
+                {
+                    var resp = await http.ClientFor(name, AgentClientKind.Action)
+                        .GetAsync($"api/sessions/{id}/model-options", ct);
+                    return await Forward(resp);
+                }));
+
+        api.MapPost("/agents/{name}/sessions/{id}/model",
+            (string name, string id, SessionModelUpdateRequest body, AgentHttpClient http, AgentRegistry reg, CancellationToken ct) =>
+                Proxy(name, reg, async () =>
+                {
+                    var resp = await http.ClientFor(name, AgentClientKind.Action)
+                        .PostAsJsonAsync($"api/sessions/{id}/model", body, ct);
+                    return await Forward(resp);
+                }));
+
         api.MapPost("/agents/{name}/sessions/{id}/release-request",
             (string name, string id, ReleaseRequestBody body, AgentHttpClient http, AgentRegistry reg, CancellationToken ct) =>
                 Proxy(name, reg, async () =>

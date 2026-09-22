@@ -20,7 +20,8 @@ public sealed record SessionStateInfo(
     int? HostPid,
     SessionActivity Activity,
     InFlightInfo? InFlight,
-    LastEventInfo? LastEvent
+    LastEventInfo? LastEvent,
+    SessionRuntimeStatus? RuntimeStatus = null
 );
 
 /// <summary>

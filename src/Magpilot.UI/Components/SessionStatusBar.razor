@@ -1,0 +1,79 @@
+@using System.Globalization
+
+<div class="session-status-bar" aria-label="Session runtime status">
+    <button type="button"
+            class="session-status-item session-status-action"
+            disabled="@(!CanEdit)"
+            title="@ModelTooltip"
+            @onclick="EditRequested">
+        <span class="session-status-label">Model</span>
+        <span class="session-status-value">@ModelText</span>
+    </button>
+    <div class="session-status-item" title="@ContextTooltip">
+        <span class="session-status-label">Context</span>
+        <span class="session-status-value">@ContextText</span>
+    </div>
+    <div class="session-status-item" title="@CreditsTooltip">
+        <span class="session-status-label">AIC</span>
+        <span class="session-status-value">@CreditsText</span>
+    </div>
+</div>
+
+@code {
+    [Parameter] public SessionRuntimeStatus? Status { get; set; }
+    [Parameter] public bool CanEdit { get; set; }
+    [Parameter] public EventCallback EditRequested { get; set; }
+
+    private string ModelText
+    {
+        get
+        {
+            var model = Status?.ModelName ?? Status?.ModelId;
+            if (model is null)
+                return "N/A";
+            return Status?.ReasoningEffort is { Length: > 0 } reasoning
+                ? $"{model} ({reasoning})"
+                : model;
+        }
+    }
+
+    private string ContextText
+    {
+        get
+        {
+            if (Status is not { CurrentTokens: long current, TokenLimit: > 0 } status)
+                return "N/A";
+            var percent = Math.Clamp(
+                100d * current / status.TokenLimit!.Value,
+                0,
+                100);
+            return $"{Math.Round(percent, MidpointRounding.AwayFromZero):0}%";
+        }
+    }
+
+    private string CreditsText =>
+        Status?.AiCreditsUsed is double credits
+            ? credits.ToString("0.###", CultureInfo.InvariantCulture)
+            : "N/A";
+
+    private string ModelTooltip =>
+        Status is null
+            ? "Runtime model is unavailable."
+            : $"Model: {Status.ModelName ?? Status.ModelId ?? "unknown"} ({Status.ModelId ?? "unknown"}). "
+              + $"Reasoning effort: {Status.ReasoningEffort ?? "not set"}."
+              + EditHint;
+
+    private string ContextTooltip =>
+        Status is { CurrentTokens: long current, TokenLimit: long limit }
+            ? $"Context: {current:N0} of {limit:N0} tokens."
+            : "Context usage is unavailable for this runtime.";
+
+    private string CreditsTooltip =>
+        Status?.AiCreditsUsed is double credits
+            ? $"Session AI Credits used: {credits.ToString("0.########", CultureInfo.InvariantCulture)}."
+            : "Session AI Credit usage is unavailable for this runtime.";
+
+    private string EditHint => CanEdit
+        ? " Click to change both."
+        : "";
+}

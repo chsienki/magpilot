@@ -185,6 +185,10 @@
     flex-shrink: 0;
 }
 
+.composer-toolbar-content {
+    margin: -0.5rem -0.5rem 0.5rem;
+}
+
 /* Row of queued-message chips above the composer textarea while a
    turn is in flight. Each chip shows a preview of the queued message
    and a close 'x' to delete it before it gets sent. */

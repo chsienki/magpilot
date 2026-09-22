@@ -180,6 +180,29 @@ parallel tools were starting. The broker re-checks policy after adding a
 pending request and subscribes to `YoloRegistry.Changed`; managed-required
 requests remain pending for a human.
 
+Each attached SDK session also owns a cached `SessionRuntimeStatus`.
+`SdkSessionStatusTracker` seeds it from the authoritative current-model and
+usage-metrics RPCs plus the latest persisted usage-info event. Live model,
+context, and usage events update the cache, and `session.idle` triggers one
+final model/usage reconciliation before Magpilot publishes `TurnComplete`.
+Consequently `GET /state` remains a cache-only control-plane call while still
+reporting:
+
+- active model id + display name;
+- reasoning effort;
+- current context tokens + model token limit;
+- session AI Credits (`TotalNanoAiu / 1,000,000,000`);
+- whether live model editing is supported.
+
+ACP and Agency sessions provide model/reasoning when their verified profile
+contains them, but context/AIC remain null and editing is disabled. The SPA
+renders unavailable values explicitly rather than treating them as zero.
+The SPA places this status in its own composer bar directly above the input:
+one `Model Name (reasoning)` button opens the shared model settings dialog,
+while context percentage and session AIC remain read-only. The existing Show
+thinking / YOLO / Release toolbar remains at the top of the chat pane and adds
+a persisted `Show session info` toggle for the bottom bar.
+
 `SdkSessionRuntime` preserves the single-writer invariant with the same
 registry and handoff protocol. It serializes turns per session, registers event
 handlers before sends, uses typed message provenance while retaining the
@@ -551,7 +574,9 @@ works without a configured token.
 | GET    | `/sessions`                                | List sessions on disk (with state, cwd, last-touched)      |
 | POST   | `/sessions`                                | Create a new session. Body `NewSessionRequest { Cwd?, Name?, InitialPrompt?, UseAgency?, Model?, ReasoningEffort?, DisableMcpServers?, Agent?, AvailableTools?, DisableBuiltinMcps?, NoCustomInstructions?, CopilotHome? }`. `Agent`/`Model`/`ReasoningEffort` pin advertised ACP session config options; all other added fields are process-scoped and select an isolated child. `Agent` also supplies the startup `--agent` needed for Copilot to advertise that selector. `AvailableTools` maps to `--available-tools=<selector>`, the booleans map to their CLI switches, and `CopilotHome` sets the child's `COPILOT_HOME`. **400** on an unsafe token/path; **502** if the CLI does not advertise/accept/confirm the requested config. |
 | GET    | `/sessions/{id}`                           | Get session metadata                                       |
-| GET    | `/sessions/{id}/state`                     | Rich ownership + activity view (see "Cooperative single-owner handoff" below). Returns `SessionStateInfo`. **NEW (shim Phase 1).** |
+| GET    | `/sessions/{id}/state`                     | Rich ownership + activity view (see "Cooperative single-owner handoff" below). Returns `SessionStateInfo`, including optional cached `RuntimeStatus { Backend, ModelId, ModelName, ReasoningEffort, CurrentTokens, TokenLimit, AiCreditsUsed, CanEditModel, UpdatedAt }`. |
+| GET    | `/sessions/{id}/model-options`             | SDK-only runtime-advertised model catalog for an attached, agent-owned session. Includes display names, supported reasoning efforts, and advertised defaults. **409** when not agent-owned; **422** when the backend cannot edit models. |
+| POST   | `/sessions/{id}/model`                     | Atomically change model + reasoning for an attached, agent-owned, idle SDK session. Body `SessionModelUpdateRequest { Model, ReasoningEffort? }`. Omitting reasoning preserves the current level when supported, otherwise uses the target model's advertised default. **409** while busy/host-owned; **422** for unavailable combinations; **502** for runtime failure. |
 | POST   | `/sessions/{id}/adopt`                     | Bring a dormant session live (re-attach the ACP child). Body accepts the same optional session/process fields as create, with nullable process booleans so omission retains a recorded handoff flavor. Dormant sessions load with the requested process scope and config. Already-Owned sessions apply/verify agent/model/reasoning in place; a requested process-scope change fails explicitly because it requires another child. **502** if config cannot be applied exactly; **422** + `notLoadable` when the on-disk session has no `events.jsonl` and is not still resident in a live child. |
 | POST   | `/sessions/{id}/detach[?force=true]`       | Detach without deleting on-disk state. `force=true` recycles the owning child when a prompt does not reach a cancellation boundary; co-hosted active turns veto the recycle. |
 | POST   | `/sessions/{id}/messages`                  | Send a prompt; returns 202; SSE delivers the reply. **Returns 409** + `HostOwnedResponse` when a magpilot launcher holds the session (see handoff section), and **409** + `{ needsReadopt: true }` when the session is quarantined because its ACP config could not be verified. Body `PromptRequest { Text, Source? }` -- an optional `Source` (e.g. `assistant`, `whatsapp`) tags an out-of-band injection: the agent prefixes the prompt with `[via <source>]` for the brain and echoes a `UserDelta { Text, Source }` to subscribers so watchers see the question, not just the answer. |
@@ -816,7 +841,10 @@ one re-reads the file before writing).
    map from live process ancestry (`ProcessAncestry`, a Toolhelp
    snapshot): any live foreign lock whose holder is a descendant of
    a `magpilot` launcher is re-marked Host-owned, recovering sessions
-   the persisted map never recorded. The launcher's own
+   the persisted map never recorded. The reconciler first excludes
+   sessions resident in the active Agent runtime; this prevents a
+   development Agent launched from a Magpilot terminal from
+   reclassifying its own SDK/ACP child as Host-owned. The launcher's own
    `release_requested` subscription reconnects with backoff across
    agent restarts (`SubscribeWithReconnectAsync`, over a dedicated
    infinite-timeout `AgentClient._streamHttp` so the reconnect's header
