@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using Magpilot.Agent.Runtime;
 
 namespace Magpilot.Agent.Sessions;
@@ -32,6 +31,7 @@ public sealed class HostOwnershipReconciler : BackgroundService
     private readonly ILogger<HostOwnershipReconciler> _logger;
     private readonly Func<string, bool> _isRuntimeResident;
     private readonly Func<int, (bool Found, int LauncherPid)> _findLauncher;
+    private readonly Func<string, IReadOnlyList<int>> _liveLockPids;
     private readonly TimeSpan _interval;
 
     public HostOwnershipReconciler(
@@ -46,7 +46,8 @@ public sealed class HostOwnershipReconciler : BackgroundService
             logger,
             config,
             runtime.IsResident,
-            FindLauncher)
+            FindLauncher,
+            LiveLockPids)
     {
     }
 
@@ -56,13 +57,15 @@ public sealed class HostOwnershipReconciler : BackgroundService
         ILogger<HostOwnershipReconciler> logger,
         IConfiguration config,
         Func<string, bool> isRuntimeResident,
-        Func<int, (bool Found, int LauncherPid)> findLauncher)
+        Func<int, (bool Found, int LauncherPid)> findLauncher,
+        Func<string, IReadOnlyList<int>>? liveLockPids = null)
     {
         _scanner = scanner;
         _hostOwnership = hostOwnership;
         _logger = logger;
         _isRuntimeResident = isRuntimeResident;
         _findLauncher = findLauncher;
+        _liveLockPids = liveLockPids ?? LiveLockPids;
         _interval = TimeSpan.FromSeconds(
             config.GetValue("Agent:HostOwnershipReconcileSec", 60));
     }
@@ -104,21 +107,20 @@ public sealed class HostOwnershipReconciler : BackgroundService
             // the active agent's own session as terminal-owned.
             if (_isRuntimeResident(sid)) continue;
 
-            var lockFile = SafeFirstLock(dir);
-            if (lockFile is null) continue;
-            if (!TryParseLockPid(lockFile, out var lockPid) || !IsAlive(lockPid)) continue;
-
-            // A launcher-driven copilot is a descendant of `magpilot`; the
-            // agent's own `copilot --acp` child is parented under
-            // Magpilot.Agent, and a bare terminal copilot under a shell, so
-            // neither false-matches here.
-            var (found, launcherPid) = _findLauncher(lockPid);
-            if (found)
+            foreach (var lockPid in _liveLockPids(dir))
             {
+                // A launcher-driven Copilot is a descendant of `magpilot`; the
+                // agent's own ACP child is parented under Magpilot.Agent, and a
+                // bare terminal Copilot under a shell, so neither false-matches.
+                var (found, launcherPid) = _findLauncher(lockPid);
+                if (!found)
+                    continue;
+
                 _hostOwnership.Set(sid, launcherPid);
                 _logger.LogInformation(
                     "Reconciled host ownership via process ancestry: sid={Sid} launcher={LauncherPid} copilot={LockPid}",
                     sid, launcherPid, lockPid);
+                break;
             }
         }
     }
@@ -131,22 +133,9 @@ public sealed class HostOwnershipReconciler : BackgroundService
             ? (true, launcherPid)
             : (false, 0);
 
-    private static string? SafeFirstLock(string dir)
-    {
-        try { return Directory.EnumerateFiles(dir, "inuse.*.lock").FirstOrDefault(); }
-        catch { return null; }
-    }
-
-    private static bool TryParseLockPid(string lockPath, out int pid)
-    {
-        pid = 0;
-        var parts = Path.GetFileName(lockPath).Split('.');
-        return parts.Length >= 3 && int.TryParse(parts[1], out pid);
-    }
-
-    private static bool IsAlive(int pid)
-    {
-        try { return !Process.GetProcessById(pid).HasExited; }
-        catch { return false; }
-    }
+    private static IReadOnlyList<int> LiveLockPids(string directory) =>
+        SessionLocks.ReadSnapshot(directory).Live
+            .Select(holder => holder.Pid)
+            .Distinct()
+            .ToArray();
 }

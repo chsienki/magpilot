@@ -14,11 +14,9 @@ public sealed class SdkClientPoolTests
         var factory = new FakeFactory();
         await using var pool = CreatePool(factory);
         var firstProfile = SessionRuntimeProfile.Resolve(
-            useAgency: false,
             model: "model-a",
             reasoningEffort: "low");
         var secondProfile = SessionRuntimeProfile.Resolve(
-            useAgency: false,
             model: "model-b",
             reasoningEffort: "high");
 
@@ -36,12 +34,10 @@ public sealed class SdkClientPoolTests
         var factory = new FakeFactory();
         await using var pool = CreatePool(factory);
         var first = SessionRuntimeProfile.Resolve(
-            useAgency: false,
             model: null,
             reasoningEffort: null,
             copilotHome: Path.Combine(Path.GetTempPath(), "copilot-a"));
         var second = SessionRuntimeProfile.Resolve(
-            useAgency: false,
             model: null,
             reasoningEffort: null,
             copilotHome: Path.Combine(Path.GetTempPath(), "copilot-b"));
@@ -93,7 +89,6 @@ public sealed class SdkClientPoolTests
             Path.GetTempPath(),
             $"missing-sdk-home-{Guid.NewGuid():N}");
         var profile = SessionRuntimeProfile.Resolve(
-            useAgency: false,
             model: null,
             reasoningEffort: null,
             copilotHome: missing);

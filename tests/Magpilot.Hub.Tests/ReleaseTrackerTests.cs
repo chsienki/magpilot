@@ -53,6 +53,46 @@ public sealed class ReleaseTrackerTests
     }
 
     [Fact]
+    public async Task RefreshAsync_preserves_unstable_protocol_zero()
+    {
+        var factory = new StubHttpClientFactory(request =>
+        {
+            var body = request.RequestUri!.AbsolutePath.EndsWith("/version.json", StringComparison.Ordinal)
+                ? """{"version":"99.0.0","minProtocol":0,"maxProtocol":0}"""
+                : """
+                  {
+                    "tag_name": "v99.0.0",
+                    "assets": [
+                      {
+                        "name": "version.json",
+                        "browser_download_url": "https://download.test/version.json"
+                      }
+                    ]
+                  }
+                  """;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json"),
+            };
+        });
+        var tracker = new ReleaseTracker(
+            factory,
+            new ReleaseCache(),
+            NullLogger<ReleaseTracker>.Instance,
+            new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Updates:ReleaseRepo"] = "owner/repo",
+                })
+                .Build());
+
+        var result = await tracker.RefreshAsync();
+
+        Assert.Equal(0, result.MinProtocol);
+        Assert.Equal(0, result.MaxProtocol);
+    }
+
+    [Fact]
     public async Task RefreshAsync_reports_missing_published_release()
     {
         var tracker = new ReleaseTracker(

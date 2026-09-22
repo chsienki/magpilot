@@ -2,8 +2,6 @@ using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text.Json;
-using Magpilot.Agent.Acp;
-
 namespace Magpilot.Agent.Discovery;
 
 /// <summary>
@@ -17,13 +15,11 @@ public sealed class DiscoveryResponder : BackgroundService
 
     private readonly ILogger<DiscoveryResponder> _logger;
     private readonly IConfiguration _config;
-    private readonly FlavorCapabilities _flavors;
 
-    public DiscoveryResponder(ILogger<DiscoveryResponder> logger, IConfiguration config, FlavorCapabilities flavors)
+    public DiscoveryResponder(ILogger<DiscoveryResponder> logger, IConfiguration config)
     {
         _logger = logger;
         _config = config;
-        _flavors = flavors;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -45,7 +41,6 @@ public sealed class DiscoveryResponder : BackgroundService
                     name = Environment.MachineName,
                     url,
                     os = Environment.OSVersion.VersionString,
-                    flavors = _flavors.Available,
                 });
                 await udp.SendAsync(reply, reply.Length, result.RemoteEndPoint);
                 _logger.LogDebug("Replied to probe from {From} with url {Url}", result.RemoteEndPoint, url);

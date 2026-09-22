@@ -14,8 +14,8 @@
 #      (subscribed SSE in background captures release_requested event)
 #   4. POST /acquire-for-host                             -> owner=Host, our PID
 #   5. POST /acquire-for-host AGAIN with same PID         -> idempotent OK
-#   6. POST /release with WRONG host PID                  -> 409 Conflict
-#   7. POST /release with correct host PID                -> owner=Agent again
+#   6. POST /release with WRONG lease                     -> 409 Conflict
+#   7. POST /release with correct lease                   -> owner=Agent again
 #   8. Cleanup: detach + delete temp cwd
 #
 # Usage:
@@ -92,7 +92,7 @@ echo
 
 echo "[setup] creating a fresh session in $AGENT_CWD ..."
 ESCAPED_CWD="${AGENT_CWD//\\/\\\\}"
-CREATE_BODY="{\"cwd\":\"$ESCAPED_CWD\",\"name\":null,\"useAgency\":false}"
+CREATE_BODY="{\"cwd\":\"$ESCAPED_CWD\",\"name\":null}"
 SID=$(curl -sf "${H_AUTH[@]}" "${H_JSON[@]}" -X POST -d "$CREATE_BODY" \
     "$URL/api/sessions" | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
 echo "  sid: $SID"
@@ -164,8 +164,10 @@ STATE=$(curl -sf "${H_AUTH[@]}" "${H_JSON[@]}" -X POST -d "$ACQ_BODY" \
     "$URL/api/sessions/$SID/acquire-for-host")
 OWNER=$(echo "$STATE" | python3 -c "import sys,json;print(json.load(sys.stdin)['owner'])")
 GOT_PID=$(echo "$STATE" | python3 -c "import sys,json;print(json.load(sys.stdin).get('hostPid',''))")
+LEASE_ID=$(echo "$STATE" | python3 -c "import sys,json;print(json.load(sys.stdin)['hostLeaseId'])")
 check "owner is Host after acquire"  "$OWNER"   "Host"
 check "hostPid matches our PID"      "$GOT_PID" "$HOST_PID"
+[[ -n "$LEASE_ID" ]] || { echo -e "  $FAIL acquire returned no hostLeaseId"; fail_count=$((fail_count + 1)); }
 echo
 
 # ----------------------------------------------------------------------------
@@ -177,16 +179,16 @@ check "owner still Host after re-acquire" "$OWNER" "Host"
 echo
 
 # ----------------------------------------------------------------------------
-echo "[6] POST /release with WRONG hostPid -> 409 Conflict"
-WRONG_BODY='{"HostPid":1}'
+echo "[6] POST /release with WRONG lease -> 409 Conflict"
+WRONG_BODY='{"LeaseId":"00000000-0000-0000-0000-000000000001"}'
 WRONG_HTTP=$(curl -s -o /dev/null -w "%{http_code}" "${H_AUTH[@]}" "${H_JSON[@]}" -X POST \
     -d "$WRONG_BODY" "$URL/api/sessions/$SID/release")
-check "release with wrong PID rejected" "$WRONG_HTTP" "409"
+check "release with wrong lease rejected" "$WRONG_HTTP" "409"
 echo
 
 # ----------------------------------------------------------------------------
-echo "[7] POST /release with correct hostPid -> owner Agent again"
-REL_BODY="{\"HostPid\":$HOST_PID}"
+echo "[7] POST /release with correct lease -> owner Agent again"
+REL_BODY="{\"LeaseId\":\"$LEASE_ID\"}"
 STATE=$(curl -sf "${H_AUTH[@]}" "${H_JSON[@]}" -X POST -d "$REL_BODY" \
     "$URL/api/sessions/$SID/release")
 OWNER=$(echo "$STATE" | python3 -c "import sys,json;print(json.load(sys.stdin)['owner'])")

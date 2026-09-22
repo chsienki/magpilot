@@ -131,6 +131,9 @@ public sealed partial class AcpSessionManager
     bool IAgentSessionRuntime.HasForeignLiveHolder(string sessionId) =>
         HasForeignLiveHolder(sessionId);
 
+    IReadOnlyList<int> IAgentSessionRuntime.ForeignLiveHolderPids(string sessionId) =>
+        ForeignLiveHolderPids(sessionId);
+
     IReadOnlyList<int> IAgentSessionRuntime.EvictForeignLiveHolders(string sessionId) =>
         EvictForeignLiveHolders(sessionId);
 

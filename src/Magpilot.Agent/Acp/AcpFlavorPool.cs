@@ -2,9 +2,7 @@ namespace Magpilot.Agent.Acp;
 
 /// <summary>
 /// Lazy pool of <see cref="AcpClient"/> instances, one per <see cref="AcpFlavor"/>
-/// key for multiplexing flavors (e.g. default Copilot). Non-multiplexing
-/// flavors (e.g. agency) get a fresh child per call to
-/// <see cref="StartFreshAsync"/> instead.
+/// key. Sessions with the same process-scoped configuration share a child.
 ///
 /// All clients share one <see cref="OnSessionUpdate"/> stream and one
 /// <see cref="OnRequest"/> handler -- the session manager doesn't care which
@@ -38,9 +36,8 @@ public sealed class AcpFlavorPool(ILoggerFactory loggerFactory, ILogger<AcpFlavo
     }
 
     /// <summary>
-    /// For multiplexing flavors: returns the existing client (if its
-    /// subprocess is still alive) or starts a new one and caches it.
-    /// For non-multiplexing flavors: always starts a fresh child.
+    /// Returns the existing client (if its subprocess is still alive) or starts
+    /// a new one and caches it.
     /// </summary>
     /// <remarks>
     /// Liveness check: if the cached client's <c>copilot --acp</c>
@@ -55,12 +52,6 @@ public sealed class AcpFlavorPool(ILoggerFactory loggerFactory, ILogger<AcpFlavo
     /// </remarks>
     public async Task<AcpClient> AcquireAsync(AcpFlavor flavor, CancellationToken ct)
     {
-        if (!flavor.MultiplexesSessions)
-        {
-            // Per-session child; no caching, no shared lock contention.
-            return await StartFreshAsync(flavor, ct);
-        }
-
         await _lock.WaitAsync(ct);
         try
         {

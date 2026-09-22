@@ -48,26 +48,10 @@ public sealed class SessionRuntimeRoutingTests : IDisposable
 
         await registry.CreateAsync(
             _root,
-            useAgency: false,
+
             CancellationToken.None);
 
         Assert.Equal(SessionRuntimeBackend.Sdk, runtime.LastProfile?.Backend);
-    }
-
-    [Fact]
-    public async Task Registry_keeps_agency_on_acp_when_sdk_is_the_default()
-    {
-        var runtime = new RecordingRuntime();
-        var registry = CreateRegistry(
-            runtime,
-            new SessionRuntimeBackendOptions(SessionRuntimeBackend.Sdk));
-
-        await registry.CreateAsync(
-            _root,
-            useAgency: true,
-            CancellationToken.None);
-
-        Assert.Equal(SessionRuntimeBackend.Acp, runtime.LastProfile?.Backend);
     }
 
     [Fact]
@@ -80,7 +64,6 @@ public sealed class SessionRuntimeRoutingTests : IDisposable
             sdk,
             new SessionRuntimeBackendOptions(SessionRuntimeBackend.Sdk));
         var profile = SessionRuntimeProfile.Resolve(
-            useAgency: false,
             model: null,
             reasoningEffort: null,
             backend: SessionRuntimeBackend.Sdk);
@@ -105,7 +88,6 @@ public sealed class SessionRuntimeRoutingTests : IDisposable
             sdk,
             new SessionRuntimeBackendOptions(SessionRuntimeBackend.Sdk));
         var sdkProfile = SessionRuntimeProfile.Resolve(
-            useAgency: false,
             model: null,
             reasoningEffort: null,
             backend: SessionRuntimeBackend.Sdk);
@@ -141,7 +123,7 @@ public sealed class SessionRuntimeRoutingTests : IDisposable
             new SessionRuntimeBackendOptions(SessionRuntimeBackend.Sdk));
         var session = await registry.CreateAsync(
             _root,
-            useAgency: false,
+
             CancellationToken.None,
             model: "old-model",
             reasoningEffort: "high");
@@ -176,7 +158,7 @@ public sealed class SessionRuntimeRoutingTests : IDisposable
             new SessionRuntimeBackendOptions(SessionRuntimeBackend.Sdk));
         var session = await registry.CreateAsync(
             _root,
-            useAgency: false,
+
             CancellationToken.None,
             model: "old-model",
             reasoningEffort: "low");
@@ -296,6 +278,7 @@ public sealed class SessionRuntimeRoutingTests : IDisposable
             CancellationToken ct) =>
             Task.FromResult(SessionRecycleOutcome.NotLoaded);
         public bool HasForeignLiveHolder(string id) => false;
+        public IReadOnlyList<int> ForeignLiveHolderPids(string id) => [];
         public IReadOnlyList<int> EvictForeignLiveHolders(string id) => [];
         public Task<Task> StartPromptAsync(
             string id,

@@ -160,11 +160,11 @@ public sealed class HubClient
     public sealed record HistoryEntry(int Id, string Role, string Text, string? ToolCallId = null, ToolStatus ToolStatus = ToolStatus.Pending);
     public sealed record HistoryPage(IReadOnlyList<HistoryEntry> Entries, int OldestCursor, bool HasMore);
 
-    public async Task<SessionInfo?> NewSessionAsync(string agent, string? cwd, bool useAgency = false, CancellationToken ct = default)
+    public async Task<SessionInfo?> NewSessionAsync(string agent, string? cwd, CancellationToken ct = default)
     {
         var resp = await _http.PostAsJsonAsync(
             $"api/agents/{agent}/sessions",
-            new NewSessionRequest(cwd, null, null, useAgency),
+            new NewSessionRequest(cwd, null),
             ct);
         resp.EnsureSuccessStatusCode();
         return await resp.Content.ReadFromJsonAsync<SessionInfo>(cancellationToken: ct);
@@ -244,7 +244,7 @@ public sealed class HubClient
         {
             await Task.Delay(500, ct);
             var state = await GetStateAsync(agent, id, ct);
-            if (state is null || state.Owner != SessionOwner.Host)
+            if (state is null || state.Owner is not (SessionOwner.Host or SessionOwner.Contended))
                 break;
         }
 
@@ -264,15 +264,7 @@ public sealed class HubClient
     /// </summary>
     public async Task ForceTakeOverAndSendAsync(string agent, string id, string text, CancellationToken ct = default)
     {
-        // host_pid 0 because the SPA isn't really a host -- it's just
-        // taking over so the agent can drive again. The agent treats the
-        // PID as advisory after the swap; HostOwnership is cleared.
-        await AcquireForHostAsync(agent, id, hostPid: 0, force: true, ct);
-        // Force release so the agent evicts a still-live terminal copilot
-        // and re-adopts. This is an explicit user "take over from terminal"
-        // action, so ending the terminal session is acceptable.
-        await ReleaseAsync(agent, id, hostPid: 0, force: true, ct);
-        // Now the prompt should land cleanly.
+        await TakeOverAsync(agent, id, force: true, ct);
         await SendPromptAsync(agent, id, text, ct);
     }
 
@@ -331,24 +323,19 @@ public sealed class HubClient
         resp.EnsureSuccessStatusCode();
     }
 
-    public async Task<SessionStateInfo> AcquireForHostAsync(string agent, string id, int hostPid, bool force, CancellationToken ct = default)
+    public async Task<SessionStateInfo> TakeOverAsync(
+        string agent,
+        string id,
+        bool force,
+        CancellationToken ct = default)
     {
         var resp = await _http.PostAsJsonAsync(
-            $"api/agents/{agent}/sessions/{id}/acquire-for-host",
-            new AcquireForHostBody(hostPid, force),
+            $"api/agents/{agent}/sessions/{id}/take-over",
+            new TakeOverSessionRequest(force),
             ct);
-        resp.EnsureSuccessStatusCode();
-        return (await resp.Content.ReadFromJsonAsync<SessionStateInfo>(cancellationToken: ct))!;
-    }
-
-    public async Task<SessionStateInfo> ReleaseAsync(string agent, string id, int hostPid, bool force = false, CancellationToken ct = default)
-    {
-        var resp = await _http.PostAsJsonAsync(
-            $"api/agents/{agent}/sessions/{id}/release",
-            new ReleaseFromHostBody(hostPid, force),
-            ct);
-        resp.EnsureSuccessStatusCode();
-        return (await resp.Content.ReadFromJsonAsync<SessionStateInfo>(cancellationToken: ct))!;
+        await EnsureSuccessWithMessageAsync(resp, ct);
+        return (await resp.Content.ReadFromJsonAsync<SessionStateInfo>(
+            cancellationToken: ct))!;
     }
 
     /// <summary>
@@ -513,11 +500,11 @@ public sealed class HubClient
         CancellationToken ct = default)
     {
         var qs = new List<string> { $"limit={limit}" };
-        if (!string.IsNullOrEmpty(source))    qs.Add($"source={Uri.EscapeDataString(source)}");
-        if (!string.IsNullOrEmpty(level))     qs.Add($"level={Uri.EscapeDataString(level)}");
-        if (!string.IsNullOrEmpty(search))    qs.Add($"search={Uri.EscapeDataString(search)}");
+        if (!string.IsNullOrEmpty(source)) qs.Add($"source={Uri.EscapeDataString(source)}");
+        if (!string.IsNullOrEmpty(level)) qs.Add($"level={Uri.EscapeDataString(level)}");
+        if (!string.IsNullOrEmpty(search)) qs.Add($"search={Uri.EscapeDataString(search)}");
         if (!string.IsNullOrEmpty(sessionId)) qs.Add($"sessionId={Uri.EscapeDataString(sessionId)}");
-        if (sinceUnixMs is { } s)             qs.Add($"since={s}");
+        if (sinceUnixMs is { } s) qs.Add($"since={s}");
         return _http.GetFromJsonAsync<List<LogEntry>>("api/log?" + string.Join("&", qs), ct);
     }
 

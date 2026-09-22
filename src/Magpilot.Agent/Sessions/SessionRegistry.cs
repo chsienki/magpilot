@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using Magpilot.Agent.Runtime;
 using Magpilot.Shared.Models;
 
@@ -61,9 +60,13 @@ public sealed class SessionRegistry
         !_runtime.IsQuarantined(sessionId);
 
     public IReadOnlyList<SessionInfo> List() =>
-        _scanner.Enumerate(Owned).Select(s => s with { Yolo = _yolo.IsEnabled(s.Id) }).ToList();
+        _scanner.Enumerate().Select(Project).ToList();
 
-    public SessionInfo? Get(string id) => WithYolo(_scanner.Get(id, Owned));
+    public SessionInfo? Get(string id)
+    {
+        var metadata = _scanner.Get(id);
+        return metadata is null ? null : Project(metadata);
+    }
 
     public async Task<IReadOnlyList<SessionModelOption>> ListModelOptionsAsync(
         string sessionId,
@@ -146,16 +149,91 @@ public sealed class SessionRegistry
         }
     }
 
-    // SessionInfo is on-disk-derived; Yolo lives in-memory in YoloRegistry.
-    // Decorate at the read boundary so callers (HTTP, SPA) see a single
-    // consistent record without scattering YoloRegistry lookups across the
-    // codebase.
-    private SessionInfo? WithYolo(SessionInfo? info) =>
-        info is null ? null : info with { Yolo = _yolo.IsEnabled(info.Id) };
-
     // cwd for a session, from its on-disk workspace.yaml; backs the recycle
     // reload path so the runtime stays free of the scanner.
-    internal string? CwdFor(string sessionId) => _scanner.Get(sessionId, Owned)?.Cwd;
+    internal string? CwdFor(string sessionId) => _scanner.Get(sessionId)?.Cwd;
+
+    private SessionInfo Project(SessionMetadata metadata) =>
+        Project(metadata, ObserveOwnership(metadata.Id));
+
+    private SessionInfo Project(
+        SessionMetadata metadata,
+        SessionOwnershipSnapshot ownership)
+    {
+        var state = ownership.Owner switch
+        {
+            SessionOwner.Agent => SessionState.Owned,
+            SessionOwner.None => SessionState.Dormant,
+            _ => SessionState.Locked,
+        };
+        var ownerPid = ownership.ForeignHolderPids.FirstOrDefault();
+        if (ownerPid == 0)
+            ownerPid = ownership.HostHolderPids.FirstOrDefault();
+        if (ownerPid == 0)
+            ownerPid = ownership.Host?.HostPid ?? 0;
+
+        return new SessionInfo(
+            metadata.Id,
+            state,
+            metadata.Cwd,
+            metadata.Repository,
+            metadata.Branch,
+            metadata.Summary,
+            ownerPid == 0 ? null : ownerPid,
+            metadata.CreatedAt,
+            metadata.UpdatedAt,
+            _yolo.IsEnabled(metadata.Id));
+    }
+
+    private SessionOwnershipSnapshot ObserveOwnership(string sessionId)
+    {
+        var directory = Path.Combine(_scanner.Root, sessionId);
+        var locks = SessionLocks.ReadSnapshot(directory);
+        var livePids = locks.Live.Select(holder => holder.Pid).Distinct().ToArray();
+        var runtimeOwned = IsAgentOwned(sessionId);
+        var runtimeForeign = _runtime.ForeignLiveHolderPids(sessionId).ToHashSet();
+        HostOwnerEntry? host = _hostOwnership.TryGet(sessionId, out var hostEntry)
+            ? hostEntry
+            : null;
+        var hostHolderPids = host is { } currentHost
+            ? livePids.Where(pid =>
+                    pid == currentHost.HostPid ||
+                    ProcessAncestry.IsSelfOrDescendantOf(pid, currentHost.HostPid))
+                .ToArray()
+            : [];
+        var hostHolderSet = hostHolderPids.ToHashSet();
+        var foreignHolderPids = livePids.Where(pid =>
+                runtimeOwned
+                    ? runtimeForeign.Contains(pid)
+                    : host is not null
+                        ? !hostHolderSet.Contains(pid)
+                        : true)
+            .ToArray();
+        var contended =
+            (runtimeOwned && (host is not null || foreignHolderPids.Length > 0)) ||
+            (host is not null && foreignHolderPids.Length > 0);
+        var owner = contended
+            ? SessionOwner.Contended
+            : host is not null
+                ? SessionOwner.Host
+                : runtimeOwned
+                    ? SessionOwner.Agent
+                    : foreignHolderPids.Length > 0
+                        ? SessionOwner.External
+                        : SessionOwner.None;
+
+        return new SessionOwnershipSnapshot(
+            owner,
+            host,
+            hostHolderPids,
+            foreignHolderPids);
+    }
+
+    private sealed record SessionOwnershipSnapshot(
+        SessionOwner Owner,
+        HostOwnerEntry? Host,
+        IReadOnlyList<int> HostHolderPids,
+        IReadOnlyList<int> ForeignHolderPids);
 
     private async Task<SemaphoreSlim> AcquireLifecycleGateAsync(string sessionId, CancellationToken ct)
     {
@@ -166,7 +244,6 @@ public sealed class SessionRegistry
 
     public async Task<SessionInfo> CreateAsync(
         string? cwd,
-        bool useAgency,
         CancellationToken ct,
         string? name = null,
         string? model = null,
@@ -181,7 +258,6 @@ public sealed class SessionRegistry
         SessionRuntimeProfile.ValidateAvailableToolsRequest(availableTools);
         cwd ??= Environment.CurrentDirectory;
         var profile = SessionRuntimeProfile.Resolve(
-            useAgency,
             model,
             reasoningEffort,
             disableMcpServers,
@@ -190,7 +266,7 @@ public sealed class SessionRegistry
             disableBuiltinMcps,
             noCustomInstructions,
             copilotHome,
-            _runtimeOptions.ForProfile(useAgency));
+            _runtimeOptions.DefaultBackend);
         // The runtime invokes onAttached only after the complete requested
         // configuration has been applied and verified. A failed configure may
         // leave a quarantined route for retry, but it is not advertised as Owned.
@@ -204,7 +280,7 @@ public sealed class SessionRegistry
         if (!string.IsNullOrWhiteSpace(name))
             TryWriteWorkspaceField(sid, "name", name, "summary", name);
 
-        return WithYolo(_scanner.Get(sid, Owned))
+        return Get(sid)
             ?? new SessionInfo(sid, SessionState.Owned, cwd, null, null, name, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
     }
 
@@ -252,7 +328,7 @@ public sealed class SessionRegistry
 
     /// <summary>
     /// Adopt: if the session is held by another process, kill it (force=true required),
-    /// then session/load it into our ACP child.
+    /// then reload it into the selected runtime.
     /// Callers may re-supply agent/model/reasoning/process-scope settings to
     /// restore the same child behavior and re-apply persisted ACP session
     /// configuration after the load. Process flavor routing itself is not
@@ -304,7 +380,7 @@ public sealed class SessionRegistry
         bool? noCustomInstructions,
         string? copilotHome)
     {
-        var info = _scanner.Get(sessionId, Owned)
+        var info = Get(sessionId)
             ?? throw new FileNotFoundException($"Session {sessionId} not on disk");
         if (_hostOwnership.TryGet(sessionId, out var host))
         {
@@ -312,7 +388,6 @@ public sealed class SessionRegistry
                 $"Session is held by magpilot launcher PID {host.HostPid}; release it from the host before adopting.");
         }
         var requestedProfile = SessionRuntimeProfile.Resolve(
-            useAgency: false,
             model,
             reasoningEffort,
             disableMcpServers,
@@ -321,7 +396,7 @@ public sealed class SessionRegistry
             disableBuiltinMcps ?? false,
             noCustomInstructions ?? false,
             copilotHome,
-            _runtimeOptions.ForProfile(useAgency: false));
+            _runtimeOptions.DefaultBackend);
         var processScopeSpecified =
             disableMcpServers is not null ||
             agent is not null ||
@@ -359,7 +434,7 @@ public sealed class SessionRegistry
                 processScopeSpecified,
                 ct);
             _owned.TryAdd(sessionId, 0);
-            return CompleteAdopt(sessionId, WithYolo(_scanner.Get(sessionId, Owned) ?? info)!);
+            return CompleteAdopt(sessionId, Get(sessionId) ?? info);
         }
 
         // Recycling a shared child invalidates every route it hosted. The stale
@@ -373,7 +448,6 @@ public sealed class SessionRegistry
             var reloadProfile = retainedProfile is null
                 ? requestedProfile
                 : SessionRuntimeProfile.Resolve(
-                    retainedProfile.UseAgency,
                     model ?? retainedProfile.Model,
                     reasoningEffort ?? retainedProfile.ReasoningEffort,
                     disableMcpServers ?? retainedProfile.DisabledMcpServers,
@@ -384,7 +458,7 @@ public sealed class SessionRegistry
                     copilotHome ?? retainedProfile.CopilotHome,
                     retainedProfile.Backend);
             _logger.LogWarning(
-                "Session {Sid} was invalidated with its co-hosted ACP child; re-attaching it from disk",
+                "Session {Sid} was invalidated with its co-hosted runtime; re-attaching it from disk",
                 sessionId);
             await _runtime.ReloadFromDiskAsync(
                 sessionId,
@@ -394,7 +468,7 @@ public sealed class SessionRegistry
                 onAttached: id => _owned.TryAdd(id, 0));
             return CompleteAdopt(
                 sessionId,
-                WithYolo(_scanner.Get(sessionId, Owned)) ?? info with { State = SessionState.Owned });
+                Get(sessionId) ?? info with { State = SessionState.Owned });
         }
 
         // A cancelled/timed-out session/load, or a normal detach, can leave the
@@ -407,7 +481,6 @@ public sealed class SessionRegistry
             var reloadProfile = retainedProfile is null
                 ? requestedProfile
                 : SessionRuntimeProfile.Resolve(
-                    retainedProfile.UseAgency,
                     model ?? retainedProfile.Model,
                     reasoningEffort ?? retainedProfile.ReasoningEffort,
                     disableMcpServers ?? retainedProfile.DisabledMcpServers,
@@ -425,7 +498,7 @@ public sealed class SessionRegistry
                 onAttached: id => _owned.TryAdd(id, 0));
             return CompleteAdopt(
                 sessionId,
-                WithYolo(_scanner.Get(sessionId, Owned)) ?? info with { State = SessionState.Owned });
+                Get(sessionId) ?? info with { State = SessionState.Owned });
         }
 
         var eventsPath = Path.Combine(_scanner.Root, sessionId, "events.jsonl");
@@ -433,7 +506,7 @@ public sealed class SessionRegistry
         {
             throw new SessionNotLoadableException(
                 sessionId,
-                $"Session {sessionId} has no events.jsonl and is not resident in a live ACP child; it cannot be loaded.");
+                $"Session {sessionId} has no events.jsonl and is not resident in a live runtime; it cannot be loaded.");
         }
 
         if (info.State == SessionState.Owned)
@@ -491,29 +564,25 @@ public sealed class SessionRegistry
                 requestedProfile,
                 processScopeSpecified,
                 ct);
-            return CompleteAdopt(sessionId, WithYolo(_scanner.Get(sessionId, Owned) ?? info)!);
+            return CompleteAdopt(sessionId, Get(sessionId) ?? info);
         }
 
         if (info.State == SessionState.Locked)
         {
             if (!force) throw new InvalidOperationException("Session is held by another process; pass force=true to take over.");
-            if (info.OwnerPid is int pid)
+            var evicted = _runtime.EvictForeignLiveHolders(sessionId);
+            if (evicted.Count > 0)
             {
-                try
-                {
-                    var p = Process.GetProcessById(pid);
-                    _logger.LogWarning("Killing PID {Pid} to adopt session {Sid}", pid, sessionId);
-                    p.Kill(entireProcessTree: true);
-                    p.WaitForExit(5000);
-                }
-                catch (Exception ex) { _logger.LogWarning(ex, "Could not kill PID {Pid}", pid); }
+                _logger.LogWarning(
+                    "Force-adopt evicted {Count} foreign holder(s) on {Sid}: {Pids}",
+                    evicted.Count,
+                    sessionId,
+                    string.Join(", ", evicted));
             }
-            // Wait briefly for the lock file to vanish
-            for (var i = 0; i < 20; i++)
+            if (_runtime.HasForeignLiveHolder(sessionId))
             {
-                var refreshed = _scanner.Get(sessionId, Owned);
-                if (refreshed?.State == SessionState.Dormant) break;
-                await Task.Delay(100, ct);
+                throw new InvalidOperationException(
+                    $"Could not evict every foreign holder of session {sessionId}; it was not adopted.");
             }
         }
 
@@ -527,7 +596,7 @@ public sealed class SessionRegistry
         await _runtime.ReloadFromDiskAsync(sessionId, cwd, requestedProfile, ct, onAttached: id => _owned.TryAdd(id, 0));
         return CompleteAdopt(
             sessionId,
-            WithYolo(_scanner.Get(sessionId, Owned)) ?? info with { State = SessionState.Owned });
+            Get(sessionId) ?? info with { State = SessionState.Owned });
     }
 
     private SessionInfo CompleteAdopt(string sessionId, SessionInfo info)
@@ -583,28 +652,10 @@ public sealed class SessionRegistry
     /// </summary>
     public SessionStateInfo? GetState(string sessionId)
     {
-        var info = WithYolo(_scanner.Get(sessionId, Owned));
-        if (info is null) return null;
-
-        SessionOwner owner;
-        int? hostPid = null;
-        if (_hostOwnership.TryGet(sessionId, out var hostEntry))
-        {
-            owner = SessionOwner.Host;
-            hostPid = hostEntry.HostPid;
-        }
-        else if (IsAgentOwned(sessionId))
-        {
-            owner = SessionOwner.Agent;
-        }
-        else if (info.OwnerPid is int ownerPid && IsAlive(ownerPid))
-        {
-            owner = SessionOwner.External;
-        }
-        else
-        {
-            owner = SessionOwner.None;
-        }
+        var metadata = _scanner.Get(sessionId);
+        if (metadata is null) return null;
+        var ownership = ObserveOwnership(sessionId);
+        var info = Project(metadata, ownership);
 
         SessionActivity activity;
         InFlightInfo? inFlight = null;
@@ -613,8 +664,7 @@ public sealed class SessionRegistry
             activity = SessionActivity.InFlight;
             inFlight = new InFlightInfo(
                 Driver: entry.Requester,
-                StartedAtMs: entry.StartedAt.ToUnixTimeMilliseconds(),
-                Preview: null);
+                StartedAtMs: entry.StartedAt.ToUnixTimeMilliseconds());
         }
         else
         {
@@ -625,12 +675,14 @@ public sealed class SessionRegistry
 
         return new SessionStateInfo(
             info,
-            owner,
-            hostPid,
+            ownership.Owner,
+            ownership.Host?.HostPid,
+            ownership.Host?.LeaseId,
             activity,
             inFlight,
             lastEvent,
-            _runtime.RuntimeStatus(sessionId));
+            _runtime.RuntimeStatus(sessionId),
+            ownership.ForeignHolderPids);
     }
 
     /// <summary>
@@ -659,7 +711,7 @@ public sealed class SessionRegistry
 
     private async Task<SessionStateInfo> AcquireForHostCoreAsync(string sessionId, int hostPid, bool force, CancellationToken ct)
     {
-        var scanned = _scanner.Get(sessionId, Owned);
+        var scanned = Get(sessionId);
         if (scanned is null)
             throw new FileNotFoundException($"Session {sessionId} not on disk");
         if (_hostOwnership.TryGet(sessionId, out var liveHost))
@@ -669,23 +721,26 @@ public sealed class SessionRegistry
             throw new InvalidOperationException(
                 $"Session is already held by host PID {liveHost.HostPid}; it must release before host PID {hostPid} can acquire it.");
         }
-        if (!_runtime.IsAttached(sessionId) &&
-            scanned.State == SessionState.Locked &&
-            scanned.OwnerPid is int externalPid &&
-            IsAlive(externalPid) &&
-            externalPid != hostPid)
+        var ownership = ObserveOwnership(sessionId);
+        var unrelatedHolders = ownership.ForeignHolderPids
+            .Where(pid =>
+                pid != hostPid &&
+                !ProcessAncestry.IsSelfOrDescendantOf(pid, hostPid))
+            .ToArray();
+        if (unrelatedHolders.Length > 0 && !force)
         {
-            if (!force)
-            {
-                throw new InvalidOperationException(
-                    $"Session is held by external PID {externalPid}; pass force=true to evict it before acquiring.");
-            }
+            throw new InvalidOperationException(
+                $"Session is held by external PID(s) {string.Join(", ", unrelatedHolders)}; " +
+                "pass force=true to evict them before acquiring.");
+        }
 
+        if (unrelatedHolders.Length > 0)
+        {
             var evicted = _runtime.EvictForeignLiveHolders(sessionId);
             if (_runtime.HasForeignLiveHolder(sessionId))
             {
                 throw new InvalidOperationException(
-                    $"Could not evict the external holder of session {sessionId}; host acquisition was not recorded.");
+                    $"Could not evict every external holder of session {sessionId}; host acquisition was not recorded.");
             }
             _logger.LogWarning(
                 "AcquireForHost force-evicted {Count} external holder(s) on {Sid}: {Pids}",
@@ -745,7 +800,7 @@ public sealed class SessionRegistry
             _handoffFlavor[sessionId] = flavor;
         else
             _handoffFlavor.TryRemove(sessionId, out _);
-        _hostOwnership.Set(sessionId, hostPid, flavor);
+        var hostLease = _hostOwnership.Set(sessionId, hostPid, flavor);
 
         // Drop the in-memory yolo bit so the terminal user (now at a
         // real keyboard with a TTY) gets the standard interactive
@@ -755,49 +810,45 @@ public sealed class SessionRegistry
         _yolo.Clear(sessionId);
 
         // Refresh state for the response (now reflecting host ownership).
-        return GetState(sessionId)!;
+        var state = GetState(sessionId)!;
+        return state with
+        {
+            HostPid = hostPid,
+            HostLeaseId = hostLease.LeaseId,
+        };
     }
 
     /// <summary>
     /// Hand a host-owned session back to the agent. In the cooperative case the
-    /// launcher has already shut its child copilot down; we clear the host marker
-    /// and re-load the session into our ACP child. If a live foreign copilot still
-    /// holds the session, behaviour depends on <paramref name="force"/>:
-    /// <list type="bullet">
-    ///   <item><c>force=false</c> (graceful): do NOT kill it. Decline to adopt and
-    ///     retain Host ownership and the recorded flavor so the caller can retry
-    ///     or offer a forceful takeover. This preserves the terminal's cooperative
-    ///     "resume here" prompt.</item>
-    ///   <item><c>force=true</c>: evict the live foreign copilot first, then adopt.
-    ///     This ends the terminal session outright, so it is only ever driven by an
-    ///     explicit user "Force take over".</item>
-    /// </list>
+    /// launcher has already shut its child Copilot down. The lease must match the
+    /// exact terminal acquisition. The agent retains the lease and declines to
+    /// attach while any live foreign holder remains.
     /// Adopting while a foreign copilot still writes would split-brain one session
     /// across two drivers (the "garbled then stalled" failure), so we never adopt
     /// while a live foreign holder remains.
     /// </summary>
-    public async Task<SessionStateInfo> ReleaseFromHostAsync(string sessionId, int hostPid, bool force, CancellationToken ct)
+    public async Task<SessionStateInfo> ReleaseFromHostAsync(string sessionId, Guid leaseId, CancellationToken ct)
     {
         var gate = await AcquireLifecycleGateAsync(sessionId, ct);
         try
         {
-            return await ReleaseFromHostCoreAsync(sessionId, hostPid, force, ct);
+            return await ReleaseFromHostCoreAsync(sessionId, leaseId, ct);
         }
         finally { gate.Release(); }
     }
 
-    private async Task<SessionStateInfo> ReleaseFromHostCoreAsync(string sessionId, int hostPid, bool force, CancellationToken ct)
+    private async Task<SessionStateInfo> ReleaseFromHostCoreAsync(string sessionId, Guid leaseId, CancellationToken ct)
     {
-        var info = _scanner.Get(sessionId, Owned)
+        var info = Get(sessionId)
             ?? throw new FileNotFoundException($"Session {sessionId} not on disk");
 
         HostSessionFlavor? recordedFlavor = null;
         var hasReleaseRecord = false;
         if (_hostOwnership.TryGetRecorded(sessionId, out var entry))
         {
-            if (entry.HostPid != hostPid)
+            if (entry.LeaseId != leaseId)
                 throw new InvalidOperationException(
-                    $"Session is held by host PID {entry.HostPid}, not {hostPid}; cannot release on its behalf.");
+                    $"Session is held by lease {entry.LeaseId}, not {leaseId}; cannot release on its behalf.");
             recordedFlavor = entry.Flavor;
             hasReleaseRecord = true;
         }
@@ -809,58 +860,36 @@ public sealed class SessionRegistry
         if (!hasReleaseRecord)
         {
             _logger.LogInformation(
-                "Ignoring stale ReleaseFromHost for {Sid} from PID {Pid}; no matching handoff remains",
+                "Ignoring stale ReleaseFromHost for {Sid} with lease {LeaseId}; no matching handoff remains",
                 sessionId,
-                hostPid);
+                leaseId);
             return GetState(sessionId)!;
-        }
-
-        // Only a FORCEFUL release evicts a still-live foreign holder. In the
-        // cooperative handoff the launcher has already torn its copilot down, so
-        // there is nothing to evict and this is a no-op either way. But if the
-        // launcher never heard the release_requested knock (deaf/dead subscription)
-        // or was mid-turn, its interactive copilot is still attached and appending
-        // to events.jsonl. Killing it is destructive -- it ends the terminal
-        // session with no cooperative "resume here" prompt -- so we only do it on
-        // an explicit force (the SPA's "Force take over"). A graceful release
-        // leaves the terminal untouched and simply declines to adopt below.
-        if (force)
-        {
-            var evicted = _runtime.EvictForeignLiveHolders(sessionId);
-            if (evicted.Count > 0)
-                _logger.LogWarning("ReleaseFromHost force-evicted {Count} live foreign holder(s) on {Sid}: {Pids}",
-                    evicted.Count, sessionId, string.Join(", ", evicted));
         }
 
         // Never adopt while a live foreign copilot still holds the session: two
-        // live drivers on one events.jsonl is the split-brain. On a graceful
-        // release this is the normal "launcher hasn't let go yet" outcome (the
-        // caller re-raises the takeover choice); on a forceful release it only
-        // happens if the eviction couldn't complete (e.g. no permission to kill).
-        // Either way, retain the host record (and its saved flavor) so a later
-        // release can retry without losing the configuration to restore.
+        // live drivers on one events.jsonl is the split-brain. The launcher must
+        // stop its child before releasing. Forceful eviction is a separate
+        // agent-side take-over transition.
         if (_runtime.HasForeignLiveHolder(sessionId))
         {
-            _logger.LogInformation(
-                "ReleaseFromHost: a live foreign holder remains on {Sid}; not adopting (force={Force})",
-                sessionId, force);
-            return GetState(sessionId)!;
+            throw new InvalidOperationException(
+                $"A live foreign holder remains on session {sessionId}; terminal release was not accepted.");
         }
 
-        // Re-load the session into our ACP child. The host's interactive copilot
-        // appended to events.jsonl while it was driving, and our own child still
-        // still has the snapshot held before detachment in memory (copilot implements neither
-        // session/close nor a disk re-read for an already-loaded session), so the
-        // holding child is recycled first -- otherwise session/load either answers
-        // "already loaded" or serves the frozen copy. The session comes back on
-        // the flavor it left on: same process/tool scope, same model, same
-        // reasoning. The ACP manager may retain a quarantined route if
+        // Re-load the session into the recorded runtime profile. The terminal
+        // appended to events.jsonl while it was driving, so the backend must
+        // reconnect from disk rather than serve its pre-handoff snapshot. The
+        // session comes back with the same process/tool scope, model, and
+        // reasoning. The runtime may retain a quarantined route if
         // configuration fails, but registry ownership is not restored until the
         // complete tuple verifies.
         var cwd = info.Cwd ?? Environment.CurrentDirectory;
         var profile = ResolveProfile(recordedFlavor)
             ?? _runtime.EffectiveProfile(sessionId)
-            ?? SessionRuntimeProfile.Default;
+            ?? SessionRuntimeProfile.Default with
+            {
+                Backend = _runtimeOptions.DefaultBackend,
+            };
         try
         {
             if (_runtime.IsAttached(sessionId))
@@ -891,10 +920,99 @@ public sealed class SessionRegistry
                 ex,
                 "Re-attaching {Sid} during ReleaseFromHost failed (runtime profile={Profile})",
                 sessionId,
-                profile.UseAgency ? "agency" : "default");
+                profile.Backend);
+            throw new SessionRuntimeConfigurationException(
+                $"Re-attaching session {sessionId} during terminal handback failed.",
+                ex)
+            {
+                SessionId = sessionId,
+                LeavesSessionIndeterminate = _runtime.IsAttached(sessionId),
+            };
         }
 
         return GetState(sessionId)!;
+    }
+
+    public async Task<SessionStateInfo> TakeOverForAgentAsync(
+        string sessionId,
+        bool force,
+        CancellationToken ct)
+    {
+        var gate = await AcquireLifecycleGateAsync(sessionId, ct);
+        try
+        {
+            var state = GetState(sessionId)
+                ?? throw new FileNotFoundException($"Session {sessionId} not on disk");
+            if (state.Owner == SessionOwner.Agent)
+                return state;
+            if (!force && state.Owner is SessionOwner.Host or SessionOwner.External or SessionOwner.Contended)
+            {
+                throw new InvalidOperationException(
+                    $"Session {sessionId} is {state.Owner}; force is required to take it over.");
+            }
+
+            if (force)
+            {
+                var evicted = _runtime.EvictForeignLiveHolders(sessionId);
+                if (evicted.Count > 0)
+                {
+                    _logger.LogWarning(
+                        "Agent take-over evicted {Count} foreign holder(s) on {Sid}: {Pids}",
+                        evicted.Count,
+                        sessionId,
+                        string.Join(", ", evicted));
+                }
+                if (_runtime.HasForeignLiveHolder(sessionId))
+                {
+                    throw new InvalidOperationException(
+                        $"A foreign holder remains on session {sessionId}; it was not attached.");
+                }
+            }
+
+            HostSessionFlavor? recordedFlavor = null;
+            if (_handoffFlavor.TryGetValue(sessionId, out var pendingFlavor))
+                recordedFlavor = pendingFlavor;
+            else if (_hostOwnership.TryGetRecorded(sessionId, out var recorded))
+                recordedFlavor = recorded.Flavor;
+            var profile = ResolveProfile(recordedFlavor)
+                ?? _runtime.EffectiveProfile(sessionId)
+                ?? SessionRuntimeProfile.Default with
+                {
+                    Backend = _runtimeOptions.DefaultBackend,
+                };
+
+            if (_runtime.IsAttached(sessionId))
+            {
+                if (_runtime.IsQuarantined(sessionId))
+                {
+                    await _runtime.ApplyOwnedConfigurationAsync(
+                        sessionId,
+                        profile,
+                        processScopeSpecified: true,
+                        ct);
+                }
+            }
+            else
+            {
+                var metadata = _scanner.Get(sessionId)
+                    ?? throw new FileNotFoundException($"Session {sessionId} not on disk");
+                await _runtime.ReloadFromDiskAsync(
+                    sessionId,
+                    metadata.Cwd ?? Environment.CurrentDirectory,
+                    profile,
+                    ct);
+            }
+
+            _owned.TryAdd(sessionId, 0);
+            _hostOwnership.Clear(sessionId);
+            _handoffFlavor.TryRemove(sessionId, out _);
+            return GetState(sessionId)
+                ?? throw new FileNotFoundException($"Session {sessionId} not on disk");
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 
     /// <summary>
@@ -905,7 +1023,6 @@ public sealed class SessionRegistry
         profile is null
             ? null
             : new HostSessionFlavor(
-                UseAgency: profile.UseAgency,
                 Model: profile.Model,
                 ReasoningEffort: profile.ReasoningEffort,
                 DisabledMcpServers: profile.DisabledMcpServers?.ToArray(),
@@ -920,7 +1037,6 @@ public sealed class SessionRegistry
         recorded is null
             ? null
             : SessionRuntimeProfile.Resolve(
-                recorded.UseAgency,
                 recorded.Model,
                 recorded.ReasoningEffort,
                 recorded.DisabledMcpServers,
@@ -974,11 +1090,6 @@ public sealed class SessionRegistry
         }
     }
 
-    private static bool IsAlive(int pid)
-    {
-        try { return !Process.GetProcessById(pid).HasExited; }
-        catch { return false; }
-    }
 }
 
 public sealed class SessionNotLoadableException(string sessionId, string message)

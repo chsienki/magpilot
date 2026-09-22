@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text.Json.Nodes;
 using Magpilot.Agent.Acp;
+using Magpilot.Agent.Runtime;
 using Magpilot.Agent.Sessions;
 using Magpilot.Shared.Models;
 using Microsoft.Extensions.Configuration;
@@ -123,7 +124,7 @@ public sealed class AcpSessionManagerTests : IDisposable
         var ex = await Assert.ThrowsAsync<SessionConfigurationException>(() =>
             manager.NewSessionAsync(
                 _root,
-                AcpFlavor.Resolve(useAgency: false, model, reasoningEffort),
+                AcpFlavor.Resolve(model, reasoningEffort),
                 CancellationToken.None,
                 _ => attached = true));
 
@@ -176,7 +177,7 @@ public sealed class AcpSessionManagerTests : IDisposable
 
         await manager.NewSessionAsync(
             _root,
-            AcpFlavor.Resolve(useAgency: false, model: "new", reasoningEffort: null),
+            AcpFlavor.Resolve(model: "new", reasoningEffort: null),
             CancellationToken.None);
         Assert.Equal("new", manager.EffectiveFlavor(sid)!.Model);
 
@@ -225,7 +226,7 @@ public sealed class AcpSessionManagerTests : IDisposable
         var registry = NewRegistry(manager);
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            registry.CreateAsync(_root, useAgency: false, CancellationToken.None, model: "new"));
+            registry.CreateAsync(_root, CancellationToken.None, model: "new"));
 
         // The child really does hold the session, so its lock stays; what changes
         // is that the session is quarantined and refused for traffic.
@@ -305,7 +306,7 @@ public sealed class AcpSessionManagerTests : IDisposable
         var manager = NewManager(() => client);
         var registry = NewRegistry(manager);
 
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
+        await registry.CreateAsync(_root, CancellationToken.None);
         Assert.False(manager.IsQuarantined(sid));
 
         await Assert.ThrowsAsync<SessionConfigurationException>(() =>
@@ -335,14 +336,14 @@ public sealed class AcpSessionManagerTests : IDisposable
         var manager = NewManager(() => client);
         var registry = NewRegistry(manager);
 
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
+        await registry.CreateAsync(_root, CancellationToken.None);
 
         using var cancelled = new CancellationTokenSource();
         await cancelled.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             manager.ApplyOwnedConfigurationAsync(
                 sid,
-                AcpFlavor.Resolve(useAgency: false, "old", null),
+                AcpFlavor.Resolve("old", null),
                 processScopeSpecified: false,
                 cancelled.Token));
 
@@ -378,8 +379,8 @@ public sealed class AcpSessionManagerTests : IDisposable
         var manager = NewManager(() => client);
         var registry = NewRegistry(manager);
 
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
-        var requested = AcpFlavor.Resolve(useAgency: false, "new", null);
+        await registry.CreateAsync(_root, CancellationToken.None);
+        var requested = AcpFlavor.Resolve("new", null);
 
         await Task.WhenAll(
             manager.ApplyOwnedConfigurationAsync(sid, requested, false, CancellationToken.None),
@@ -434,11 +435,11 @@ public sealed class AcpSessionManagerTests : IDisposable
         var manager = NewManager(() => client);
         var registry = NewRegistry(manager);
 
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
+        await registry.CreateAsync(_root, CancellationToken.None);
 
         var configure = manager.ApplyOwnedConfigurationAsync(
             sid,
-            AcpFlavor.Resolve(useAgency: false, "new", "none"),
+            AcpFlavor.Resolve("new", "none"),
             processScopeSpecified: false,
             CancellationToken.None);
         await modelSetStarted.Task;
@@ -498,12 +499,12 @@ public sealed class AcpSessionManagerTests : IDisposable
             });
         var registry = NewRegistry(manager);
 
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
+        await registry.CreateAsync(_root, CancellationToken.None);
+        await registry.CreateAsync(_root, CancellationToken.None);
 
         var configuring = manager.ApplyOwnedConfigurationAsync(
             "config-busy-1",
-            AcpFlavor.Resolve(useAgency: false, "new", null),
+            AcpFlavor.Resolve("new", null),
             processScopeSpecified: false,
             CancellationToken.None);
         await setStarted.Task;
@@ -539,11 +540,11 @@ public sealed class AcpSessionManagerTests : IDisposable
             switch (method)
             {
                 case "session/new":
-                {
-                    var sid = $"reserved-{Interlocked.Increment(ref created)}";
-                    CreateSessionLock(sid, Environment.ProcessId);
-                    return Snapshot(sid);
-                }
+                    {
+                        var sid = $"reserved-{Interlocked.Increment(ref created)}";
+                        CreateSessionLock(sid, Environment.ProcessId);
+                        return Snapshot(sid);
+                    }
                 case "session/prompt":
                     promptStarted.TrySetResult();
                     await finishPrompt.Task;
@@ -555,8 +556,8 @@ public sealed class AcpSessionManagerTests : IDisposable
         var manager = NewManager(() => client);
         var registry = NewRegistry(manager);
 
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
+        await registry.CreateAsync(_root, CancellationToken.None);
+        await registry.CreateAsync(_root, CancellationToken.None);
 
         var prompt = await manager.StartPromptAsync(
             "reserved-2",
@@ -786,7 +787,6 @@ public sealed class AcpSessionManagerTests : IDisposable
         const string unrelatedSid = "routing-unrelated";
         const string lateSid = "routing-late-load";
         var isolatedFlavor = AcpFlavor.Resolve(
-            useAgency: false,
             model: null,
             reasoningEffort: null,
             disableMcpServers: ["isolated"]);
@@ -977,8 +977,8 @@ public sealed class AcpSessionManagerTests : IDisposable
             });
         var registry = NewRegistry(manager);
 
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
+        await registry.CreateAsync(_root, CancellationToken.None);
+        await registry.CreateAsync(_root, CancellationToken.None);
 
         await Assert.ThrowsAsync<OperationCanceledException>(() =>
             manager.RecycleForStaleAsync(
@@ -1112,8 +1112,8 @@ public sealed class AcpSessionManagerTests : IDisposable
             });
         var registry = NewRegistry(manager);
 
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
+        await registry.CreateAsync(_root, CancellationToken.None);
+        await registry.CreateAsync(_root, CancellationToken.None);
 
         var first = manager.RecycleForStaleAsync("generation-1", _ => _root, CancellationToken.None);
         await firstRecycleEntered.Task;
@@ -1263,8 +1263,8 @@ public sealed class AcpSessionManagerTests : IDisposable
             });
         var registry = NewRegistry(manager);
 
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
+        await registry.CreateAsync(_root, CancellationToken.None);
+        await registry.CreateAsync(_root, CancellationToken.None);
         var first = await manager.StartPromptAsync(
             "stalled-1",
             "one",
@@ -1532,7 +1532,7 @@ public sealed class AcpSessionManagerTests : IDisposable
         var manager = NewManager(() => client);
         var registry = NewRegistry(manager);
 
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
+        await registry.CreateAsync(_root, CancellationToken.None);
 
         var ex = await Assert.ThrowsAsync<SessionConfigurationException>(() =>
             registry.AdoptAsync(sid, force: false, CancellationToken.None, model: "new", reasoningEffort: "none"));
@@ -1578,7 +1578,7 @@ public sealed class AcpSessionManagerTests : IDisposable
         manager = NewManager(() => client);
         var registry = NewRegistry(manager);
 
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
+        await registry.CreateAsync(_root, CancellationToken.None);
 
         var ex = await Assert.ThrowsAsync<SessionConfigurationException>(() =>
             registry.AdoptAsync(
@@ -1625,7 +1625,7 @@ public sealed class AcpSessionManagerTests : IDisposable
 
         await registry.CreateAsync(
             _root,
-            useAgency: false,
+
             CancellationToken.None,
             model: "claude-opus-4.8");
 
@@ -1676,12 +1676,12 @@ public sealed class AcpSessionManagerTests : IDisposable
 
         await registry.CreateAsync(
             _root,
-            useAgency: false,
+
             CancellationToken.None,
             model: "new");
         await manager.ApplyOwnedConfigurationAsync(
             sid,
-            AcpFlavor.Resolve(useAgency: false, model: null, reasoningEffort: "none"),
+            AcpFlavor.Resolve(model: null, reasoningEffort: "none"),
             processScopeSpecified: false,
             CancellationToken.None);
 
@@ -1732,14 +1732,14 @@ public sealed class AcpSessionManagerTests : IDisposable
 
         await registry.CreateAsync(
             _root,
-            useAgency: false,
+
             CancellationToken.None,
             model: "new");
 
         var ex = await Assert.ThrowsAsync<SessionConfigurationException>(() =>
             manager.ApplyOwnedConfigurationAsync(
                 sid,
-                AcpFlavor.Resolve(useAgency: false, model: null, reasoningEffort: "none"),
+                AcpFlavor.Resolve(model: null, reasoningEffort: "none"),
                 processScopeSpecified: false,
                 CancellationToken.None));
 
@@ -1775,7 +1775,7 @@ public sealed class AcpSessionManagerTests : IDisposable
         var registry = NewRegistry(manager);
 
         await Assert.ThrowsAsync<SessionConfigurationException>(() =>
-            registry.CreateAsync(_root, useAgency: false, CancellationToken.None, model: "new"));
+            registry.CreateAsync(_root, CancellationToken.None, model: "new"));
         Assert.True(manager.IsQuarantined(sid));
 
         await manager.PromptAsync(sid, "hello", CancellationToken.None);
@@ -1783,7 +1783,7 @@ public sealed class AcpSessionManagerTests : IDisposable
 
         await manager.ApplyOwnedConfigurationAsync(
             sid,
-            AcpFlavor.Resolve(useAgency: false, "old", null),
+            AcpFlavor.Resolve("old", null),
             processScopeSpecified: false,
             CancellationToken.None);
         Assert.False(manager.IsQuarantined(sid));
@@ -1852,17 +1852,24 @@ public sealed class AcpSessionManagerTests : IDisposable
 
         await registry.CreateAsync(
             _root,
-            useAgency: false,
+
             CancellationToken.None,
             model: "fast",
             reasoningEffort: "none",
             disableMcpServers: ["phone-only"]);
         Assert.Equal(2, oldSets);
 
-        await registry.AcquireForHostAsync(sid, Environment.ProcessId, force: false, CancellationToken.None);
+        var acquired = await registry.AcquireForHostAsync(
+            sid,
+            Environment.ProcessId,
+            force: false,
+            CancellationToken.None);
         Assert.DoesNotContain(sid, registry.Owned);
 
-        var state = await registry.ReleaseFromHostAsync(sid, Environment.ProcessId, force: false, CancellationToken.None);
+        var state = await registry.ReleaseFromHostAsync(
+            sid,
+            acquired.HostLeaseId!.Value,
+            CancellationToken.None);
 
         // The child that still had the session in memory is recycled first, so the
         // reload genuinely re-reads what the launcher wrote while it was driving.
@@ -1926,7 +1933,7 @@ public sealed class AcpSessionManagerTests : IDisposable
 
         await registry.CreateAsync(
             _root,
-            useAgency: false,
+
             CancellationToken.None,
             model: "fast",
             reasoningEffort: "none",
@@ -1941,7 +1948,7 @@ public sealed class AcpSessionManagerTests : IDisposable
         Assert.False(manager.IsResident(sid));
         Assert.Equal("fast", manager.EffectiveFlavor(sid)!.Model);
 
-        await registry.AcquireForHostAsync(
+        var acquired = await registry.AcquireForHostAsync(
             sid,
             Environment.ProcessId,
             force: false,
@@ -1988,8 +1995,7 @@ public sealed class AcpSessionManagerTests : IDisposable
 
             var state = await restartedRegistry.ReleaseFromHostAsync(
                 sid,
-                Environment.ProcessId,
-                force: false,
+                acquired.HostLeaseId!.Value,
                 CancellationToken.None);
 
             Assert.NotNull(acquiredFlavor);
@@ -2033,7 +2039,7 @@ public sealed class AcpSessionManagerTests : IDisposable
         var manager = NewManager(() => client);
         var registry = NewRegistry(manager);
 
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
+        await registry.CreateAsync(_root, CancellationToken.None);
         await registry.AcquireForHostAsync(
             sid,
             Environment.ProcessId,
@@ -2054,6 +2060,40 @@ public sealed class AcpSessionManagerTests : IDisposable
     }
 
     [Fact]
+    public async Task Wrong_terminal_lease_cannot_release_current_owner()
+    {
+        const string sid = "wrong-terminal-lease";
+        var client = new FakeAcpClient(Environment.ProcessId, (method, _, _, _) =>
+        {
+            if (method == "session/new")
+            {
+                CreateSessionLock(sid, Environment.ProcessId);
+                return Task.FromResult<JsonNode?>(ConfigState(
+                    sid,
+                    SelectOption("model", "Model", "model", "old", ("old", "Old"))));
+            }
+            Assert.Equal("session/close", method);
+            return Task.FromResult<JsonNode?>(new JsonObject());
+        });
+        var registry = NewRegistry(NewManager(() => client));
+        await registry.CreateAsync(_root, CancellationToken.None);
+        var acquired = await registry.AcquireForHostAsync(
+            sid,
+            Environment.ProcessId,
+            force: false,
+            CancellationToken.None);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            registry.ReleaseFromHostAsync(
+                sid,
+                Guid.NewGuid(),
+                CancellationToken.None));
+
+        Assert.Contains(acquired.HostLeaseId!.Value.ToString(), error.Message);
+        Assert.Equal(SessionOwner.Host, registry.GetState(sid)!.Owner);
+    }
+
+    [Fact]
     public async Task Polite_host_acquire_rejects_a_different_live_external_holder()
     {
         const string sid = "external-owner-conflict";
@@ -2071,7 +2111,7 @@ public sealed class AcpSessionManagerTests : IDisposable
                 force: false,
                 CancellationToken.None));
 
-        Assert.Contains($"external PID {Environment.ProcessId}", ex.Message);
+        Assert.Contains($"external PID(s) {Environment.ProcessId}", ex.Message);
         Assert.Equal(SessionOwner.External, registry.GetState(sid)!.Owner);
     }
 
@@ -2099,12 +2139,21 @@ public sealed class AcpSessionManagerTests : IDisposable
         var manager = NewManager(() => current, _ => { current = freshClient; return freshClient; });
         var registry = NewRegistry(manager);
 
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
-        await registry.AcquireForHostAsync(sid, Environment.ProcessId, force: false, CancellationToken.None);
+        await registry.CreateAsync(_root, CancellationToken.None);
+        var acquired = await registry.AcquireForHostAsync(
+            sid,
+            Environment.ProcessId,
+            force: false,
+            CancellationToken.None);
 
-        var state = await registry.ReleaseFromHostAsync(sid, Environment.ProcessId, force: false, CancellationToken.None);
+        await Assert.ThrowsAsync<SessionRuntimeConfigurationException>(() =>
+            registry.ReleaseFromHostAsync(
+                sid,
+                acquired.HostLeaseId!.Value,
+                CancellationToken.None));
 
         Assert.DoesNotContain(sid, registry.Owned);
+        var state = registry.GetState(sid)!;
         Assert.NotEqual(SessionOwner.Agent, state.Owner);
     }
 
@@ -2164,33 +2213,33 @@ public sealed class AcpSessionManagerTests : IDisposable
 
         await registry.CreateAsync(
             _root,
-            useAgency: false,
+
             CancellationToken.None,
             model: "fast");
         Assert.Equal(1, oldSets);
-        await registry.AcquireForHostAsync(
+        var acquired = await registry.AcquireForHostAsync(
             sid,
             Environment.ProcessId,
             force: false,
             CancellationToken.None);
 
-        var failed = await registry.ReleaseFromHostAsync(
-            sid,
-            Environment.ProcessId,
-            force: false,
-            CancellationToken.None);
+        await Assert.ThrowsAsync<SessionRuntimeConfigurationException>(() =>
+            registry.ReleaseFromHostAsync(
+                sid,
+                acquired.HostLeaseId!.Value,
+                CancellationToken.None));
 
         Assert.Equal(1, freshLoads);
         Assert.Equal(1, freshSets);
         Assert.True(manager.IsAttached(sid));
         Assert.True(manager.IsQuarantined(sid));
         Assert.DoesNotContain(sid, registry.Owned);
+        var failed = registry.GetState(sid)!;
         Assert.Equal(SessionOwner.Host, failed.Owner);
 
         var retried = await registry.ReleaseFromHostAsync(
             sid,
-            Environment.ProcessId,
-            force: false,
+            acquired.HostLeaseId!.Value,
             CancellationToken.None);
 
         Assert.Equal(1, freshLoads);
@@ -2257,10 +2306,10 @@ public sealed class AcpSessionManagerTests : IDisposable
 
         await registry.CreateAsync(
             _root,
-            useAgency: false,
+
             CancellationToken.None,
             model: "fast");
-        await registry.AcquireForHostAsync(
+        var acquired = await registry.AcquireForHostAsync(
             sid,
             deadHostPid,
             force: false,
@@ -2278,8 +2327,7 @@ public sealed class AcpSessionManagerTests : IDisposable
 
         var delayed = await registry.ReleaseFromHostAsync(
             sid,
-            deadHostPid,
-            force: false,
+            acquired.HostLeaseId!.Value,
             CancellationToken.None);
 
         Assert.Equal(SessionOwner.Agent, delayed.Owner);
@@ -2311,30 +2359,30 @@ public sealed class AcpSessionManagerTests : IDisposable
             switch (method)
             {
                 case "session/new":
-                {
-                    var sid = $"cohosted-{Interlocked.Increment(ref created)}";
-                    current[sid] = "old";
-                    CreateSessionLock(sid, Environment.ProcessId);
-                    return Task.FromResult(Snapshot(sid));
-                }
+                    {
+                        var sid = $"cohosted-{Interlocked.Increment(ref created)}";
+                        current[sid] = "old";
+                        CreateSessionLock(sid, Environment.ProcessId);
+                        return Task.FromResult(Snapshot(sid));
+                    }
                 case "session/load":
-                {
-                    var sid = @params!["sessionId"]!.GetValue<string>();
-                    lock (loaded) loaded.Add(sid);
-                    loadedSessions.Add(sid);
-                    current[sid] = "old";
-                    CreateSessionLock(sid, Environment.ProcessId);
-                    return Task.FromResult(Snapshot(sid));
-                }
+                    {
+                        var sid = @params!["sessionId"]!.GetValue<string>();
+                        lock (loaded) loaded.Add(sid);
+                        loadedSessions.Add(sid);
+                        current[sid] = "old";
+                        CreateSessionLock(sid, Environment.ProcessId);
+                        return Task.FromResult(Snapshot(sid));
+                    }
                 case "session/set_config_option":
-                {
-                    var sid = @params!["sessionId"]!.GetValue<string>();
-                    var value = @params["value"]!.GetValue<string>();
-                    current[sid] = value;
-                    if (loadedSessions.Contains(sid))
-                        setsAfterReload.Add((sid, value));
-                    return Task.FromResult(Snapshot(sid));
-                }
+                    {
+                        var sid = @params!["sessionId"]!.GetValue<string>();
+                        var value = @params["value"]!.GetValue<string>();
+                        current[sid] = value;
+                        if (loadedSessions.Contains(sid))
+                            setsAfterReload.Add((sid, value));
+                        return Task.FromResult(Snapshot(sid));
+                    }
                 default:
                     throw new Xunit.Sdk.XunitException($"Unexpected RPC {method}");
             }
@@ -2356,10 +2404,10 @@ public sealed class AcpSessionManagerTests : IDisposable
             });
         var registry = NewRegistry(manager);
 
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
+        await registry.CreateAsync(_root, CancellationToken.None);
         await registry.CreateAsync(
             _root,
-            useAgency: false,
+
             CancellationToken.None,
             model: "fast");
 
@@ -2402,7 +2450,7 @@ public sealed class AcpSessionManagerTests : IDisposable
         var manager = NewManager(() => client);
         var registry = NewRegistry(manager);
 
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
+        await registry.CreateAsync(_root, CancellationToken.None);
         manager.ObserveConfigState(
             sid,
             new JsonObject
@@ -2448,7 +2496,7 @@ public sealed class AcpSessionManagerTests : IDisposable
 
         await registry.CreateAsync(
             _root,
-            useAgency: false,
+
             CancellationToken.None,
             availableTools: ["phone-only"],
             disableBuiltinMcps: true,
@@ -2493,7 +2541,7 @@ public sealed class AcpSessionManagerTests : IDisposable
 
         await registry.CreateAsync(
             _root,
-            useAgency: false,
+
             CancellationToken.None,
             disableMcpServers: ["phone-only"]);
 
@@ -2524,7 +2572,7 @@ public sealed class AcpSessionManagerTests : IDisposable
         });
         var manager = NewManager(() => client);
         var registry = NewRegistry(manager);
-        await registry.CreateAsync(_root, useAgency: false, CancellationToken.None);
+        await registry.CreateAsync(_root, CancellationToken.None);
 
         Task<SessionInfo> AdoptAsync() => setting switch
         {
@@ -2615,7 +2663,6 @@ public sealed class AcpSessionManagerTests : IDisposable
                 return freshClient;
             });
         var requested = AcpFlavor.Resolve(
-            useAgency: false,
             model: "fast",
             reasoningEffort: "none",
             disableMcpServers: ["phone-only"],

@@ -39,9 +39,7 @@ public sealed partial class AcpSessionManager : IAgentSessionRuntime
 
     /// <summary>
     /// Maps sessionId -> the actual <see cref="AcpClient"/> that owns it.
-    /// Multiplexing flavors share one client across sessions; non-multiplexing
-    /// flavors (e.g. agency) get a dedicated client per session, also tracked
-    /// here so we can clean up on close.
+    /// Sessions with the same process-scoped flavor share one client.
     /// </summary>
     private readonly ConcurrentDictionary<string, AcpClient> _sessionClient = new();
 
@@ -1013,9 +1011,8 @@ public sealed partial class AcpSessionManager : IAgentSessionRuntime
             .ToList();
 
     /// <summary>
-    /// Kill the child holding a set of sessions -- recycling the pool entry for a
-    /// multiplexing flavor, or disposing the dedicated child of a non-multiplexing
-    /// one -- then invalidate the routing of every session it held and reap the
+    /// Kill the child holding a set of sessions by recycling its pool entry,
+    /// then invalidate the routing of every session it held and reap the
     /// now-dead locks so a rescan sees Dormant rather than Locked. Per-session
     /// flavor and config snapshots are kept so each session reloads on its own
     /// process scope with its own model/reasoning.
@@ -1094,19 +1091,14 @@ public sealed partial class AcpSessionManager : IAgentSessionRuntime
         {
             try
             {
-                if (flavor.MultiplexesSessions)
+                var replacement = await _recycleClient(flavor, target, CancellationToken.None);
+                if (replacement is null)
                 {
-                    var replacement = await _recycleClient(flavor, target, CancellationToken.None);
-                    if (replacement is null)
-                    {
-                        // The pool had already moved on to another generation.
-                        // Dispose only our stale target; never recycle the newer
-                        // cached child or invalidate routes it now serves.
-                        await target.DisposeAsync();
-                    }
+                    // The pool had already moved on to another generation.
+                    // Dispose only our stale target; never recycle the newer
+                    // cached child or invalidate routes it now serves.
+                    await target.DisposeAsync();
                 }
-                else
-                    await target.DisposeAsync(); // per-session child; just kill it
             }
             finally
             {
@@ -1439,12 +1431,17 @@ public sealed partial class AcpSessionManager : IAgentSessionRuntime
     /// recycled session may go stale again while another process keeps writing.
     /// </summary>
     public bool HasForeignLiveHolder(string sessionId)
+        => ForeignLiveHolderPids(sessionId).Count > 0;
+
+    public IReadOnlyList<int> ForeignLiveHolderPids(string sessionId)
     {
         var dir = Path.Combine(_sessionStateRoot, sessionId);
         var ours = _ourSessionPids.TryGetValue(sessionId, out var set) ? set : null;
         return Magpilot.Agent.Sessions.SessionLocks.Foreign(
             Magpilot.Agent.Sessions.SessionLocks.Inspect(dir),
-            pid => ours is not null && ours.ContainsKey(pid)).Count > 0;
+            pid => ours is not null && ours.ContainsKey(pid))
+            .Select(holder => holder.Pid)
+            .ToArray();
     }
 
     /// <summary>
@@ -1945,7 +1942,7 @@ public sealed partial class AcpSessionManager : IAgentSessionRuntime
         {
             "agent_message_chunk" => new AssistantDelta(ExtractText(update["content"]) ?? ""),
             "agent_thought_chunk" => new ThoughtDelta(ExtractText(update["content"]) ?? ""),
-            "user_message_chunk"  => new UserDelta(ExtractText(update["content"]) ?? ""),
+            "user_message_chunk" => new UserDelta(ExtractText(update["content"]) ?? ""),
             // ACP uses `tool_call` (status: pending) for new tool calls
             // and `tool_call_update` (status: in_progress | completed |
             // failed) for subsequent updates -- NOT the *_start / *_end

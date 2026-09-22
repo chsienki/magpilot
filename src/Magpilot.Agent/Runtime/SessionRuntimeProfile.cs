@@ -11,7 +11,6 @@ public enum SessionRuntimeBackend
 /// session independently of the runtime transport used to host it.
 /// </summary>
 public sealed record SessionRuntimeProfile(
-    bool UseAgency = false,
     string? Model = null,
     string? ReasoningEffort = null,
     IReadOnlyList<string>? DisabledMcpServers = null,
@@ -25,7 +24,6 @@ public sealed record SessionRuntimeProfile(
     public static readonly SessionRuntimeProfile Default = new();
 
     public static SessionRuntimeProfile Resolve(
-        bool useAgency,
         string? model,
         string? reasoningEffort,
         IReadOnlyList<string>? disableMcpServers = null,
@@ -46,7 +44,6 @@ public sealed record SessionRuntimeProfile(
             : ValidateCopilotHome(copilotHome);
 
         return new SessionRuntimeProfile(
-            useAgency,
             requestedModel,
             effort,
             disabled,

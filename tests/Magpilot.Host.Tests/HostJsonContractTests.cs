@@ -64,8 +64,9 @@ public class HostJsonContractTests
                     "createdAt": null, "updatedAt": null, "yolo": false },
           "owner": "Host",
           "hostPid": 999,
+          "hostLeaseId": "11111111-2222-3333-4444-555555555555",
           "activity": "InFlight",
-          "inFlight": { "driver": "spa", "startedAtMs": 100, "preview": "hi" },
+          "inFlight": { "driver": "spa", "startedAtMs": 100 },
           "lastEvent": { "type": "assistant_delta", "id": "e1", "timestamp": null },
           "runtimeStatus": {
             "backend": "sdk",
@@ -77,7 +78,8 @@ public class HostJsonContractTests
             "aiCreditsUsed": 0.125,
             "canEditModel": true,
             "updatedAt": "2026-09-19T00:00:00Z"
-          }
+          },
+          "foreignHolderPids": [123, 456]
         }
         """;
 
@@ -88,8 +90,12 @@ public class HostJsonContractTests
         Assert.Equal(SessionState.Locked, state.Info.State);
         Assert.Equal(SessionOwner.Host, state.Owner);
         Assert.Equal(999, state.HostPid);
+        Assert.Equal(
+            Guid.Parse("11111111-2222-3333-4444-555555555555"),
+            state.HostLeaseId);
         Assert.Equal(SessionActivity.InFlight, state.Activity);
         Assert.Equal("spa", state.InFlight!.Driver);
+        Assert.Equal([123, 456], state.ForeignHolderPids);
         Assert.Equal("assistant_delta", state.LastEvent!.Type);
         Assert.Equal("Model One", state.RuntimeStatus!.ModelName);
         Assert.Equal(0.125, state.RuntimeStatus.AiCreditsUsed);

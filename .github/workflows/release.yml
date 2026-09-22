@@ -20,6 +20,9 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
   validate-version:
     runs-on: ubuntu-latest
     steps:
@@ -37,7 +40,9 @@ jobs:
           fi
 
   build:
-    needs: validate-version
+    needs:
+      - test
+      - validate-version
     runs-on: windows-latest
 
     steps:
@@ -103,13 +108,13 @@ jobs:
         run: |
           $ver = "${{ steps.version.outputs.version }}"
           # MinProtocol/MaxProtocol track Magpilot.Shared.Versioning.ProtocolVersion.
-          # Bump these in lockstep with that constant when the wire contract
-          # changes incompatibly. Baseline is 1; future versions widen the
-          # range as the hub gains support for older agents.
+          # Zero means the protocol is unstable: every component updates in
+          # lockstep and no backward compatibility is promised. The first
+          # compatibility freeze will set the protocol to 1.
           $meta = [pscustomobject]@{
               version     = $ver
-              minProtocol = 1
-              maxProtocol = 1
+              minProtocol = 0
+              maxProtocol = 0
           }
           $meta | ConvertTo-Json | Out-File -FilePath "installer\installer-output\version.json" -Encoding ascii
 

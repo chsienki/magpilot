@@ -33,8 +33,6 @@ public sealed record WrapperOptions(
     bool PairDiscover,
     /// <summary>One-shot: register an already-running copilot session as host-owned (no spawn).</summary>
     string? Claim,
-    /// <summary>Wrap copilot in Microsoft's <c>agency</c> CLI (<c>agency copilot</c>) so the interactive session runs with agency's curated MCP servers + tooling.</summary>
-    bool Agency,
     /// <summary>Diagnostic helper: write the current Win32 console modes to this JSON path and exit.</summary>
     string? ConsoleModeSnapshot,
     /// <summary>Argv with all <c>--magpilot-*</c> flags stripped, ready to forward to the real copilot binary.</summary>
@@ -53,7 +51,6 @@ public sealed record WrapperOptions(
         string? pair = null;
         var pairDiscover = false;
         string? claim = null;
-        var agency = false;
         string? consoleModeSnapshot = null;
         var forward = new List<string>(argv.Length);
 
@@ -64,18 +61,17 @@ public sealed record WrapperOptions(
             // through, since the user clearly intended them for us.
             switch (a)
             {
-                case "--magpilot-take":            take = true; break;
-                case "--magpilot-force":           force = true; break;
-                case "--magpilot-no-take":         noTake = true; break;
-                case "--magpilot-skip-check":      skipCheck = true; break;
-                case "--magpilot-no-tui-changes":  noTuiChanges = true; break;
+                case "--magpilot-take": take = true; break;
+                case "--magpilot-force": force = true; break;
+                case "--magpilot-no-take": noTake = true; break;
+                case "--magpilot-skip-check": skipCheck = true; break;
+                case "--magpilot-no-tui-changes": noTuiChanges = true; break;
                 case "--magpilot-exit-on-handoff": exitOnHandoff = true; break;
-                case "--magpilot-status":          status = true; break;
-                case "--magpilot-help":            help = true; break;
-                case "--magpilot-version":         version = true; break;
-                case "--magpilot-update":          update = true; break;
-                case "--magpilot-pair":            pairDiscover = true; break;
-                case "--magpilot-agency":          agency = true; break;
+                case "--magpilot-status": status = true; break;
+                case "--magpilot-help": help = true; break;
+                case "--magpilot-version": version = true; break;
+                case "--magpilot-update": update = true; break;
+                case "--magpilot-pair": pairDiscover = true; break;
                 default:
                     if (a.StartsWith("--magpilot-console-mode-snapshot=", StringComparison.Ordinal))
                     {
@@ -116,7 +112,7 @@ public sealed record WrapperOptions(
         if (noTuiChanges)
             tuiOptions = LauncherTuiOptions.None;
 
-        return new WrapperOptions(take, force, noTake, skipCheck, tuiOptions, exitOnHandoff, status, help, version, update, pair, pairDiscover, claim, agency, consoleModeSnapshot, forward);
+        return new WrapperOptions(take, force, noTake, skipCheck, tuiOptions, exitOnHandoff, status, help, version, update, pair, pairDiscover, claim, consoleModeSnapshot, forward);
     }
 
     /// <summary>
@@ -208,18 +204,12 @@ public sealed record WrapperOptions(
           --magpilot-claim=<sid>       one-shot: register a stranded already-running copilot session
                                        as host-owned in the agent (no spawn). The agent's PID-liveness
                                        sweep handles cleanup when the copilot child eventually exits.
-          --magpilot-agency            wrap copilot in Microsoft's agency CLI (agency copilot) so the
-                                       session runs with agency's curated MCP servers + tooling. Extra
-                                       args are handed to agency, which routes its own flags (-a,
-                                       --profile, --no-default-mcps, ...) and passes the rest through to
-                                       copilot (--resume, --add-dir, ...).
           --magpilot-help              print this help and exit
 
         Env:
           MAGPILOT_AGENT_URL           default http://127.0.0.1:5099
           MAGPILOT_AGENT_TOKEN         required for state/acquire/release ops (the bearer shared with the agent)
           MAGPILOT_REAL_COPILOT        explicit path to the real copilot binary (optional)
-          MAGPILOT_AGENCY              explicit path to the agency binary (optional; used by --magpilot-agency)
           MAGPILOT_TERM_MANIFEST       write resolved TUI options and child hints as JSON (optional)
           MAGPILOT_TERM_DUMP[_POST]    capture raw and post-rewrite PTY output (optional)
           MAGPILOT_TERM_DUMP_MS        stop those captures after this many milliseconds (optional)
@@ -229,7 +219,7 @@ public sealed record WrapperOptions(
           --magpilot-skip-check        wins over everything else
           --magpilot-take + --magpilot-no-take -> error
           --magpilot-force             implies --magpilot-take
-          (none) + TTY                 interactive Y/n/f/d prompt when owned
+          (none) + TTY                 interactive Y/n/f prompt when owned
           (none) + non-TTY             refuse with 'pass --magpilot-take or --magpilot-force to override'
 
         For full copilot CLI help, run: copilot --magpilot-skip-check --help

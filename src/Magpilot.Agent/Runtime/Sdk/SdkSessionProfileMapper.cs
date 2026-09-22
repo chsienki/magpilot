@@ -44,12 +44,6 @@ internal static class SdkSessionProfileMapper
 
     private static void ValidateSupported(SessionRuntimeProfile profile)
     {
-        if (profile.UseAgency)
-        {
-            throw new NotSupportedException(
-                "Agency sessions remain on the ACP backend until Agency exposes a compatible SDK runtime.");
-        }
-
         if (profile.DisableBuiltinMcps)
         {
             throw new NotSupportedException(

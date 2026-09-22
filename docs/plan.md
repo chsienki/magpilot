@@ -5,12 +5,12 @@
 > `https://magpilot.home.sienkiewi.cz`, plus a central hub on the docker
 > LXC and per-host agent daemons. Drives the native Copilot agent runtime
 > through the public GitHub Copilot SDK, with ACP retained for rollback and
-> Agency sessions.
+> diagnostics.
 >
 > **v6 (2026-09-21):** Moved the per-host Agent onto the public Copilot SDK
 > runtime boundary. SDK is the default for ordinary sessions after a successful
 > 24-hour HENDRIK soak; `MAGPILOT_RUNTIME_BACKEND=acp` remains the explicit
-> rollback, and Agency remains ACP-backed.
+> rollback.
 >
 > **v5 (2026-04-25):** Added a first-class web client. Switched UI
 > strategy to **MAUI Blazor Hybrid** so the phone and web share a single

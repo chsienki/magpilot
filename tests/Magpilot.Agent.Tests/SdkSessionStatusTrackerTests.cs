@@ -16,7 +16,6 @@ public sealed class SdkSessionStatusTrackerTests
     {
         var tracker = new SdkSessionStatusTracker(
             SessionRuntimeProfile.Resolve(
-                useAgency: false,
                 model: null,
                 reasoningEffort: null,
                 backend: SessionRuntimeBackend.Sdk));

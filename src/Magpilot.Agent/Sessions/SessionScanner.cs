@@ -1,13 +1,21 @@
-using System.Diagnostics;
 using System.Globalization;
-using Magpilot.Shared.Models;
 
 namespace Magpilot.Agent.Sessions;
 
+public sealed record SessionMetadata(
+    string Id,
+    string? Cwd,
+    string? Repository,
+    string? Branch,
+    string? Summary,
+    DateTimeOffset? CreatedAt,
+    DateTimeOffset? UpdatedAt);
+
 /// <summary>
 /// Enumerates Copilot CLI's on-disk session-state directory.
-/// Each subdirectory is a session UUID. Presence of <c>inuse.&lt;PID&gt;.lock</c>
-/// indicates a live session; the PID is parsed from the filename.
+/// Each subdirectory is a session UUID. This class reads durable metadata only;
+/// ownership is composed by <see cref="SessionRegistry"/> from runtime state,
+/// terminal leases, and the complete lock snapshot.
 /// </summary>
 public sealed class SessionScanner
 {
@@ -24,48 +32,27 @@ public sealed class SessionScanner
 
     public string Root => _root;
 
-    public IEnumerable<SessionInfo> Enumerate(IReadOnlySet<string> ownedSessionIds)
+    public IEnumerable<SessionMetadata> Enumerate()
     {
         if (!Directory.Exists(_root)) yield break;
         foreach (var dir in Directory.EnumerateDirectories(_root))
         {
-            SessionInfo? info;
-            try { info = Parse(dir, ownedSessionIds); }
+            SessionMetadata? info;
+            try { info = Parse(dir); }
             catch (Exception ex) { _logger.LogWarning(ex, "Failed to parse session dir {Dir}", dir); continue; }
             if (info is not null) yield return info;
         }
     }
 
-    public SessionInfo? Get(string sessionId, IReadOnlySet<string> ownedSessionIds)
+    public SessionMetadata? Get(string sessionId)
     {
         var dir = Path.Combine(_root, sessionId);
-        return Directory.Exists(dir) ? Parse(dir, ownedSessionIds) : null;
+        return Directory.Exists(dir) ? Parse(dir) : null;
     }
 
-    private static SessionInfo Parse(string dir, IReadOnlySet<string> owned)
+    private static SessionMetadata Parse(string dir)
     {
         var id = Path.GetFileName(dir);
-        var lockFile = Directory.EnumerateFiles(dir, "inuse.*.lock").FirstOrDefault();
-        int? ownerPid = null;
-        if (lockFile is not null)
-        {
-            var name = Path.GetFileName(lockFile);
-            var parts = name.Split('.');
-            if (parts.Length >= 3 && int.TryParse(parts[1], out var pid))
-                ownerPid = pid;
-        }
-
-        var state = lockFile is null
-            ? SessionState.Dormant
-            : (owned.Contains(id) ? SessionState.Owned : SessionState.Locked);
-
-        // Sanity: if PID is recorded but the process no longer exists, treat as dormant.
-        if (state != SessionState.Dormant && ownerPid is int p)
-        {
-            try { _ = Process.GetProcessById(p); }
-            catch { state = SessionState.Dormant; }
-        }
-
         var (cwd, repository, branch, summary, createdAt, updatedAt) = ParseWorkspaceYaml(Path.Combine(dir, "workspace.yaml"));
         // Prefer the most recent activity signal: events.jsonl mtime > workspace.yaml mtime > dir mtime.
         // workspace.yaml's updated_at field isn't rewritten on every message,
@@ -73,7 +60,7 @@ public sealed class SessionScanner
         var derivedUpdated = LatestMTime(dir, ["events.jsonl", "workspace.yaml"]);
         if (derivedUpdated is { } d && (updatedAt is null || d > updatedAt))
             updatedAt = d;
-        return new SessionInfo(id, state, cwd, repository, branch, summary, ownerPid, createdAt, updatedAt);
+        return new SessionMetadata(id, cwd, repository, branch, summary, createdAt, updatedAt);
     }
 
     private static DateTimeOffset? LatestMTime(string dir, string[] candidates)

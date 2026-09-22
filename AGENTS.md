@@ -54,9 +54,10 @@ supplies (`AGENT_URL`, `MAGPILOT_AGENT_TOKEN`, `MAGPILOT_AGENT_HOME`).
 Magpilot puts the GitHub Copilot CLI on the user's phone (and any
 browser) by:
 
-1. Running `copilot --acp` (Agent Client Protocol over JSON-RPC on
-   stdio) on each real machine, wrapped by a small **per-host agent**
-   daemon that exposes an HTTP+SSE API to the LAN.
+1. Hosting the public Copilot SDK runtime on each real machine, with ACP
+   (Agent Client Protocol over JSON-RPC on stdio) retained as an explicit
+   rollback backend, behind a small **per-host agent** daemon that exposes an
+   HTTP+SSE API to the LAN.
 2. A central **hub** daemon on the docker LXC (102, `192.168.1.239`)
    that auto-discovers agents over UDP broadcast, aggregates their
    sessions, proxies streams, and serves the web SPA + handles auth.
@@ -91,9 +92,8 @@ src/
                                       but unused until the SDK backend is
                                       selected.
     Runtime/Sdk/SdkSessionProfileMapper.cs <- typed SDK create/resume config.
-                                      Agency and disable-all-built-in-MCP
-                                      profiles fail explicitly until parity is
-                                      proven.
+                                      Disable-all-built-in-MCP profiles fail
+                                      explicitly until parity is proven.
     Runtime/Sdk/SdkTurnEventMapper.cs <- stateful one-turn translator from
                                       typed SDK events to the existing
                                       StreamEvent SSE contract. session.idle
@@ -149,9 +149,10 @@ src/
                                       advisory (see "lock files are NOT
                                       a mutex" gotcha below).
     Sessions/HostOwnershipReconciler.cs <- BackgroundService: rebuilds the
-                                      map from live process ancestry so an
-                                      agent restart doesn't strand launcher
-                                      sessions as "kill to unlock".
+                                      map by checking every live lock holder's
+                                      process ancestry so an agent restart
+                                      doesn't strand launcher sessions as
+                                      "kill to unlock".
     Sessions/ProcessAncestry.cs    <- Toolhelp process-tree walk backing the
                                       reconciler (find a `magpilot` ancestor).
     Sessions/HistoryReader.cs      <- reads events.jsonl directly so the
@@ -165,9 +166,9 @@ src/
     Logging/LogModels.cs           <- ingest + query DTOs
     Api/LogEndpoints.cs            <- POST /api/log[/batch], GET /api/log[/sources]
     Api/HubEndpoints.cs            <- per-agent proxy. Routes pick AgentClientKind
-                                      per call. Forwards the four shim routes
-                                      (/state, /release-request, /acquire-for-host,
-                                      /release) verbatim via Forward(resp).
+                                      per call. Proxies state,
+                                      release-request, and agent take-over;
+                                      terminal acquire/release stay local.
     Auth/HubAuth.cs                <- cookie auth + GitHub OAuth (with
                                       ReturnUrl bounce for satellite SPAs).
   Magpilot.Host/     <- the `magpilot` launcher (assembly: magpilot.exe).
@@ -248,7 +249,7 @@ scripts/capture-tui-matrix.ps1 <- interactive black-box TUI characterization
 scripts/probe-terminal-paths.ps1 <- compares Node TTY capabilities + terminal
                                     query replies direct vs nested ConPTY.
 tools/tui-matrix/      <- capture renderer + offline xterm.js theme lab.
-scripts/test-shim-phase1.sh <- bash acceptance test for the four shim endpoints.
+scripts/test-shim-phase1.sh <- bash acceptance test for the handoff endpoints.
                                Honors TEST_HOST_PID env override (MSYS2 bash's $$
                                is an internal PID the Win32 process table can't see).
 ```
@@ -260,12 +261,12 @@ scripts/test-shim-phase1.sh <- bash acceptance test for the four shim endpoints.
 
 The Agent references `GitHub.Copilot.SDK` 1.0.14, which pins Copilot runtime
 1.0.85. SDK is the default backend for ordinary sessions. Set
-`MAGPILOT_RUNTIME_BACKEND=acp` for rollback; Agency always remains ACP.
+`MAGPILOT_RUNTIME_BACKEND=acp` for rollback.
 Backend choice is persisted through terminal handoff in `HostSessionFlavor`.
 
 `SdkClientPool` is lazy. SDK-default Agent startup launches neither SDK nor the
 default ACP child. The SDK runtime starts on the first SDK session; ACP starts
-lazily if rollback or an Agency session needs it.
+lazily if rollback needs it.
 
 SDK clients use `CopilotClientMode.CopilotCli` and the supported
 out-of-process stdio transport. Each distinct `CopilotHome` becomes a distinct
@@ -308,7 +309,7 @@ only this cache, so the launcher and SPA do not turn a cheap ownership probe
 into a runtime RPC. `TotalNanoAiu / 1_000_000_000` is the session AIC value.
 
 The additive `SessionStateInfo.RuntimeStatus` field is null when unavailable.
-ACP and Agency sessions expose their known model/reasoning but leave context
+ACP sessions expose their known model/reasoning but leave context
 and AIC null and refuse live model editing. SDK model options come from
 `ListModelsAsync`; `POST /sessions/{id}/model` is accepted only while the
 session is agent-owned and idle. It applies model + reasoning atomically under
@@ -585,7 +586,7 @@ and bootstrap hooks.
 | `MAGPILOT_AUTO_APPROVE` | agent (optional) | When `"true"`, the agent auto-approves ordinary permission requests through the active backend's native decision surface. SDK returns typed approval decisions; ACP fallback selects its advertised allow option. Intended for always-on autonomous agents like Magnus where `/quick-prompt` callers (WhatsApp, cron) have no human to click "approve". Managed-required SDK requests are never auto-approved. **Don't set this on agents that share a host with the user** (e.g. HENDRIK); only on dedicated agent containers where the trust boundary is the container itself. Superseded for granular use by the per-session yolo toggle (see `MAGPILOT_YOLO_DISABLED` below) but still honoured for backward compatibility. |
 | `MAGPILOT_YOLO_DISABLED` | agent (optional) | When `"true"`, the per-session yolo toggle is refused with 403; the SPA greys out the YOLO switch and shows a tooltip explaining why. The legacy `MAGPILOT_AUTO_APPROVE` env var is unaffected (it's a separate code path). Set this on user-account agents like HENDRIK where the agent runs with the user's full permissions and unattended auto-approve would be dangerous; leave unset (default-allow) on dedicated container agents like Magnus. |
 | `MAGPILOT_STALE_RECYCLE` | agent (optional) | ACP-backend recovery only. When set (`1`/`true`/`yes`/`on`), a resume the agent detects as **stale** triggers a whole ACP-child recycle and disk reload. Default off. SDK sessions disconnect/resume through the runtime API and do not use this ACP workaround. |
-| `MAGPILOT_RUNTIME_BACKEND` | agent (optional) | `sdk` (default) or `acp` (rollback). Selects the backend for ordinary create/adopt operations. Agency always routes to ACP. Invalid values fail Agent startup explicitly. Changing the value requires an Agent restart; attached sessions never switch backend in place. |
+| `MAGPILOT_RUNTIME_BACKEND` | agent (optional) | `sdk` (default) or `acp` (rollback). Selects the backend for create/adopt operations. Invalid values fail Agent startup explicitly. Changing the value requires an Agent restart; attached sessions never switch backend in place. |
 | `MAGPILOT_TURN_STALL_SECONDS` | agent (optional) | Stall threshold in seconds (default `90`) for the **turn watchdog** (`Acp/TurnWatchdog.cs`, a `BackgroundService`). An in-flight `PromptAsync` turn that emits no ACP activity (no message chunk, no tool call) for this long is treated as a wedged child (hung model request that never returns and ignores `session/cancel`): the watchdog fails the turn with an `ErrorEvent` so the caller stops spinning, then recycles the ACP child holding it (respawn + `session/load` on the session's own flavor). A live-but-slow turn keeps emitting updates (resetting the clock), and a turn **waiting on a tool it invoked** -- a long shell command or slow MCP call, silent between the tool's `tool_call`/`tool_call_update:completed` events -- is exempt entirely, so neither is ever killed. A co-hosted session with a still-progressing (or tool-waiting) turn also vetoes the recycle. Sweeps every `max(15, threshold/3)`s. Set lower to recover faster, higher if legitimately long first-token latencies trip it. |
 | `MAGPILOT_DEV_BYPASS_AUTH` | hub | When `"true"`, skips OAuth (dev only -- redirects `/login` to `/dev-login`). |
 | `MAGPILOT_HUB_DATA` | hub | Directory for `hub.db` and `logs.db`. Defaults to `./data`. |
@@ -624,8 +625,14 @@ short version that matters for AI agents working on this repo:
   same version. Inspect with
   `(Get-Item bin/.../X.dll).VersionInfo.ProductVersion`.
 - `Magpilot.Shared.Versioning` exposes `AssemblyVersion` (strips the
-  `+gitsha` suffix the SDK appends) and `ProtocolVersion` (an int that
-  bumps **only** on incompatible wire-contract changes; baseline is 1).
+  `+gitsha` suffix the SDK appends) and `ProtocolVersion`.
+- **Protocol 0 is intentionally unstable.** While it remains zero, the Agent,
+  Hub, SPA, Shared contracts, and launcher update in lockstep. Breaking HTTP,
+  SSE, JSON, and persisted-state changes require no compatibility adapters or
+  migrations. Do not increment zero for each break.
+- The first explicit compatibility freeze sets the protocol to 1. From that
+  point forward, incompatible wire changes require deliberate version bumps
+  and a compatibility plan.
 - Bumping a release is a deliberate act: edit `VERSION`, commit,
   `git tag vX.Y.Z`, `git push --tags`. The release workflow validates
   the tag matches `VERSION` and refuses to build if they're out of sync.
@@ -697,7 +704,6 @@ installer.
 | `magpilot --magpilot-version` | Print local + agent-reported version info |
 | `magpilot --magpilot-update` | Download + run the latest installer silently (validates SHA256 against the GitHub release asset) |
 | `magpilot --magpilot-pair=<bundle>` | Pair the agent with a hub. `<bundle>` is copied from the hub's `/admin/enroll` page; the launcher decodes it, upserts the three keys into `magpilot.env`, and bounces the installed scheduled task. |
-| `magpilot --magpilot-agency` | Wrap the interactive session in Microsoft's `agency` CLI (`agency copilot`) so it runs with agency's curated MCP servers + tooling. Copilot still runs underneath, so the session is agent-coordinated + hub-visible; a fresh (no-sid) agency session may register late because the PTY child is `agency`, not `copilot` (see `CopilotLaunch` / `AgencyLocator`). |
 | `magpilot --magpilot-no-tui-changes` | Disable every launcher-owned TUI mutation: no background probe, no default `TERM`/`COLORTERM`, no setting or overriding `COLORFGBG`/`COPILOT_GITHUB_THEME`, no palette OSC, no output colour rewrite, and no injected banner. Inherited variables remain untouched, matching raw Copilot. Agent-coordinated sessions still require the PTY for ownership detection and graceful handoff; agentless passthrough direct-execs for raw-Copilot parity. |
 | `magpilot --magpilot-tui-options=<list>` | Positive allowlist of launcher-owned TUI mutations: `term`, `truecolor`, `background`, `github-theme`, `palette`, `thinking`, `input-band`, `legacy-colors`, `banner`; `rewrite` is a group alias for all three rewrite stages. Also accepts `all` (default) and `none`. `--magpilot-no-tui-changes` is an alias for `none`; specifying both is an error. |
 | `magpilot --magpilot-help` | Wrapper-only flag help |
@@ -936,8 +942,8 @@ keyboard-protocol, and terminal-status queries in
 `tools/tui-matrix/captures/terminal-probe-*/comparison.json`.
 
 Pure logic (OSC parsing, luminance, sequence generation, theme-file parsing,
-the SGR rewriter) is unit-tested in `tests/Magpilot.Host.Tests` (not in
-`Magpilot.slnx`; run `dotnet test tests/Magpilot.Host.Tests`). An integration
+the SGR rewriter) is unit-tested in `tests/Magpilot.Host.Tests` and runs through
+`dotnet test Magpilot.slnx`. An integration
 test drives a stub through a real ConPTY to confirm `COLORFGBG` reaches the
 child.
 
@@ -1325,17 +1331,17 @@ rather than spawn parallel implementations.
 * **`AgentRegistry.AddColumnIfMissing(conn, table, column, type)`** --
   the idempotent schema-migration helper. Probes `PRAGMA
   table_info`, only runs the `ALTER TABLE` when the column is
-  genuinely absent. Used five times in `InitDb` today
-  (`enrolled_at`, `enrolled_via`, `revoked_at`, `flavors`,
-  `owner_user`); any new agents / vouchers / claims column goes
+  genuinely absent. Used four times in `InitDb` today
+  (`enrolled_at`, `enrolled_via`, `revoked_at`, `owner_user`);
+  any new agents / vouchers / claims column goes
   through here. Default-NULL semantics mean pre-migration rows stay
   valid, so you can ship the column without a downtime. Don't write
   bare `ALTER TABLE` in `InitDb` -- it'll throw on the second startup.
 
   > **WireGuard and Wi-Fi agents can't be discovered by the hub, so
-  > seed their registry columns by hand.** UDP discovery
+  > seed their URL by hand.** UDP discovery
   > (`DiscoveryProber` broadcast) is the only thing that refreshes an
-  > agent's `url` + `flavors`. It can't cross a WG point-to-point tunnel
+  > agent's `url`. It can't cross a WG point-to-point tunnel
   > (no broadcast domain there), and -- verified empirically -- it also
   > can't reach a **Wi-Fi** agent: APs don't deliver a wired->wireless
   > LAN broadcast to a station, so the hub's probe never lands on
@@ -1343,15 +1349,12 @@ rather than spawn parallel implementations.
   > `DiscoveryProber` does send per-interface directed broadcasts (which
   > helps a multi-homed WIRED sender), but that doesn't change the Wi-Fi
   > outcome. Such agents stay online via the proxied-call heartbeat, not
-  > discovery. Both columns are persisted
-  > in `agents` so a WG-only agent (Sandbox, a Dev Box) is a one-time
-  > `UPDATE agents SET url=..., flavors='["default","agency"]' WHERE
-  > name=...` + hub restart (the registry reads these only in `Load()`
-  > / `Reload()`). Voucher redeem preserves a non-empty `url`
-  > (`CASE WHEN excluded.url=''...`) and never writes `flavors`, so a
-  > re-pair won't clobber either seed. `flavors` is a JSON array
-  > (`SerializeFlavors` / `ParseFlavors`); the SPA gates the "Wrap with
-  > agency" checkbox on `Flavors.Contains("agency")`.
+  > discovery. The URL is persisted in `agents`, so a WG-only agent
+  > (Sandbox, a Dev Box) is a one-time
+  > `UPDATE agents SET url=... WHERE name=...` + hub restart (the registry
+  > reads it in `Load()` / `Reload()`). Voucher redeem preserves a
+  > non-empty `url` (`CASE WHEN excluded.url=''...`), so re-pairing does
+  > not clobber the seed.
 
 * **`Proxy(name, reg, ...)` in `HubEndpoints`** -- the single
   choke point for every per-agent-name HTTP route on the hub.
@@ -1422,9 +1425,8 @@ The hub is multi-tenant across browser users. `agents.owner_user`
 (nullable TEXT, seeded by `AddColumnIfMissing`) records the GitHub
 login that enrolled/adopted each agent, and the hub scopes what each
 caller sees + can reach. The pure rules live in
-`Magpilot.Hub.Auth.AgentVisibility` (unit-tested in
-`tests/Magpilot.Hub.Tests`, NOT in the slnx -- run
-`dotnet test tests/Magpilot.Hub.Tests`).
+`Magpilot.Hub.Auth.AgentVisibility` and are unit-tested in
+`tests/Magpilot.Hub.Tests` through `dotnet test Magpilot.slnx`.
 
 Three caller shapes:
 
@@ -1483,7 +1485,7 @@ Enforcement is deliberately centralized:
   minting stamps owner = the signed-in user, so the voucher flow is the
   identity-safe pairing path for a non-admin.
 - **UDP discovery is ownership-neutral:** it only refreshes
-  url/flavors/online and writes null-owner/null-token rows; it never
+  URL/online state and writes null-owner/null-token rows; it never
   sets or changes an owner (`Upsert` preserves `owner_user`). Owner is
   set only by the pairing flows. A discovered-but-unpaired agent is
   admin-only visible + unreachable until paired. Caveat: pending V3
@@ -1518,12 +1520,9 @@ Wire-contract gotcha that compounds this: an agent that's been
 stuck on an old version may also be running an OLD wire shape. e.g.
 `/api/sessions/{id}/history` was `IReadOnlyList<HistoryEntry>` pre-
 `cd323a6` and `HistoryPage` after. The SPA pinned to the new shape
-crashes on the old. So a quietly-broken autoupdate path doesn't
-just leave you missing features -- it can crash live sessions when
-the SPA moves ahead of the agent. The longer-term fix is to bump
-`Versioning.ProtocolVersion` whenever the wire breaks; for now,
-treat "everyone visible in /api/agents reports the same Version" as
-the smoke test.
+crashes on the old. Protocol 0 deliberately does not solve mixed-version
+deployments; update every component in lockstep and treat "everyone visible
+in /api/agents reports the same Version" as the smoke test.
 
 ### Release workflow
 
@@ -1728,7 +1727,7 @@ already burned us in production.
 | Client name      | Default timeout | Tunable                        | Used for                                                                 |
 |------------------|-----------------|--------------------------------|--------------------------------------------------------------------------|
 | `agent`          | 10s             | `Hub:AgentHttpTimeoutSec`      | Fast read-only control-plane (GET `/api/sessions`, `/api/info`, etc.)    |
-| `agent-action`   | 90s             | `Hub:AgentActionTimeoutSec`    | Mutating runtime calls (`POST /api/sessions`, `/sessions/{id}/adopt`, `/model`, `/acquire-for-host`, `/release`) |
+| `agent-action`   | 90s             | `Hub:AgentActionTimeoutSec`    | Mutating runtime calls (`POST /api/sessions`, `/sessions/{id}/adopt`, `/model`, `/take-over`) |
 | `agent-stream`   | infinite        | (n/a)                          | SSE proxy and `/quick-prompt` (turns can run minutes)                    |
 
 Pick via the `AgentClientKind` enum on `AgentHttpClient.ClientFor(name, kind)`:
@@ -1751,11 +1750,11 @@ client it should use.** `/messages` is fire-and-forget on the agent
 (returns 202 immediately), so `Read` is fine. `/detach`,
 `/interrupt`, `/approvals/{id}`, `/state`, `/release-request` are all
 quick -- `Read`. Anything that triggers `session/new`, `session/load`,
-or other ACP work that can stall: `Action` -- this includes
-`/acquire-for-host` (waits for a turn boundary) and `/release`
-(re-adopts via `session/load`), which were both silently on `Read`
-and surfaced as `Take back failed: 502` when a `session/load` ran
-long. Anything that holds an open response body for a turn: `Stream`.
+or other runtime work that can stall uses `Action`; this includes
+`/take-over`, which may evict a terminal and reload a large session.
+Terminal `/acquire-for-host` and `/release` are local launcher-to-agent
+operations and are not hub proxies. Anything that holds an open response body
+for a turn uses `Stream`.
 
 ### Pinned sessions (long-lived) and `/quick-prompt`
 
@@ -2005,9 +2004,7 @@ Owned=0, Locked=1, Dormant=2.)
 > Runtime residency is authoritative: a development Agent can itself
 > be launched from a Magpilot terminal, making its SDK/ACP child a
 > descendant of `magpilot`; without this guard the periodic sweep
-> reclassified the Agent's own session as Host-owned after 60 seconds.
-> Under `--magpilot-agency` the genuine terminal chain is
-> `magpilot -> agency -> copilot`, still a walkable descendant. No
+> reclassified the Agent's own session as Host-owned after 60 seconds. No
 > SPA/`SessionInfo`/`GetState` change is needed: once the map is
 > populated, `GET /state` reports `owner: "Host"` and the SPA's
 > existing `/state`-on-open path stops showing "kill to unlock".
@@ -2128,10 +2125,10 @@ killing PIDs and hoping. Full design + log:
 Wire contract this code base now exposes:
 
 - **`GET /api/sessions/{id}/state`** -- read-only. Returns
-  `SessionStateInfo { info, owner: "None"|"Agent"|"Host"|"External",
-  hostPid?, activity: "Idle"|"InFlight"|"JustFinished",
-  inFlight?: { driver, startedAtMs, preview }, lastEvent?: { type,
-  id, timestamp } }`. Cheap. Wrapper calls on every startup; SPA
+  `SessionStateInfo { info, owner: "None"|"Agent"|"Host"|"External"|"Contended",
+  hostPid?, hostLeaseId?, activity: "Idle"|"InFlight",
+  inFlight?: { driver, startedAtMs }, lastEvent?: { type, id, timestamp },
+  foreignHolderPids: [] }`. Cheap. Wrapper calls on every startup; SPA
   also calls it from `Home.razor.OnParametersSetAsync` to detect a
   pre-existing host-owned session before deciding to stream.
 - **`POST /api/sessions/{id}/release-request`** -- body
@@ -2155,12 +2152,12 @@ Wire contract this code base now exposes:
   session's effective flavor under the same per-session gate that excludes
   concurrent configuration (process/tool/config-home scope plus the agent,
   model, and reasoning the child last confirmed) and stores it in the ownership entry as
-  `HostSessionFlavor`, which is persisted with the rest of the map so it
-  survives an agent restart. Returns refreshed state.
+  `HostSessionFlavor`, which is persisted with the generated terminal lease so
+  it survives an agent restart. Returns refreshed state including `HostLeaseId`.
 - **`POST /api/sessions/{id}/release`** -- body `ReleaseFromHostBody
-  { HostPid, Force = false }`. 409 Conflict if the wrong host PID claims
-  to release. If `Force` is true, evicts any still-live foreign copilot
-  first; then re-attaches via
+  { LeaseId }`. 409 Conflict if a stale or different lease claims to release.
+  The launcher must stop its Copilot child before calling this endpoint. The
+  agent then re-attaches via
   `ReloadFromDiskAsync` -- recycle the child still holding the session,
   then `session/load` on a fresh one, then re-apply and verify the
   recorded agent/model/reasoning -- UNLESS a live foreign holder still remains,
@@ -2170,17 +2167,20 @@ Wire contract this code base now exposes:
   missing/older `HostSessionFlavor` (pre-upgrade entry) falls back to the
   default flavor as before. `_owned` and the `HostOwnership` transition happen
   only after load plus complete configuration verification succeeds. A failure
-  after attach leaves a non-Owned quarantined route and retains the recorded
-  flavor; the next release/adopt retries configuration in place without another
-  `session/load`. The launcher's own
-  release and the SPA's graceful "Take back" send `Force=false` (never
-  kill the terminal); only the SPA's explicit "Force take over" sends
-  `Force=true`.
+  is returned as 502, leaves a non-Owned quarantined route, and retains the
+  recorded flavor so the next release/adopt can retry configuration in place
+  without another `session/load`.
+- **`POST /api/sessions/{id}/take-over`** -- body
+  `TakeOverSessionRequest { Force }`. This is the agent-driving counterpart to
+  terminal acquisition. The SPA never manufactures a host PID or lease. A
+  forceful take-over evicts every foreign live holder, verifies none remain,
+  restores the recorded runtime profile, and clears the terminal lease only
+  after the runtime is attached.
 - **SSE `release_requested` event** added to `StreamEvent` discriminator.
 
 ACP-driving endpoints (`/messages`, `/interrupt`, `/approvals/{id}`)
 return **`409 Conflict`** with body `HostOwnedResponse { Error,
-NeedsRelease, HostPid }` when `HostOwnership` shows host-owned. The
+NeedsRelease, HostPid }` when the canonical state is Host or Contended. The
 SPA's `HubClient.SendPromptAsync` and the WhatsApp sidecar's
 `postPromptWithReleaseKnock` both handle the 409: fire
 release-request, poll state for up to 60s, retry the POST. On final
@@ -2188,9 +2188,9 @@ timeout the SPA throws `HostStillOwnedException` (caught by
 `Home.razor` -> "Take over from terminal" `MudAlert`); the WhatsApp
 sidecar sends a permanent failure note to chat.
 
-`Hub` proxies the four shim endpoints via the existing `Forward(resp)`
-pass-through helper. The 409 propagates with the right shape because
-`Forward` preserves status + body verbatim.
+The Hub proxies `state`, `release-request`, and `take-over`. Terminal
+`acquire-for-host` and `release` are local agent operations used directly by
+the launcher.
 
 When you add a new caller of `/messages` (or anything that drives
 ACP), wrap it with the same retry-on-409 pattern. Don't re-implement
@@ -2233,11 +2233,15 @@ subscribe (teardown is via `ct`, not the clock), plus
 `catch (OperationCanceledException) when (ct.IsCancellationRequested)`
 so only OUR cancellation stops the loop; any other OCE falls through to
 backoff + reconnect. Don't merge the two clients or drop the `when`
-filter. **Belt-and-braces:** even with reconnect working, agent-side
-eviction (`ReleaseFromHostAsync`, see the take-back guard above) is the
-hard correctness guarantee -- it force-evicts the live foreign copilot
-so a forceful take-over succeeds regardless of launcher version
-(including < 0.1.18 with no reconnect at all) or a wedged subscription.
+filter. **Belt-and-braces:** even with reconnect working,
+`TakeOverForAgentAsync` is the hard correctness guarantee -- it evicts every
+foreign holder so an explicit forceful take-over succeeds even when the
+launcher subscription is missing or wedged.
+
+`Magpilot.Host.AgentClient` has the same timeout separation locally:
+`_http` is 15s for state/release-request, `_actionHttp` is 90s for terminal
+acquire/release (which may wait or reload a session), and `_streamHttp` is
+infinite for SSE. Do not move acquire/release back to the quick client.
 
 **SPA-side reactivity** (`Magpilot.UI/Pages/Home.razor`):
 - `Apply()` handles the `ReleaseRequested` SSE case: sets
@@ -2249,7 +2253,7 @@ so a forceful take-over succeeds regardless of launcher version
   while host-owned.
 - `OnParametersSetAsync` calls `Hub.GetStateAsync` after the
   session-list fetch and BEFORE deciding what to stream. If
-  `state.Owner == SessionOwner.Host`, the same takeover state is
+  `state.Owner` is `Host` or `Contended`, the same takeover state is
   set and the stream is skipped entirely -- the SPA never opens an
   SSE pump for a session it's not allowed to drive.
 - `HandleTakeBackFromHost` is the symmetric counter-flow, and it is
@@ -2258,7 +2262,7 @@ so a forceful take-over succeeds regardless of launcher version
   the launcher to hand off ON ITS OWN -- tear down its copilot (leaving
   the terminal on its "resume here" prompt) and call `release` itself,
   flipping ownership to the agent. The SPA does NOT force-evict here.
-  Early-exit the moment `Owner` leaves `Host`/`External`, then
+  Early-exit the moment `Owner` leaves `Host`/`External`/`Contended`, then
   `FinishTakeBackAndStreamAsync` restarts the stream from cache (or
   `/history`). If the window elapses with the terminal still holding it
   (deaf/dead launcher, or a bare terminal with no launcher),
@@ -2266,31 +2270,18 @@ so a forceful take-over succeeds regardless of launcher version
   (another graceful attempt) + **"Force take over"**
   (`HandleForceTakeBack`). Only the explicit force path does the
   destructive dance: `FireReleaseRequestAsync(force=true)` + 1s grace +
-  `AcquireForHostAsync(0, force=true)` + `ReleaseAsync(0, force=true)`.
+  `TakeOverAsync(force=true)`.
   Rationale: force-evicting kills the terminal copilot as an EXTERNAL
   exit, so the launcher takes its "child exited on its own" branch and
   exits WITHOUT showing the resume prompt -- fine when the user
   explicitly asked to force, jarring when it happened silently on every
   take-back (the pre-graceful behaviour).
-  **Agent-side eviction is gated on `force`.**
-  `ReleaseFromHostAsync(sid, hostPid, force, ct)`:
-  - `force=false` (graceful): NEVER kills. If a live foreign holder
-    remains it declines to adopt and retains `Owner=Host` plus the saved
-    flavor so the caller can retry or offer the force choice. This is both the launcher's own
-    release (its copilot is already gone -> adopts cleanly) and the
-    SPA's graceful attempt.
-  - `force=true`: `EvictForeignLiveHolders` kills the still-live foreign
-    copilot + reaps its advisory `inuse.<pid>.lock`, then adopts. The
-    agent only ever kills a genuinely foreign holder, never its own ACP
-    child (`_ourSessionPids` gates it).
-  **Never adopt while a live foreign holder remains** (either force
-  mode): two live drivers on one `events.jsonl` is the "garbled then
-  stalled" split-brain, so `ReleaseFromHostAsync` leaves `_owned` unset
-  and keeps `Owner=Host` in that case. The SPA's poll treats
-  `Host`/`External` as "not free" and re-raises the choice rather than
-  streaming into the duplication. The `force` bit rides on
-  `ReleaseFromHostBody.Force` (additive, defaults false = graceful, so
-  old callers and the launcher stay safe).
+  Terminal `release` never kills. If a live foreign holder remains it declines
+  to attach and retains the lease/profile for retry. Forceful eviction exists
+  only on the explicit agent `take-over` transition. Both paths refuse to mark
+  the session Agent-owned while any foreign holder remains. The SPA poll treats
+  `Host`/`External`/`Contended` as "not free" and never streams into a
+  split-brain session.
 
 **Agent-side stale-lock cleanup** (`Magpilot.Agent/Acp/AcpSessionManager.cs`):
 `CloseAsync` takes a `string? sessionsRoot` parameter and, after
@@ -2697,7 +2688,7 @@ future "what's left?" sweep doesn't accidentally re-pick them):
 - ~~2026-06-08: fix overflow on repo box~~ -> shipped via MudChip + `min-width: 0` + ellipsis cap-at-180px (chip later removed when the session list moved to a 3-line title/folder/branch layout that doesn't need a chip at all -- see "drop 'past' sessions list" below). The MudChip-clipping recipe survives in the SPA / brand section of these instructions for any future caller.
 - ~~2026-06-08: make 'talking' icon be the magpie~~ -> shipped: assistant + thinking-bubble avatars render `MagpieMark` inside a MudAvatar `Variant.Outlined`. Outlined keeps the chrome transparent so the multi-colour SVG isn't fighting a solid fill, while sharing the same 32x32 circle as Person/Lightbulb/Terminal avatars (so all assistant rows share a left column). The bird drops to `Size=22` so its visible content fits inside the circle's clip without losing its tail.
 - ~~2026-06-09: repo names dominated by repeated `owner/` prefixes when every session is the signed-in user's own repo~~ -> shipped: SPA fetches `/api/me` on init and `DisplayRepo()` strips `{identity}/` from the chip text when it matches the signed-in user. Generic -- repos owned by anyone else still render with their full `owner/repo`. Tooltip always shows the full path so the owner is one hover away.
-- ~~2026-08-11: make the SPA multi-user -- when you auth with GitHub, agents are scoped to that login (log in as someone else and you don't see my HENDRIK)~~ -> shipped v0.1.28: `agents.owner_user` (nullable; stamped from the voucher's `created_by_user` on redeem and the claim adopter's `decided_by_user` on approve; re-pair preserves via `COALESCE`). `Magpilot.Hub.Auth.AgentVisibility` centralizes the rules (`IsInfra`/`IsAdmin`/`ScopedToOwner`/`CanAccess`); `HubAuthOptions.AdminUser` = first `OAUTH_ALLOWED_GITHUB_USERS` entry. A single endpoint filter on the `/api` group gates every `{name}` route (proxies + SSE + revoke + DELETE) with `CanAccess` -> 404 (hide existence). `GET /api/agents` is scoped per-user (infra bearer stays UNSCOPED so preflight still sees all); admin-only `GET /api/admin/agents/all` backs the SPA "Show all agents" toggle + Owner column; `GET /api/me` now returns `isAdmin`. Central log QUERY (`GET /api/log[/sources]`) is admin-only (POST ingest stays open); SPA hides the Logs link for non-admins and adds an all-users Agents link. Null-owner (legacy/discovered) rows fall in the admin's bucket -> no migration. Unit tests in `tests/Magpilot.Hub.Tests` (18; NOT in the slnx). v0.1.29 added a **Create enrollment bundle** button on `/admin/agents` -> `/admin/enroll` (all users). Full detail: the "Multi-user agent ownership" section above. Deferred sub-item (claim scoping) is under Open items.
+- ~~2026-08-11: make the SPA multi-user -- when you auth with GitHub, agents are scoped to that login (log in as someone else and you don't see my HENDRIK)~~ -> shipped v0.1.28: `agents.owner_user` (nullable; stamped from the voucher's `created_by_user` on redeem and the claim adopter's `decided_by_user` on approve; re-pair preserves via `COALESCE`). `Magpilot.Hub.Auth.AgentVisibility` centralizes the rules (`IsInfra`/`IsAdmin`/`ScopedToOwner`/`CanAccess`); `HubAuthOptions.AdminUser` = first `OAUTH_ALLOWED_GITHUB_USERS` entry. A single endpoint filter on the `/api` group gates every `{name}` route (proxies + SSE + revoke + DELETE) with `CanAccess` -> 404 (hide existence). `GET /api/agents` is scoped per-user (infra bearer stays UNSCOPED so preflight still sees all); admin-only `GET /api/admin/agents/all` backs the SPA "Show all agents" toggle + Owner column; `GET /api/me` now returns `isAdmin`. Central log QUERY (`GET /api/log[/sources]`) is admin-only (POST ingest stays open); SPA hides the Logs link for non-admins and adds an all-users Agents link. Null-owner (legacy/discovered) rows fall in the admin's bucket -> no migration. Unit tests live in `tests/Magpilot.Hub.Tests`. v0.1.29 added a **Create enrollment bundle** button on `/admin/agents` -> `/admin/enroll` (all users). Full detail: the "Multi-user agent ownership" section above. Deferred sub-item (claim scoping) is under Open items.
 
 Open items:
 

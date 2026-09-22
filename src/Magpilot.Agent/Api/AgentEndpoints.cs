@@ -52,12 +52,11 @@ public static class AgentEndpoints
                 }
             });
 
-        api.MapGet("/info", (FlavorCapabilities flavors) => new
+        api.MapGet("/info", () => new
         {
             name = Environment.MachineName,
             os = Environment.OSVersion.VersionString,
             cwd = Environment.CurrentDirectory,
-            flavors = flavors.Available,
         });
 
         api.MapGet("/sessions", (SessionRegistry reg) => reg.List()
@@ -114,7 +113,6 @@ public static class AgentEndpoints
             {
                 info = await reg.CreateAsync(
                     req.Cwd,
-                    req.UseAgency,
                     ct,
                     name: req.Name,
                     model: req.Model,
@@ -256,7 +254,7 @@ public static class AgentEndpoints
                 SessionInfo info;
                 try
                 {
-                    info = await reg.CreateAsync(req.Cwd, useAgency: false, cts.Token);
+                    info = await reg.CreateAsync(req.Cwd, cts.Token);
                 }
                 catch (SessionRuntimeConfigurationException ex)
                 {
@@ -513,11 +511,43 @@ public static class AgentEndpoints
         {
             try
             {
-                var state = await reg.ReleaseFromHostAsync(id, body.HostPid, body.Force, ct);
+                var state = await reg.ReleaseFromHostAsync(id, body.LeaseId, ct);
                 return Results.Ok(state);
             }
             catch (FileNotFoundException ex) { return Results.NotFound(new { error = ex.Message }); }
+            catch (SessionRuntimeConfigurationException ex)
+            {
+                return Results.Json(
+                    new { error = ex.Message, needsReadopt = true },
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
             catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
+        });
+
+        api.MapPost("/sessions/{id}/take-over", async (
+            string id,
+            TakeOverSessionRequest body,
+            SessionRegistry reg,
+            CancellationToken ct) =>
+        {
+            try
+            {
+                return Results.Ok(await reg.TakeOverForAgentAsync(id, body.Force, ct));
+            }
+            catch (FileNotFoundException ex)
+            {
+                return Results.NotFound(new { error = ex.Message });
+            }
+            catch (SessionRuntimeConfigurationException ex)
+            {
+                return Results.Json(
+                    new { error = ex.Message, needsReadopt = true },
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.Conflict(new { error = ex.Message });
+            }
         });
         // --------------------------------------------------------------------
 
@@ -552,21 +582,20 @@ public static class AgentEndpoints
             string id,
             PromptRequest req,
             IAgentSessionRuntime runtime,
-            HostOwnership hostOwn,
+            SessionRegistry reg,
             CancellationToken ct) =>
         {
             if (req.Text is null)
                 return Results.BadRequest(new { error = "Text is required." });
 
-            // Refuse to drive the session if a magpilot launcher
-            // currently owns it. The caller (SPA, WhatsApp, cron) is
-            // expected to react to 409 by firing /release-request and
-            // polling /state until the host releases, then retrying.
-            if (hostOwn.TryGet(id, out var entry))
-                return Results.Conflict(new HostOwnedResponse(
-                    Error: $"Session is held by magpilot launcher PID {entry.HostPid}",
-                    NeedsRelease: true,
-                    HostPid: entry.HostPid));
+            // Refuse to drive a terminal-owned or contended session. The
+            // caller reacts to 409 by requesting release, polling state, and
+            // eventually offering an explicit force take-over.
+            var state = reg.GetState(id);
+            if (state is null)
+                return Results.NotFound(new { error = $"Session {id} not on disk" });
+            if (PromptOwnershipConflict(state) is { } conflict)
+                return Results.Conflict(conflict);
 
             // Fire-and-forget: session/prompt returns when the turn completes
             // (could be 60s+). The endpoint returns 202 immediately and the
@@ -590,7 +619,7 @@ public static class AgentEndpoints
             if (!runtime.IsAttached(id))
                 return Results.Conflict(new
                 {
-                    error = $"Session {id} is not attached to an ACP child. Re-adopt it before prompting.",
+                    error = $"Session {id} is not attached to a runtime. Re-adopt it before prompting.",
                     needsReadopt = true,
                 });
 
@@ -732,5 +761,26 @@ public static class AgentEndpoints
                 runtime.Unsubscribe(id, reader);
             }
         });
+    }
+
+    internal static HostOwnedResponse? PromptOwnershipConflict(
+        SessionStateInfo state)
+    {
+        if (state.Owner is not (SessionOwner.Host or SessionOwner.Contended))
+            return null;
+
+        var foreignPid = state.ForeignHolderPids.Count > 0
+            ? state.ForeignHolderPids[0]
+            : (int?)null;
+        var ownerPid = state.HostPid
+            ?? foreignPid
+            ?? state.Info.OwnerPid
+            ?? 0;
+        return new HostOwnedResponse(
+            Error: state.Owner == SessionOwner.Contended
+                ? $"Session has multiple live writers (foreign PIDs: {string.Join(", ", state.ForeignHolderPids)})"
+                : $"Session is held by magpilot launcher PID {ownerPid}",
+            NeedsRelease: true,
+            HostPid: ownerPid);
     }
 }

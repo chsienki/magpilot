@@ -86,8 +86,9 @@ public sealed class ReleaseTracker(
             var version = release.TagName.TrimStart('v');
 
             // Try to find a version.json asset to get the protocol range.
-            // First release may not have one yet; fall back to baseline 1.
-            int min = 1, max = 1;
+            // Protocol zero is a valid unstable sentinel, not a missing value.
+            var min = Versioning.ProtocolVersion;
+            var max = Versioning.ProtocolVersion;
             var versionAsset = release.Assets?.FirstOrDefault(a =>
                 string.Equals(a.Name, "version.json", StringComparison.OrdinalIgnoreCase));
             if (versionAsset?.BrowserDownloadUrl is not null)
@@ -101,8 +102,12 @@ public sealed class ReleaseTracker(
                     var meta = await assetResp.Content.ReadFromJsonAsync<VersionJson>(cancellationToken: ct);
                     if (meta is not null)
                     {
-                        min = meta.MinProtocol > 0 ? meta.MinProtocol : 1;
-                        max = meta.MaxProtocol > 0 ? meta.MaxProtocol : min;
+                        min = meta.MinProtocol >= 0
+                            ? meta.MinProtocol
+                            : Versioning.ProtocolVersion;
+                        max = meta.MaxProtocol >= min
+                            ? meta.MaxProtocol
+                            : min;
                     }
                 }
                 catch (Exception ex) when (!ct.IsCancellationRequested)

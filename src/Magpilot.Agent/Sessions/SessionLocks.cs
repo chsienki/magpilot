@@ -15,6 +15,11 @@ namespace Magpilot.Agent.Sessions;
 public static class SessionLocks
 {
     public readonly record struct Holder(string Path, int Pid, bool Alive);
+    public sealed record Snapshot(IReadOnlyList<Holder> Holders)
+    {
+        public IReadOnlyList<Holder> Live { get; } = Holders.Where(holder => holder.Alive).ToArray();
+        public IReadOnlyList<Holder> Dead { get; } = Holders.Where(holder => !holder.Alive).ToArray();
+    }
 
     /// <summary>Parse the pid out of an <c>inuse.&lt;pid&gt;.lock</c> file name (or path).</summary>
     public static bool TryParsePid(string lockPath, out int pid)
@@ -77,6 +82,9 @@ public static class SessionLocks
     /// <summary>Inspect a session directory's lock state against the real process table.</summary>
     public static IReadOnlyList<Holder> Inspect(string sessionDir) =>
         Inspect(Files(sessionDir), ProcessAlive);
+
+    public static Snapshot ReadSnapshot(string sessionDir) =>
+        new(Inspect(sessionDir));
 
     /// <summary>
     /// Delete lock files whose owning process is gone; returns the paths reaped.

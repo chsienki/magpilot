@@ -2,8 +2,14 @@
   <Folder Name="/src/">
     <Project Path="src/Magpilot.Agent/Magpilot.Agent.csproj" />
     <Project Path="src/Magpilot.Hub/Magpilot.Hub.csproj" />
+    <Project Path="src/Magpilot.Host/Magpilot.Host.csproj" />
     <Project Path="src/Magpilot.Shared/Magpilot.Shared.csproj" />
     <Project Path="src/Magpilot.UI/Magpilot.UI.csproj" />
     <Project Path="src/Magpilot.Web/Magpilot.Web.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Magpilot.Agent.Tests/Magpilot.Agent.Tests.csproj" />
+    <Project Path="tests/Magpilot.Host.Tests/Magpilot.Host.Tests.csproj" />
+    <Project Path="tests/Magpilot.Hub.Tests/Magpilot.Hub.Tests.csproj" />
   </Folder>
 </Solution>

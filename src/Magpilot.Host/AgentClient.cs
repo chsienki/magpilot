@@ -14,11 +14,12 @@ namespace Magpilot.Host;
 public sealed class AgentClient : IDisposable
 {
     private readonly HttpClient _http;
+    private readonly HttpClient _actionHttp;
     private readonly HttpClient _streamHttp;
 
     public AgentClient(string? agentUrl = null, string? agentToken = null)
     {
-        agentUrl   ??= InstallConfig.ResolveValue("MAGPILOT_AGENT_URL")   ?? "http://127.0.0.1:5099";
+        agentUrl ??= InstallConfig.ResolveValue("MAGPILOT_AGENT_URL") ?? "http://127.0.0.1:5099";
         agentToken ??= InstallConfig.ResolveValue("MAGPILOT_AGENT_TOKEN") ?? "";
         if (string.IsNullOrEmpty(agentToken))
             throw new InvalidOperationException(
@@ -28,11 +29,16 @@ public sealed class AgentClient : IDisposable
 
         var baseUri = new Uri(agentUrl.TrimEnd('/') + "/");
 
-        // Short-timeout client for the quick request/response calls (state,
-        // release-request, acquire, release). 15s fails fast if the agent is
-        // unreachable so the launcher doesn't hang on startup.
+        // Short-timeout client for quick control-plane calls. 15s fails fast
+        // if the agent is unreachable so the launcher doesn't hang on startup.
         _http = new HttpClient { BaseAddress = baseUri, Timeout = TimeSpan.FromSeconds(15) };
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", agentToken);
+
+        // Acquire may wait for an in-flight turn boundary and release may reload
+        // and configure a large session. Match the Hub's action budget rather
+        // than cancelling healthy runtime work at the quick-call timeout.
+        _actionHttp = new HttpClient { BaseAddress = baseUri, Timeout = TimeSpan.FromSeconds(90) };
+        _actionHttp.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", agentToken);
 
         // Separate client for the long-lived SSE subscribe. It MUST NOT carry a
         // wall-clock timeout: the stream is open for the life of the session
@@ -65,7 +71,7 @@ public sealed class AgentClient : IDisposable
 
     public async Task<SessionStateInfo> AcquireForHostAsync(string sessionId, int hostPid, bool force, CancellationToken ct = default)
     {
-        using var resp = await _http.PostAsJsonAsync(
+        using var resp = await _actionHttp.PostAsJsonAsync(
             $"api/sessions/{sessionId}/acquire-for-host",
             new AcquireForHostBody(hostPid, force),
             HostWebJsonContext.Default.AcquireForHostBody,
@@ -74,11 +80,11 @@ public sealed class AgentClient : IDisposable
         return (await resp.Content.ReadFromJsonAsync(HostWebJsonContext.Default.SessionStateInfo, ct))!;
     }
 
-    public async Task<SessionStateInfo> ReleaseAsync(string sessionId, int hostPid, CancellationToken ct = default)
+    public async Task<SessionStateInfo> ReleaseAsync(string sessionId, Guid leaseId, CancellationToken ct = default)
     {
-        using var resp = await _http.PostAsJsonAsync(
+        using var resp = await _actionHttp.PostAsJsonAsync(
             $"api/sessions/{sessionId}/release",
-            new ReleaseFromHostBody(hostPid),
+            new ReleaseFromHostBody(leaseId),
             HostWebJsonContext.Default.ReleaseFromHostBody,
             ct);
         resp.EnsureSuccessStatusCode();
@@ -127,6 +133,7 @@ public sealed class AgentClient : IDisposable
     public void Dispose()
     {
         _http.Dispose();
+        _actionHttp.Dispose();
         _streamHttp.Dispose();
     }
 }

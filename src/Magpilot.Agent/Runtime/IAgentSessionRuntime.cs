@@ -60,6 +60,7 @@ public interface IAgentSessionRuntime
         CancellationToken ct);
 
     bool HasForeignLiveHolder(string sessionId);
+    IReadOnlyList<int> ForeignLiveHolderPids(string sessionId);
     IReadOnlyList<int> EvictForeignLiveHolders(string sessionId);
 
     Task<Task> StartPromptAsync(

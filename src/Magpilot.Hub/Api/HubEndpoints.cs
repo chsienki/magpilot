@@ -413,28 +413,12 @@ public static class HubEndpoints
                     return await Forward(resp);
                 }));
 
-        api.MapPost("/agents/{name}/sessions/{id}/acquire-for-host",
-            (string name, string id, AcquireForHostBody body, AgentHttpClient http, AgentRegistry reg, CancellationToken ct) =>
+        api.MapPost("/agents/{name}/sessions/{id}/take-over",
+            (string name, string id, TakeOverSessionRequest body, AgentHttpClient http, AgentRegistry reg, CancellationToken ct) =>
                 Proxy(name, reg, async () =>
                 {
-                    // Action tier (90s): acquire-for-host waits for a clean turn
-                    // boundary (WaitForTurnBoundaryAsync) + detaches -- ACP work
-                    // that can exceed the 10s Read budget, which would surface as
-                    // a spurious 502. Same reason /adopt + POST /sessions use it.
-                    var resp = await http.ClientFor(name, AgentClientKind.Action).PostAsJsonAsync($"api/sessions/{id}/acquire-for-host", body, ct);
-                    return await Forward(resp);
-                }));
-
-        api.MapPost("/agents/{name}/sessions/{id}/release",
-            (string name, string id, ReleaseFromHostBody body, AgentHttpClient http, AgentRegistry reg, CancellationToken ct) =>
-                Proxy(name, reg, async () =>
-                {
-                    // Action tier (90s): release re-adopts via session/load, which
-                    // can take 5-30s under plugin load (or longer for a large
-                    // session) -- the 10s Read budget would time out and the Proxy
-                    // wrapper would return 502 (the "Take back failed: 502" the
-                    // user hits). Same reason /adopt + POST /sessions use it.
-                    var resp = await http.ClientFor(name, AgentClientKind.Action).PostAsJsonAsync($"api/sessions/{id}/release", body, ct);
+                    var resp = await http.ClientFor(name, AgentClientKind.Action)
+                        .PostAsJsonAsync($"api/sessions/{id}/take-over", body, ct);
                     return await Forward(resp);
                 }));
         // ------------------------------------------------------------------
@@ -517,7 +501,7 @@ public static class HubEndpoints
         // ---- Push subscription stub -------------------------------------------
         api.MapPost("/devices", (PushSubscriptionDto sub) =>
         {
-            // TODO: persist to subscriptions table; FCM/Web-Push fan-out is push-stub todo.
+            // Subscription persistence and FCM/Web-Push fan-out are not implemented.
             return Results.Accepted();
         });
     }

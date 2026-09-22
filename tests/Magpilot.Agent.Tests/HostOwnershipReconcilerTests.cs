@@ -52,12 +52,33 @@ public sealed class HostOwnershipReconcilerTests : IDisposable
         Assert.Equal(Environment.ProcessId, entry.HostPid);
     }
 
+    [Fact]
+    public void Reconcile_checks_every_live_lock_for_a_launcher_descendant()
+    {
+        const string sessionId = "multi-lock-host-owned";
+        Directory.CreateDirectory(Path.Combine(_root, sessionId));
+        var ownership = CreateOwnership();
+        var reconciler = CreateReconciler(
+            ownership,
+            _ => false,
+            pid => pid == 202
+                ? (true, Environment.ProcessId)
+                : (false, 0),
+            _ => [101, 202]);
+
+        reconciler.Reconcile();
+
+        Assert.True(ownership.TryGet(sessionId, out var entry));
+        Assert.Equal(Environment.ProcessId, entry.HostPid);
+    }
+
     public void Dispose() => Directory.Delete(_root, recursive: true);
 
     private HostOwnershipReconciler CreateReconciler(
         HostOwnership ownership,
         Func<string, bool> isRuntimeResident,
-        Func<int, (bool Found, int LauncherPid)> findLauncher) =>
+        Func<int, (bool Found, int LauncherPid)> findLauncher,
+        Func<string, IReadOnlyList<int>>? liveLockPids = null) =>
         new(
             new SessionScanner(
                 NullLogger<SessionScanner>.Instance,
@@ -66,7 +87,8 @@ public sealed class HostOwnershipReconcilerTests : IDisposable
             NullLogger<HostOwnershipReconciler>.Instance,
             new ConfigurationBuilder().Build(),
             isRuntimeResident,
-            findLauncher);
+            findLauncher,
+            liveLockPids);
 
     private HostOwnership CreateOwnership() =>
         new(

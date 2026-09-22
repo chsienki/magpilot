@@ -50,7 +50,6 @@ public sealed class HostOwnershipTests : IDisposable
     {
         var sid = Guid.NewGuid().ToString();
         var flavor = new HostSessionFlavor(
-            UseAgency: false,
             Model: "example-model",
             ReasoningEffort: "low",
             DisabledMcpServers: ["example-server"],
@@ -68,7 +67,6 @@ public sealed class HostOwnershipTests : IDisposable
         {
             Assert.True(reloaded.TryGet(sid, out var entry));
             Assert.NotNull(entry.Flavor);
-            Assert.Equal(flavor.UseAgency, entry.Flavor.UseAgency);
             Assert.Equal(flavor.Model, entry.Flavor.Model);
             Assert.Equal(flavor.ReasoningEffort, entry.Flavor.ReasoningEffort);
             Assert.Equal(flavor.DisabledMcpServers, entry.Flavor.DisabledMcpServers);
@@ -118,7 +116,6 @@ public sealed class HostOwnershipTests : IDisposable
         var sid = Guid.NewGuid().ToString();
         const int deadPid = 2147483646;
         var flavor = new HostSessionFlavor(
-            UseAgency: false,
             Model: "example-model",
             ReasoningEffort: "none",
             DisabledMcpServers: ["example-server"]);
@@ -132,7 +129,6 @@ public sealed class HostOwnershipTests : IDisposable
             Assert.True(reloaded.TryGetRecorded(sid, out var entry));
             Assert.Equal(deadPid, entry.HostPid);
             Assert.NotNull(entry.Flavor);
-            Assert.Equal(flavor.UseAgency, entry.Flavor.UseAgency);
             Assert.Equal(flavor.Model, entry.Flavor.Model);
             Assert.Equal(flavor.ReasoningEffort, entry.Flavor.ReasoningEffort);
             Assert.Equal(flavor.DisabledMcpServers, entry.Flavor.DisabledMcpServers);
@@ -146,7 +142,7 @@ public sealed class HostOwnershipTests : IDisposable
 
     private void WriteState(string sid, int hostPid, long hostStartTicks) =>
         File.WriteAllText(_file,
-            $"[{{\"SessionId\":\"{sid}\",\"HostPid\":{hostPid}," +
+            $"[{{\"SessionId\":\"{sid}\",\"LeaseId\":\"{Guid.NewGuid()}\",\"HostPid\":{hostPid}," +
             $"\"AcquiredAt\":\"{DateTimeOffset.UtcNow:o}\",\"HostStartTicks\":{hostStartTicks}}}]");
 
     public void Dispose()

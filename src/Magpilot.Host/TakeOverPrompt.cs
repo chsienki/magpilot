@@ -3,16 +3,14 @@ using Magpilot.Shared.Models;
 namespace Magpilot.Host;
 
 /// <summary>
-/// Renders the take-over prompt and reads the user's choice. The four
-/// behaviors map to the four keys: Y (polite), n (exit), f (force), d
-/// (details preview).
+/// Renders the take-over prompt and reads the user's choice.
 /// </summary>
 public static class TakeOverPrompt
 {
-    public enum Choice { Yes, No, Force, Details }
+    public enum Choice { Yes, No, Force }
 
     /// <summary>
-    /// Show the prompt for an agent-owned session and read a Y/n/f/d
+    /// Show the prompt for an agent-owned session and read a Y/n/f
     /// answer. Honors <see cref="WrapperOptions"/> auto-flags before
     /// touching the terminal -- if the user passed --magpilot-take /
     /// --magpilot-force / --magpilot-no-take we just return the matching
@@ -22,9 +20,9 @@ public static class TakeOverPrompt
     /// </summary>
     public static Choice Ask(SessionStateInfo state, WrapperOptions opts)
     {
-        if (opts.NoTake)  return Choice.No;
-        if (opts.Force)   return Choice.Force;
-        if (opts.Take)    return Choice.Yes;
+        if (opts.NoTake) return Choice.No;
+        if (opts.Force) return Choice.Force;
+        if (opts.Take) return Choice.Yes;
 
         if (Console.IsInputRedirected)
             throw new InvalidOperationException(
@@ -43,14 +41,12 @@ public static class TakeOverPrompt
             {
                 case "":
                 case "y":
-                case "yes":     return Choice.Yes;
+                case "yes": return Choice.Yes;
                 case "n":
-                case "no":      return Choice.No;
+                case "no": return Choice.No;
                 case "f":
-                case "force":   return Choice.Force;
-                case "d":
-                case "details": Choice.Details.ToString(); return Choice.Details; // caller re-prompts after dumping
-                default:        Console.WriteLine("Please answer Y / n / f / d."); break;
+                case "force": return Choice.Force;
+                default: Console.WriteLine("Please answer Y / n / f."); break;
             }
         }
     }
@@ -66,7 +62,7 @@ public static class TakeOverPrompt
         if (state.LastEvent is { } last && !string.IsNullOrEmpty(last.Type))
             Console.WriteLine($"  latest:  {last.Type}{(last.Timestamp is { } t ? $" at {t.LocalDateTime:HH:mm:ss}" : "")}");
         Console.WriteLine();
-        Console.WriteLine("Take over? [Y]es (wait for turn) / [n]o / [f]orce now / [d]etails");
+        Console.WriteLine("Take over? [Y]es (wait for turn) / [n]o / [f]orce now");
     }
 
     public static string DescribeDriver(SessionStateInfo state) => state.Owner switch
@@ -77,6 +73,8 @@ public static class TakeOverPrompt
                 : "agent (idle)",
         SessionOwner.Host => $"another magpilot launcher (PID {state.HostPid})",
         SessionOwner.External => $"another terminal (PID {state.Info.OwnerPid})",
+        SessionOwner.Contended =>
+            $"multiple writers (foreign PIDs: {string.Join(", ", state.ForeignHolderPids)})",
         _ => "no-one",
     };
 

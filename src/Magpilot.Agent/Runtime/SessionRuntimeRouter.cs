@@ -153,6 +153,9 @@ internal sealed class SessionRuntimeRouter : IAgentSessionRuntime
     public bool HasForeignLiveHolder(string sessionId) =>
         RuntimeForSession(sessionId).HasForeignLiveHolder(sessionId);
 
+    public IReadOnlyList<int> ForeignLiveHolderPids(string sessionId) =>
+        RuntimeForSession(sessionId).ForeignLiveHolderPids(sessionId);
+
     public IReadOnlyList<int> EvictForeignLiveHolders(string sessionId) =>
         RuntimeForSession(sessionId).EvictForeignLiveHolders(sessionId);
 
@@ -236,9 +239,7 @@ internal sealed class SessionRuntimeRouter : IAgentSessionRuntime
         profile.Backend switch
         {
             SessionRuntimeBackend.Acp => _acp,
-            SessionRuntimeBackend.Sdk when !profile.UseAgency => _sdk,
-            SessionRuntimeBackend.Sdk => throw new SessionRuntimeConfigurationException(
-                "Agency sessions cannot use the SDK backend."),
+            SessionRuntimeBackend.Sdk => _sdk,
             _ => throw new InvalidOperationException(
                 $"Unknown session runtime backend {profile.Backend}."),
         };

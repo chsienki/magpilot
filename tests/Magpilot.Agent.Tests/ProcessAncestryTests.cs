@@ -12,7 +12,7 @@ namespace Magpilot.Agent.Tests;
 /// session Host-owned (instead of leaving it "kill to unlock").
 ///
 /// Windows-only: the walk uses a Toolhelp snapshot and the launcher +
-/// agency only run on Windows. Tests no-op elsewhere.
+/// launcher ancestry only runs on Windows. Tests no-op elsewhere.
 /// </summary>
 public sealed class ProcessAncestryTests
 {

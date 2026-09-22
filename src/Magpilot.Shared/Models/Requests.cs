@@ -4,7 +4,6 @@ public sealed record NewSessionRequest(
     string? Cwd,
     string? Name,
     string? InitialPrompt = null,
-    bool UseAgency = false,
     string? Model = null,
     string? ReasoningEffort = null,
     string[]? DisableMcpServers = null,
@@ -55,21 +54,12 @@ public sealed record AcquireForHostBody(int HostPid, bool Force = false);
 /// <summary>
 /// Body for <c>POST /api/sessions/{id}/release</c>. The wrapper calls
 /// this after its child copilot has exited cleanly, signalling that
-/// the agent may re-adopt the session.
-/// <para>
-/// <see cref="Force"/> controls what happens if a live *foreign* copilot
-/// still holds the session at release time. A graceful release
-/// (<c>false</c>, the default) does NOT kill it -- the agent declines to
-/// adopt and reports the live holder so the caller can offer a forceful
-/// retry. This is the launcher's own release path (its copilot is already
-/// gone) and the SPA's graceful "Take back". A forceful release
-/// (<c>true</c>) evicts the live foreign copilot before re-adopting -- the
-/// SPA's explicit "Force take over" path. Evicting ends the terminal
-/// session outright (no cooperative "resume here" prompt), so it is only
-/// ever driven by an explicit user action.
-/// </para>
+/// the agent may re-adopt the session. The lease identifies the exact
+/// acquisition being released; a stale lease cannot affect a later owner.
 /// </summary>
-public sealed record ReleaseFromHostBody(int HostPid, bool Force = false);
+public sealed record ReleaseFromHostBody(Guid LeaseId);
+
+public sealed record TakeOverSessionRequest(bool Force = false);
 
 /// <summary>
 /// Body for <c>POST /api/sessions/{id}/yolo</c>. Flips the per-session

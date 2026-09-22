@@ -47,7 +47,6 @@ public sealed class SdkClientPoolIntegrationTests
             broker,
             NullLogger<SdkSessionRuntime>.Instance);
         var profile = SessionRuntimeProfile.Resolve(
-            useAgency: false,
             model: null,
             reasoningEffort: null,
             backend: SessionRuntimeBackend.Sdk);

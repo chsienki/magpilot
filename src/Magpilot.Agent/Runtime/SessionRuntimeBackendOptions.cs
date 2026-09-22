@@ -30,6 +30,4 @@ public sealed record SessionRuntimeBackendOptions(
         };
     }
 
-    public SessionRuntimeBackend ForProfile(bool useAgency) =>
-        useAgency ? SessionRuntimeBackend.Acp : DefaultBackend;
 }

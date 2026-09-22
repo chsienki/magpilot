@@ -308,13 +308,18 @@ internal sealed class SdkSessionRuntime(
         Task.FromResult(SessionRecycleOutcome.NotLoaded);
 
     public bool HasForeignLiveHolder(string sessionId)
+        => ForeignLiveHolderPids(sessionId).Count > 0;
+
+    public IReadOnlyList<int> ForeignLiveHolderPids(string sessionId)
     {
         var ours = _ourSessionPids.TryGetValue(sessionId, out var known)
             ? known
             : null;
         return SessionLocks.Live(
                 SessionLocks.Inspect(SessionDirectory(sessionId)))
-            .Any(holder => ours is null || !ours.ContainsKey(holder.Pid));
+            .Where(holder => ours is null || !ours.ContainsKey(holder.Pid))
+            .Select(holder => holder.Pid)
+            .ToArray();
     }
 
     public IReadOnlyList<int> EvictForeignLiveHolders(string sessionId)

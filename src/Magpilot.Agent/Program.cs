@@ -37,7 +37,6 @@ if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ASPNETCORE_URLS"))
 // MAGPILOT_HUB_BEARER aren't set, so dev runs without a hub still work.
 builder.Logging.AddProvider(new HubLoggerProvider());
 
-builder.Services.AddSingleton<FlavorCapabilities>();
 builder.Services.AddSingleton(
     SessionRuntimeBackendOptions.FromEnvironment());
 builder.Services.AddSingleton<AcpFlavorPool>();
@@ -173,7 +172,7 @@ internal sealed class AcpStarter(
         if (runtimeOptions.DefaultBackend == SessionRuntimeBackend.Sdk)
         {
             log.LogInformation(
-                "Skipping eager default ACP child because the SDK backend is selected; ACP remains available lazily for rollback and Agency sessions.");
+                "Skipping eager default ACP child because the SDK backend is selected; ACP remains available lazily for rollback.");
             _ = mgr;
             return;
         }

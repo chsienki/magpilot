@@ -109,13 +109,6 @@ public sealed class AgentRegistry
         AddColumnIfMissing(c, "agents", "enrolled_at", "INTEGER");
         AddColumnIfMissing(c, "agents", "enrolled_via", "INTEGER");
         AddColumnIfMissing(c, "agents", "revoked_at", "INTEGER");
-        // Advertised ACP flavors as a JSON array. The UDP discovery
-        // sweep keeps this fresh for LAN agents, but a WireGuard-only
-        // agent is never discovered, so persisting the column lets its
-        // capabilities (e.g. "agency") be seeded once and survive
-        // restarts + re-pairs instead of being lost with the in-memory
-        // registry.
-        AddColumnIfMissing(c, "agents", "flavors", "TEXT");
         // Multi-user: the GitHub login that enrolled/adopted this
         // agent. Set by the voucher-redeem (created_by_user) and
         // claim-approve (decided_by_user) paths. NULL on rows enrolled
@@ -123,16 +116,6 @@ public sealed class AgentRegistry
         // the hub treats a NULL owner as belonging to the admin's
         // scoped view (see AgentVisibility).
         AddColumnIfMissing(c, "agents", "owner_user", "TEXT");
-    }
-
-    private static string? SerializeFlavors(IReadOnlyList<string>? flavors) =>
-        flavors is null ? null : JsonSerializer.Serialize(flavors);
-
-    private static IReadOnlyList<string>? ParseFlavors(string? json)
-    {
-        if (string.IsNullOrWhiteSpace(json)) return null;
-        try { return JsonSerializer.Deserialize<List<string>>(json); }
-        catch (JsonException) { return null; }
     }
 
     /// <summary>
@@ -163,7 +146,7 @@ public sealed class AgentRegistry
         using var c = new SqliteConnection(ConnString);
         c.Open();
         using var cmd = c.CreateCommand();
-        cmd.CommandText = "SELECT name, url, token, last_seen, enrolled_at, revoked_at, flavors, owner_user FROM agents";
+        cmd.CommandText = "SELECT name, url, token, last_seen, enrolled_at, revoked_at, owner_user FROM agents";
         using var r = cmd.ExecuteReader();
         while (r.Read())
         {
@@ -176,9 +159,8 @@ public sealed class AgentRegistry
                 : DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(4));
             var revokedAt = r.IsDBNull(5) ? (DateTimeOffset?)null
                 : DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(5));
-            var flavors = r.IsDBNull(6) ? null : ParseFlavors(r.GetString(6));
-            var ownerUser = r.IsDBNull(7) ? null : r.GetString(7);
-            _agents[name] = new AgentInfo(name, url, false, null, lastSeen, flavors, enrolledAt, revokedAt, ownerUser);
+            var ownerUser = r.IsDBNull(6) ? null : r.GetString(6);
+            _agents[name] = new AgentInfo(name, url, false, null, lastSeen, enrolledAt, revokedAt, ownerUser);
             if (token is not null) _tokens[name] = token;
         }
         _logger.LogInformation("Loaded {N} agents from {Db}", _agents.Count, _dbPath);
@@ -251,13 +233,12 @@ public sealed class AgentRegistry
         }
     }
 
-    public void Upsert(string name, string url, string? token, bool online, IReadOnlyList<string>? flavors = null)
+    public void Upsert(string name, string url, string? token, bool online)
     {
         // Preserve previously-known fields the caller didn't supply.
-        // Discovery probes don't know about flavors / enrollment
-        // lineage / revocation state -- only the original enrollment
+        // Discovery probes don't know about enrollment lineage /
+        // revocation state -- only the original enrollment
         // does -- so they'd otherwise clobber those on every sweep.
-        IReadOnlyList<string>? resolvedFlavors = flavors;
         DateTimeOffset? resolvedEnrolledAt = null;
         DateTimeOffset? resolvedRevokedAt = null;
         string? resolvedOwnerUser = null;
@@ -265,14 +246,13 @@ public sealed class AgentRegistry
         {
             if (_agents.TryGetValue(name, out var existing))
             {
-                resolvedFlavors ??= existing.Flavors;
                 resolvedEnrolledAt = existing.EnrolledAt;
                 resolvedRevokedAt = existing.RevokedAt;
                 resolvedOwnerUser = existing.OwnerUser;
             }
         }
 
-        var info = new AgentInfo(name, url, online, null, DateTimeOffset.UtcNow, resolvedFlavors, resolvedEnrolledAt, resolvedRevokedAt, resolvedOwnerUser);
+        var info = new AgentInfo(name, url, online, null, DateTimeOffset.UtcNow, resolvedEnrolledAt, resolvedRevokedAt, resolvedOwnerUser);
         lock (_lock)
         {
             _agents[name] = info;
@@ -282,18 +262,16 @@ public sealed class AgentRegistry
         c.Open();
         using var cmd = c.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO agents (name, url, token, last_seen, flavors)
-            VALUES ($name, $url, $token, $ts, $flavors)
+            INSERT INTO agents (name, url, token, last_seen)
+            VALUES ($name, $url, $token, $ts)
             ON CONFLICT(name) DO UPDATE SET url=excluded.url,
               token = COALESCE(excluded.token, agents.token),
-              last_seen = excluded.last_seen,
-              flavors = COALESCE(excluded.flavors, agents.flavors)
+              last_seen = excluded.last_seen
         """;
         cmd.Parameters.AddWithValue("$name", name);
         cmd.Parameters.AddWithValue("$url", url);
         cmd.Parameters.AddWithValue("$token", (object?)token ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$ts", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-        cmd.Parameters.AddWithValue("$flavors", (object?)SerializeFlavors(resolvedFlavors) ?? DBNull.Value);
         cmd.ExecuteNonQuery();
     }
 
@@ -362,7 +340,7 @@ public sealed class AgentRegistry
         c.Open();
         using var cmd = c.CreateCommand();
         cmd.CommandText = """
-            SELECT url, token, last_seen, enrolled_at, revoked_at, flavors, owner_user
+            SELECT url, token, last_seen, enrolled_at, revoked_at, owner_user
             FROM agents WHERE name = $n
         """;
         cmd.Parameters.AddWithValue("$n", name);
@@ -376,12 +354,10 @@ public sealed class AgentRegistry
             : DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(3));
         var revokedAt = r.IsDBNull(4) ? (DateTimeOffset?)null
             : DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(4));
-        var dbFlavors = r.IsDBNull(5) ? null : ParseFlavors(r.GetString(5));
-        var ownerUser = r.IsDBNull(6) ? null : r.GetString(6);
+        var ownerUser = r.IsDBNull(5) ? null : r.GetString(5);
         lock (_lock)
         {
-            var prevFlavors = _agents.TryGetValue(name, out var prev) ? prev.Flavors : null;
-            _agents[name] = new AgentInfo(name, url, false, null, lastSeen, dbFlavors ?? prevFlavors, enrolledAt, revokedAt, ownerUser);
+            _agents[name] = new AgentInfo(name, url, false, null, lastSeen, enrolledAt, revokedAt, ownerUser);
             if (token is not null) _tokens[name] = token;
             else _tokens.Remove(name);
         }

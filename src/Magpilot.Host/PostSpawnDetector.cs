@@ -39,8 +39,8 @@ namespace Magpilot.Host;
 /// </summary>
 internal static class PostSpawnDetector
 {
-    private static readonly TimeSpan DefaultTimeout  = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan PollInterval    = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
 
     private static string SessionStateRoot => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -55,7 +55,7 @@ internal static class PostSpawnDetector
     /// don't refresh the lock). Returns the containing session id on
     /// either signal, or null on timeout.
     /// </summary>
-    public static async Task<string?> WaitForSessionAsync(int copilotPid, CancellationToken ct, TimeSpan? timeout = null, bool matchDescendants = false)
+    public static async Task<string?> WaitForSessionAsync(int copilotPid, CancellationToken ct, TimeSpan? timeout = null)
     {
         var deadline = DateTime.UtcNow + (timeout ?? DefaultTimeout);
         var root = SessionStateRoot;
@@ -68,7 +68,7 @@ internal static class PostSpawnDetector
         // Live-lock sessions are excluded so unrelated activity on the
         // box (the user's other copilot process, a magpilot agent driving
         // a session via ACP) can never false-positive this pass.
-        var beforeEvents    = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        var beforeEvents = new Dictionary<string, DateTime>(StringComparer.Ordinal);
         var beforeWorkspace = new Dictionary<string, DateTime>(StringComparer.Ordinal);
         foreach (var sessionDir in SafeEnumerateDirectories(root))
         {
@@ -87,28 +87,13 @@ internal static class PostSpawnDetector
         {
             try
             {
-                // When the spawned process wraps copilot in a child (e.g.
-                // agency: magpilot -> agency -> copilot), copilot's lock
-                // carries a PID we never saw. Snapshot the process tree once
-                // per tick so Pass 1 can match any live descendant of the
-                // spawned PID, not just an exact PID match.
-                var parents = matchDescendants
-                    ? ProcessTree.SnapshotParentMap()
-                    : null;
-
-                // Pass 1: match inuse.<pid>.lock -- either an exact PID match
-                // (the canonical signal for fresh sessions and most resumes)
-                // or, in descendant mode, a live descendant of the spawned PID.
+                // Pass 1: match inuse.<pid>.lock. This is the canonical signal
+                // for fresh sessions and most resumes.
                 foreach (var sessionDir in Directory.EnumerateDirectories(root))
                 {
                     foreach (var file in Directory.EnumerateFiles(sessionDir, "inuse.*.lock"))
                     {
                         if (Path.GetFileName(file).EndsWith(lockSuffix, StringComparison.Ordinal))
-                            return Path.GetFileName(sessionDir);
-
-                        if (parents is not null
-                            && TryParseLockPid(file, out var lockPid)
-                            && ProcessTree.IsSelfOrDescendant(lockPid, copilotPid, parents))
                             return Path.GetFileName(sessionDir);
                     }
                 }

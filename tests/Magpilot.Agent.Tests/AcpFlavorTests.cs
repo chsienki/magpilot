@@ -58,7 +58,7 @@ public sealed class AcpFlavorTests
     [Fact]
     public void Resolve_threads_disable_to_a_scoped_flavor()
     {
-        var f = AcpFlavor.Resolve(useAgency: false, model: "gpt-5.6-sol-fast",
+        var f = AcpFlavor.Resolve(model: "gpt-5.6-sol-fast",
             reasoningEffort: "none", disableMcpServers: ["tunebase"]);
 
         Assert.Contains("--disable-mcp-server tunebase", f.Args);
@@ -71,7 +71,6 @@ public sealed class AcpFlavorTests
     public void Resolve_preserves_reasoning_only_request_on_default_flavor()
     {
         var f = AcpFlavor.Resolve(
-            useAgency: false,
             model: null,
             reasoningEffort: "none");
 
@@ -85,7 +84,6 @@ public sealed class AcpFlavorTests
     public void Resolve_accepts_future_safe_reasoning_tokens_for_acp_to_validate()
     {
         var f = AcpFlavor.Resolve(
-            useAgency: false,
             model: null,
             reasoningEffort: "future-level");
 
@@ -98,7 +96,6 @@ public sealed class AcpFlavorTests
         var copilotHome = Path.Combine(Path.GetTempPath(), "magpilot-phone-home");
 
         var flavor = AcpFlavor.Resolve(
-            useAgency: false,
             model: null,
             reasoningEffort: null,
             disableMcpServers: ["tunebase", "home-assistant", "tunebase"],
@@ -129,13 +126,11 @@ public sealed class AcpFlavorTests
     public void Resolve_canonicalizes_collection_order_for_the_process_key()
     {
         var first = AcpFlavor.Resolve(
-            useAgency: false,
             model: null,
             reasoningEffort: null,
             disableMcpServers: ["tunebase", "home-assistant"],
             availableTools: ["server(tool_z)", "magnus-phone"]);
         var reordered = AcpFlavor.Resolve(
-            useAgency: false,
             model: null,
             reasoningEffort: null,
             disableMcpServers: ["home-assistant", "tunebase", "home-assistant"],
@@ -149,13 +144,11 @@ public sealed class AcpFlavorTests
     public void Resolve_process_key_is_unambiguous_when_selector_text_resembles_scope_labels()
     {
         var builtinDisabled = AcpFlavor.Resolve(
-            useAgency: false,
             model: null,
             reasoningEffort: null,
             availableTools: ["*"],
             disableBuiltinMcps: true);
         var selectorOnly = AcpFlavor.Resolve(
-            useAgency: false,
             model: null,
             reasoningEffort: null,
             availableTools: ["*:no-builtin-mcps"]);
@@ -171,11 +164,11 @@ public sealed class AcpFlavorTests
         var flavors = new[]
         {
             AcpFlavor.Default,
-            AcpFlavor.Resolve(false, null, null, agent: "magnus-phone"),
-            AcpFlavor.Resolve(false, null, null, availableTools: ["magnus-phone"]),
-            AcpFlavor.Resolve(false, null, null, disableBuiltinMcps: true),
-            AcpFlavor.Resolve(false, null, null, noCustomInstructions: true),
-            AcpFlavor.Resolve(false, null, null, copilotHome: copilotHome),
+            AcpFlavor.Resolve(null, null, agent: "magnus-phone"),
+            AcpFlavor.Resolve(null, null, availableTools: ["magnus-phone"]),
+            AcpFlavor.Resolve(null, null, disableBuiltinMcps: true),
+            AcpFlavor.Resolve(null, null, noCustomInstructions: true),
+            AcpFlavor.Resolve(null, null, copilotHome: copilotHome),
         };
 
         Assert.Equal(flavors.Length, flavors.Select(static flavor => flavor.Key).Distinct().Count());
@@ -187,7 +180,7 @@ public sealed class AcpFlavorTests
     public void Resolve_rejects_unsafe_agent_names(string agent)
     {
         Assert.Throws<ArgumentException>(() =>
-            AcpFlavor.Resolve(false, null, null, agent: agent));
+            AcpFlavor.Resolve(null, null, agent: agent));
     }
 
     [Theory]
@@ -196,7 +189,7 @@ public sealed class AcpFlavorTests
     public void Resolve_rejects_unsafe_tool_selectors(string selector)
     {
         Assert.Throws<ArgumentException>(() =>
-            AcpFlavor.Resolve(false, null, null, availableTools: [selector]));
+            AcpFlavor.Resolve(null, null, availableTools: [selector]));
     }
 
     [Fact]
@@ -217,14 +210,14 @@ public sealed class AcpFlavorTests
     public void Resolve_rejects_relative_copilot_home()
     {
         Assert.Throws<ArgumentException>(() =>
-            AcpFlavor.Resolve(false, null, null, copilotHome: "relative/copilot-home"));
+            AcpFlavor.Resolve(null, null, copilotHome: "relative/copilot-home"));
     }
 
     [Fact]
     public async Task Flavor_pool_rejects_missing_copilot_home_before_spawning_child()
     {
         var missing = Path.Combine(Path.GetTempPath(), $"missing-copilot-home-{Guid.NewGuid():N}");
-        var flavor = AcpFlavor.Resolve(false, null, null, copilotHome: missing);
+        var flavor = AcpFlavor.Resolve(null, null, copilotHome: missing);
         var pool = new AcpFlavorPool(
             NullLoggerFactory.Instance,
             NullLogger<AcpFlavorPool>.Instance);
@@ -242,7 +235,7 @@ public sealed class AcpFlavorTests
         Directory.CreateDirectory(Path.Combine(home, "session-state"));
         try
         {
-            var flavor = AcpFlavor.Resolve(false, null, null, copilotHome: home);
+            var flavor = AcpFlavor.Resolve(null, null, copilotHome: home);
             var pool = new AcpFlavorPool(
                 NullLoggerFactory.Instance,
                 NullLogger<AcpFlavorPool>.Instance);

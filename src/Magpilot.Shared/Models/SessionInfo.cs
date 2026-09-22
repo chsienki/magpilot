@@ -2,8 +2,7 @@ namespace Magpilot.Shared.Models;
 
 /// <summary>
 /// Disposition of a Copilot CLI session on a host:
-/// - <see cref="Owned"/>: held by THIS magpilot agent's copilot --acp child;
-///   we can drive it directly via session/prompt.
+/// - <see cref="Owned"/>: held by this Magpilot agent's active runtime.
 /// - <see cref="Locked"/>: an inuse.<PID>.lock exists pointing at a live process
 ///   that ISN'T ours (e.g. a terminal copilot session). Adopting requires
 ///   killing that process first then session/load.

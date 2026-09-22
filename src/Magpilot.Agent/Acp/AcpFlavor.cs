@@ -4,15 +4,12 @@ namespace Magpilot.Agent.Acp;
 
 /// <summary>
 /// Describes how to spawn an ACP child process. Every distinct (Exe, Args)
-/// pair gets its own long-lived process inside <see cref="AcpFlavorPool"/>
-/// when <see cref="MultiplexesSessions"/> is true; otherwise a fresh process
-/// is spawned per session.
+/// pair gets its own long-lived process inside <see cref="AcpFlavorPool"/>.
 /// </summary>
 public sealed record AcpFlavor(
     string Key,
     string Exe,
     string Args,
-    bool MultiplexesSessions = true,
     string? Model = null,
     string? ReasoningEffort = null,
     IReadOnlyList<string>? DisabledMcpServers = null,
@@ -28,18 +25,7 @@ public sealed record AcpFlavor(
     public static readonly AcpFlavor Default =
         new("default",
             OperatingSystem.IsWindows() ? "copilot.exe" : "copilot",
-            "--acp --allow-all-tools",
-            MultiplexesSessions: true);
-
-    /// <summary>
-    /// Agency-wrapped Copilot. Agency does not multiplex sessions reliably, so
-    /// each Agency session receives its own child process.
-    /// </summary>
-    public static readonly AcpFlavor Agency =
-        new("agency",
-            OperatingSystem.IsWindows() ? "agency.exe" : "agency",
-            "copilot --no-default-mcps -- --acp --allow-all-tools",
-            MultiplexesSessions: false);
+            "--acp --allow-all-tools");
 
     /// <summary>
     /// Builds the default process flavor plus session-scoped model and
@@ -50,7 +36,6 @@ public sealed record AcpFlavor(
         string? reasoningEffort,
         IReadOnlyList<string>? disableMcpServers = null) =>
         Resolve(
-            useAgency: false,
             model,
             reasoningEffort,
             disableMcpServers);
@@ -60,7 +45,6 @@ public sealed record AcpFlavor(
     /// Runtime consumers resolve <see cref="SessionRuntimeProfile"/> instead.
     /// </summary>
     public static AcpFlavor Resolve(
-        bool useAgency,
         string? model,
         string? reasoningEffort,
         IReadOnlyList<string>? disableMcpServers = null,
@@ -70,7 +54,6 @@ public sealed record AcpFlavor(
         bool noCustomInstructions = false,
         string? copilotHome = null) =>
         FromRuntimeProfile(SessionRuntimeProfile.Resolve(
-            useAgency,
             model,
             reasoningEffort,
             disableMcpServers,
@@ -86,7 +69,7 @@ public sealed record AcpFlavor(
     /// </summary>
     internal static AcpFlavor FromRuntimeProfile(SessionRuntimeProfile profile)
     {
-        var baseFlavor = profile.UseAgency ? Agency : Default;
+        var baseFlavor = Default;
         var disabled = profile.DisabledMcpServers ?? [];
         var tools = profile.AvailableTools ?? [];
 
@@ -140,8 +123,6 @@ public sealed record AcpFlavor(
 
     internal SessionRuntimeProfile ToRuntimeProfile() =>
         new(
-            UseAgency: string.Equals(Key, Agency.Key, StringComparison.Ordinal)
-                || Key.StartsWith(Agency.Key + ":", StringComparison.Ordinal),
             Model,
             ReasoningEffort,
             DisabledMcpServers,

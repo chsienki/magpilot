@@ -11,20 +11,17 @@ namespace Magpilot.Agent.Sessions;
 /// once and never re-asserts, so a restart otherwise orphans the session into
 /// "kill to unlock" even though the launcher is still driving it).
 ///
-/// <para>A copilot child spawned by the launcher through a ConPTY is a direct,
-/// walkable descendant of the launcher process (verified empirically); under
-/// <c>--magpilot-agency</c> the chain is <c>magpilot -> agency -> copilot</c>.
-/// So walking up from the lock's PID and finding a process named
+/// <para>A Copilot child spawned by the launcher through a ConPTY is a direct,
+/// walkable descendant of the launcher process. Walking up from the lock's PID
+/// and finding a process named
 /// <c>magpilot</c> identifies a launcher-driven session, distinct from the
 /// agent's own <c>copilot --acp</c> children (parented under
 /// <c>Magpilot.Agent</c>) and from bare terminal <c>copilot</c> sessions
 /// (parented under a shell).</para>
 ///
-/// Windows-only for the launcher-ancestor question (agency + the installed
-/// launcher are Windows); returns false elsewhere.
+/// Windows-only for the installed launcher today; returns false elsewhere.
 /// <see cref="IsSelfOrDescendantOf"/> is cross-platform. A sibling
-/// <c>ProcessTree</c> in Magpilot.Host serves the
-/// launcher's own agency-descendant check.
+/// process-tree snapshot is used by tests for the pure ancestry predicate.
 /// </summary>
 internal static class ProcessAncestry
 {

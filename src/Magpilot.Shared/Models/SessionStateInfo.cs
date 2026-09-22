@@ -9,19 +9,16 @@ using System.Text.Json.Serialization;
 /// taking over a session, and by the SPA's session list to render
 /// a richer "what's happening" badge per row.
 /// </summary>
-/// <remarks>
-/// This is a SUPERSET of <see cref="SessionInfo"/>. The wire format
-/// includes the underlying <see cref="SessionInfo"/> so older clients
-/// that just want the basic fields can still parse it.
-/// </remarks>
 public sealed record SessionStateInfo(
     SessionInfo Info,
     SessionOwner Owner,
     int? HostPid,
+    Guid? HostLeaseId,
     SessionActivity Activity,
     InFlightInfo? InFlight,
     LastEventInfo? LastEvent,
-    SessionRuntimeStatus? RuntimeStatus = null
+    SessionRuntimeStatus? RuntimeStatus,
+    IReadOnlyList<int> ForeignHolderPids
 );
 
 /// <summary>
@@ -35,12 +32,14 @@ public enum SessionOwner
 {
     /// <summary>No-one currently driving; safe for any caller to acquire.</summary>
     None,
-    /// <summary>This magpilot agent's copilot --acp child is driving via ACP.</summary>
+    /// <summary>This magpilot agent's active runtime is driving the session.</summary>
     Agent,
     /// <summary>A magpilot launcher has acquired the session for a local terminal.</summary>
     Host,
     /// <summary>Some other process holds an inuse.lock that we don't track (e.g. a raw <c>copilot</c> in a terminal).</summary>
     External,
+    /// <summary>More than one independently-controlled process can write the session.</summary>
+    Contended,
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<SessionActivity>))]
@@ -50,8 +49,6 @@ public enum SessionActivity
     Idle,
     /// <summary>Agent is mid-turn for this session.</summary>
     InFlight,
-    /// <summary>Last turn completed within the past few seconds (for grace-period UX).</summary>
-    JustFinished,
 }
 
 /// <summary>
@@ -61,8 +58,7 @@ public enum SessionActivity
 /// </summary>
 public sealed record InFlightInfo(
     string? Driver,
-    long StartedAtMs,
-    string? Preview
+    long StartedAtMs
 );
 
 /// <summary>

@@ -80,15 +80,14 @@ public sealed class DiscoveryProber : BackgroundService
                     var reply = JsonSerializer.Deserialize<DiscoveryReply>(result.Buffer);
                     if (reply?.Magic == Magic && !string.IsNullOrEmpty(reply.Name) && !string.IsNullOrEmpty(reply.Url))
                     {
-                        _logger.LogInformation("Discovered {Name} at {Url} (flavors: {Flavors})",
-                            reply.Name, reply.Url,
-                            reply.Flavors is null ? "<unspecified>" : string.Join(", ", reply.Flavors));
+                        _logger.LogInformation("Discovered {Name} at {Url}",
+                            reply.Name, reply.Url);
                         // Pass null token: the registry preserves any
                         // previously-stored per-agent token via the
                         // COALESCE in its UPSERT, so re-discovering an
                         // already-enrolled agent doesn't blow away its
                         // credentials.
-                        _registry.Upsert(reply.Name, reply.Url, token: null, online: true, flavors: reply.Flavors);
+                        _registry.Upsert(reply.Name, reply.Url, token: null, online: true);
                     }
                 }
                 catch (Exception ex) { _logger.LogDebug(ex, "Bad discovery reply"); }
@@ -101,7 +100,6 @@ public sealed class DiscoveryProber : BackgroundService
         [property: JsonPropertyName("magic")] string Magic,
         [property: JsonPropertyName("name")] string Name,
         [property: JsonPropertyName("url")] string Url,
-        [property: JsonPropertyName("os")] string? Os,
-        [property: JsonPropertyName("flavors")] IReadOnlyList<string>? Flavors
+        [property: JsonPropertyName("os")] string? Os
     );
 }

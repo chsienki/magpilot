@@ -117,14 +117,6 @@
                                          Color="@(a.Online ? Color.Success : Color.Default)"
                                          Size="Size.Small" />
                                 <MudText Typo="Typo.body1">@a.Name</MudText>
-                                @if (a.Flavors is { Count: > 0 } flavors && flavors.Any(f => f != "default"))
-                                {
-                                    <MudSpacer />
-                                    @foreach (var f in flavors.Where(f => f != "default"))
-                                    {
-                                        <MudChip T="string" Size="Size.Small" Color="Color.Tertiary" Variant="Variant.Outlined">@f</MudChip>
-                                    }
-                                }
                             </MudStack>
                         </MudListItem>
                     }
@@ -405,12 +397,6 @@
                                      ResetValueOnEmptyText="false"
                                      Placeholder="(leave blank for agent default)"
                                      Class="mb-4" />
-                    @if (_currentAgentSupportsAgency)
-                    {
-                        <MudCheckBox T="bool" @bind-Value="_newSessionUseAgency" Color="Color.Primary"
-                                     Label="Wrap with agency (extra MCP servers)"
-                                     Class="mb-4" />
-                    }
                     @if (_newSessionError is not null)
                     {
                         <MudAlert Severity="Severity.Error" Class="mb-4">@_newSessionError</MudAlert>
@@ -1025,7 +1011,6 @@
     private SessionInfo? _pendingOrphan;
     private bool _newSessionOpen;
     private string _newSessionCwd = "";
-    private bool _newSessionUseAgency;
     private string? _newSessionError;
     private bool _newSessionBusy;
     private List<string> _cwdSuggestions = new();
@@ -1578,7 +1563,7 @@
                     && state is not null)
                 {
                     _runtimeStatus = state.RuntimeStatus;
-                    if (state.Owner == SessionOwner.Host)
+                    if (state.Owner is SessionOwner.Host or SessionOwner.Contended)
                     {
                         _hostHasTakenOver = true;
                         _hostTakeoverPid = state.HostPid;
@@ -1972,14 +1957,6 @@
             ? (s.Summary ?? s.Id[..8])
             : null;
 
-    /// <summary>
-    /// True when the current Agent advertises the "agency" flavor (i.e. the
-    /// `agency` CLI is installed on that host). Used to gate the "Wrap with
-    /// agency" checkbox in the new session dialog.
-    /// </summary>
-    private bool _currentAgentSupportsAgency =>
-        _agents?.FirstOrDefault(a => a.Name == Agent)?.Flavors?.Contains("agency") == true;
-
     private void OpenSession(SessionInfo s)
     {
         Nav.NavigateTo($"/agents/{Agent}/sessions/{s.Id}");
@@ -1997,7 +1974,6 @@
             .Take(20)
             .ToList();
         _newSessionCwd = _cwdSuggestions.FirstOrDefault() ?? "";
-        _newSessionUseAgency = false;
         _newSessionError = null;
         _newSessionBusy = false;
         _newSessionOpen = true;
@@ -2017,7 +1993,7 @@
         try
         {
             var cwd = string.IsNullOrWhiteSpace(_newSessionCwd) ? null : _newSessionCwd.Trim();
-            var s = await Hub.NewSessionAsync(Agent, cwd, _newSessionUseAgency);
+            var s = await Hub.NewSessionAsync(Agent, cwd);
             if (s is null) { _newSessionError = "Server returned no session"; _newSessionBusy = false; return; }
             // Instant-insert: prepend the new session to the visible list
             // before navigating, so the user sees it appear immediately.
@@ -2566,7 +2542,7 @@
                 _streamingThought = null;
                 _busy = false;
                 // The session may have been /rename'd or otherwise
-                // mutated during the turn (e.g. context loaded, agency
+                // mutated during the turn (e.g. context loaded
                 // switched). Refresh the session list in the background
                 // so the sidebar entry + AppBar title pick up the new
                 // metadata without the user having to do anything.
@@ -2854,7 +2830,7 @@
             // only as slow as it actually is.
             var postState = await PollForReleaseAsync(TimeSpan.FromSeconds(GracefulTakeBackSeconds));
 
-            if (postState is { Owner: SessionOwner.Host or SessionOwner.External })
+            if (postState is { Owner: SessionOwner.Host or SessionOwner.External or SessionOwner.Contended })
             {
                 // Cooperative handoff didn't complete. Don't force silently --
                 // offer the choice. Sessions persist to disk, so the terminal is
@@ -2897,18 +2873,17 @@
         StateHasChanged();
         try
         {
-            // force=true throughout: the acquire flips ownership unilaterally and
-            // the release evicts the live foreign copilot before re-adopting.
+            // The SPA is not a terminal owner. Ask the agent to evict every
+            // foreign holder and restore its runtime directly.
             await Hub.FireReleaseRequestAsync(Agent, SessionId, requester: "spa", force: true);
             await Task.Delay(1000);
-            await Hub.AcquireForHostAsync(Agent, SessionId, hostPid: 0, force: true);
-            await Hub.ReleaseAsync(Agent, SessionId, hostPid: 0, force: true);
+            await Hub.TakeOverAsync(Agent, SessionId, force: true);
 
             // Eviction is a local kill, so ownership should clear within a couple
             // of seconds -- a short verify budget is enough (unlike the graceful
             // path, which waits on a cooperative session/load).
             var postState = await PollForReleaseAsync(TimeSpan.FromSeconds(6));
-            if (postState is { Owner: SessionOwner.Host or SessionOwner.External })
+            if (postState is { Owner: SessionOwner.Host or SessionOwner.External or SessionOwner.Contended })
             {
                 // Even the force path couldn't free it (e.g. the agent lacked
                 // permission to kill the holder). Keep the choice up.
@@ -2956,7 +2931,7 @@
         {
             state = await Hub.GetStateAsync(Agent!, SessionId!);
             if (state is null
-                || state.Owner is not (SessionOwner.Host or SessionOwner.External))
+                || state.Owner is not (SessionOwner.Host or SessionOwner.External or SessionOwner.Contended))
             {
                 return state;
             }
@@ -3086,7 +3061,7 @@
             _runtimeStatus = state?.RuntimeStatus;
 
             // A launcher may have acquired the session while we were gone.
-            if (state is { Owner: SessionOwner.Host })
+            if (state is { Owner: SessionOwner.Host or SessionOwner.Contended })
             {
                 await InvokeAsync(() =>
                 {
@@ -3150,8 +3125,8 @@
     ///   <item><b>Stuck dots:</b> socket healthy (heartbeats flowing) but a
     ///   turn's TurnComplete was lost across a reconnect (no replay buffer),
     ///   so the dots never clear. Re-probe /state; if the turn is genuinely
-    ///   Idle, heal from disk history. Throttled + gated on Idle (not
-    ///   JustFinished) so a normal in-flight TurnComplete isn't pre-empted.</item>
+    ///   Idle, heal from disk history. Throttled and gated on settled Idle so a
+    ///   normal in-flight turn is never pre-empted.</item>
     /// </list>
     /// The unconditional heartbeat makes both timeouts safe: a legitimately
     /// long, quiet turn still refreshes the liveness clock and reports
@@ -3210,9 +3185,8 @@
                 try { state = await Hub.GetStateAsync(agent, sid); }
                 catch { return; }
                 if (_disposed || _hostHasTakenOver || _streamingFor != $"{agent}/{sid}") return;
-                // Unknown, still in flight, or just-finished (grace, TurnComplete
-                // imminent): leave the dots alone. Only a settled Idle means the
-                // TurnComplete was genuinely lost.
+                // Unknown or still in flight: leave the dots alone. Only a
+                // settled Idle means the TurnComplete was genuinely lost.
                 if (state?.Activity != SessionActivity.Idle) return;
 
                 List<ChatMessage>? fresh = null;

@@ -73,13 +73,23 @@ public sealed class HostOwnership : IHostedService, IDisposable
     /// the agent let go, so a later handback restores the same child scope and
     /// session configuration instead of silently demoting it to the default.
     /// </summary>
-    public void Set(string sessionId, int hostPid, HostSessionFlavor? flavor = null)
+    public HostOwnerEntry Set(string sessionId, int hostPid, HostSessionFlavor? flavor = null)
     {
-        var entry = new HostOwnerEntry(hostPid, DateTimeOffset.UtcNow, TryGetStartTicks(hostPid), flavor);
+        var entry = new HostOwnerEntry(
+            Guid.NewGuid(),
+            hostPid,
+            DateTimeOffset.UtcNow,
+            TryGetStartTicks(hostPid),
+            flavor);
         _entries[sessionId] = entry;
         _releaseEntries[sessionId] = entry;
-        _logger.LogInformation("Host {Pid} acquired session {Sid}", hostPid, sessionId);
+        _logger.LogInformation(
+            "Host {Pid} acquired session {Sid} with lease {LeaseId}",
+            hostPid,
+            sessionId,
+            entry.LeaseId);
         Persist();
+        return entry;
     }
 
     /// <summary>Drop the host-ownership marker (e.g. when the host releases).</summary>
@@ -202,7 +212,14 @@ public sealed class HostOwnership : IHostedService, IDisposable
         foreach (var e in saved)
         {
             if (string.IsNullOrEmpty(e.SessionId)) continue;
-            var entry = new HostOwnerEntry(e.HostPid, e.AcquiredAt, e.HostStartTicks, e.Flavor);
+            if (e.LeaseId == Guid.Empty)
+                continue;
+            var entry = new HostOwnerEntry(
+                e.LeaseId,
+                e.HostPid,
+                e.AcquiredAt,
+                e.HostStartTicks,
+                e.Flavor);
             _releaseEntries[e.SessionId] = entry;
             if (IsSameProcess(entry))
             {
@@ -223,7 +240,13 @@ public sealed class HostOwnership : IHostedService, IDisposable
             lock (_persistLock)
             {
                 var snapshot = _releaseEntries
-                    .Select(kv => new PersistedEntry(kv.Key, kv.Value.HostPid, kv.Value.AcquiredAt, kv.Value.HostStartTicks, kv.Value.Flavor))
+                    .Select(kv => new PersistedEntry(
+                        kv.Key,
+                        kv.Value.LeaseId,
+                        kv.Value.HostPid,
+                        kv.Value.AcquiredAt,
+                        kv.Value.HostStartTicks,
+                        kv.Value.Flavor))
                     .ToList();
                 var json = JsonSerializer.Serialize(snapshot);
                 Directory.CreateDirectory(Path.GetDirectoryName(_statePath)!);
@@ -244,6 +267,7 @@ public sealed class HostOwnership : IHostedService, IDisposable
 
     private sealed record PersistedEntry(
         string SessionId,
+        Guid LeaseId,
         int HostPid,
         DateTimeOffset AcquiredAt,
         long HostStartTicks,
@@ -259,7 +283,6 @@ public sealed class HostOwnership : IHostedService, IDisposable
 /// older agent) simply falls back to the default profile.
 /// </summary>
 public sealed record HostSessionFlavor(
-    bool UseAgency = false,
     string? Model = null,
     string? ReasoningEffort = null,
     string[]? DisabledMcpServers = null,
@@ -271,6 +294,7 @@ public sealed record HostSessionFlavor(
     SessionRuntimeBackend? Backend = null);
 
 public readonly record struct HostOwnerEntry(
+    Guid LeaseId,
     int HostPid,
     DateTimeOffset AcquiredAt,
     long HostStartTicks,

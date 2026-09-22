@@ -10,7 +10,6 @@ public sealed class SdkSessionProfileMapperTests
     public void Create_maps_supported_session_configuration()
     {
         var profile = SessionRuntimeProfile.Resolve(
-            useAgency: false,
             model: "example-model",
             reasoningEffort: "high",
             disableMcpServers: ["example-mcp"],
@@ -51,7 +50,6 @@ public sealed class SdkSessionProfileMapperTests
     public void Resume_restores_the_complete_supported_profile()
     {
         var profile = SessionRuntimeProfile.Resolve(
-            useAgency: false,
             model: "example-model",
             reasoningEffort: "low",
             agent: "example-agent");
@@ -65,24 +63,9 @@ public sealed class SdkSessionProfileMapperTests
     }
 
     [Fact]
-    public void Agency_is_rejected_until_it_has_an_sdk_runtime()
-    {
-        var profile = SessionRuntimeProfile.Resolve(
-            useAgency: true,
-            model: null,
-            reasoningEffort: null);
-
-        var ex = Assert.Throws<NotSupportedException>(() =>
-            SdkSessionProfileMapper.Create(profile, "C:\\work"));
-
-        Assert.Contains("Agency sessions remain on the ACP backend", ex.Message);
-    }
-
-    [Fact]
     public void Disable_builtin_mcps_is_rejected_until_equivalence_is_proven()
     {
         var profile = SessionRuntimeProfile.Resolve(
-            useAgency: false,
             model: null,
             reasoningEffort: null,
             disableBuiltinMcps: true);

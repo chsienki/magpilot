@@ -13,7 +13,6 @@ public sealed class SessionRuntimeProfileTests
     {
         var copilotHome = Path.Combine(Path.GetTempPath(), "isolated-copilot-home");
         var profile = SessionRuntimeProfile.Resolve(
-            useAgency: true,
             model: "example-model",
             reasoningEffort: "high",
             disableMcpServers: ["zeta", "alpha"],
@@ -25,7 +24,6 @@ public sealed class SessionRuntimeProfileTests
 
         var roundTripped = AcpFlavor.FromRuntimeProfile(profile).ToRuntimeProfile();
 
-        Assert.True(roundTripped.UseAgency);
         Assert.Equal(profile.Model, roundTripped.Model);
         Assert.Equal(profile.ReasoningEffort, roundTripped.ReasoningEffort);
         Assert.Equal(profile.DisabledMcpServers, roundTripped.DisabledMcpServers);

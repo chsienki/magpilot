@@ -13,22 +13,22 @@ namespace Magpilot.Shared;
 /// </para>
 ///
 /// <para>
-/// <see cref="ProtocolVersion"/> is a separate integer that bumps only when
-/// the wire contract between Agent <-> Hub <-> Host changes incompatibly. It
-/// gates the autoupdate path: the hub advertises a [min,max] protocol range
-/// and clients refuse to update past the hub's max. This lets us patch the
-/// agent freely as long as the protocol matches, while still preventing a
-/// client from running ahead of the hub it's connected to.
+/// <see cref="ProtocolVersion"/> is currently zero, which explicitly marks the
+/// Agent, Hub, SPA, and Host wire contract as unstable. Components deploy in
+/// lockstep and no backward compatibility is required while the value remains
+/// zero. The first compatibility freeze will set the protocol to one; only
+/// after that point will incompatible wire changes require a deliberate bump
+/// and compatibility policy.
 /// </para>
 ///
 /// <para>
-/// As-of the introduction of this file, ProtocolVersion is the baseline 1.
-/// Bump it deliberately on the same commit that breaks the wire contract.
+/// Do not increment the protocol for individual breaking changes while it is
+/// zero. Zero is the unstable sentinel, not a released compatibility version.
 /// </para>
 /// </summary>
 public static class Versioning
 {
-    public const int ProtocolVersion = 1;
+    public const int ProtocolVersion = 0;
 
     public static bool IsUpdateAvailable(string? currentVersion, string? latestVersion) =>
         !string.IsNullOrEmpty(currentVersion) &&
