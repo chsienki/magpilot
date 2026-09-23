@@ -2286,6 +2286,12 @@ infinite for SSE. Do not move acquire/release back to the quick client.
   `state.Owner` is `Host` or `Contended`, the same takeover state is
   set and the stream is skipped entirely -- the SPA never opens an
   SSE pump for a session it's not allowed to drive.
+- `ReconcileHostOwnershipAsync` closes the gap when
+  `release_requested` is missed but the SSE connection remains healthy.
+  Manual/visibility session refreshes and every stream-health tick probe
+  `/state`; Host/Contended state stops the stream and locks the composer
+  before another prompt is sent. It only enters takeover state--it never
+  auto-unlocks--so it cannot race the launcher's pre-acquire grace window.
 - `HandleTakeBackFromHost` is the symmetric counter-flow, and it is
   **graceful-first**: `FireReleaseRequestAsync(force=false)` then poll
   `GetStateAsync` for up to `GracefulTakeBackSeconds` (~30s) waiting for

@@ -1830,6 +1830,8 @@
             _sessions = fresh;
             _sessionsListFailed = false;
             if (_routeError == "agent-offline") _routeError = null;
+            if (SessionId is not null)
+                await ReconcileHostOwnershipAsync(agentBeforeAwait, SessionId);
             StateHasChanged();
         }
         catch (Exception ex) when (string.Equals(agentBeforeAwait, Agent, StringComparison.OrdinalIgnoreCase))
@@ -3141,6 +3143,8 @@
         {
             var agent = Agent;
             var sid = SessionId;
+            if (await ReconcileHostOwnershipAsync(agent, sid))
+                return;
             var stale = (DateTime.UtcNow - _lastStreamEventAt).TotalMilliseconds >= StreamLivenessTimeoutMs;
 
             // 1. Dead socket. Cover both Connected and Reconnecting (a reconnect
@@ -3215,6 +3219,70 @@
             }
         }
         finally { _healthTicking = false; }
+    }
+
+    /// <summary>
+    /// Reconcile the selected session against the authoritative ownership
+    /// snapshot. This closes the gap when a release-requested SSE event is
+    /// missed while the stream itself remains healthy: manual/visibility
+    /// refreshes and every watchdog tick still lock the composer before the
+    /// next prompt is sent.
+    ///
+    /// This method only transitions into host-owned state. Leaving that state
+    /// remains an explicit handback/take-back operation, so the launcher's
+    /// release-request-before-acquire grace window cannot briefly unlock the
+    /// composer before ownership flips.
+    /// </summary>
+    private async Task<bool> ReconcileHostOwnershipAsync(
+        string agent,
+        string sessionId)
+    {
+        if (_hostHasTakenOver)
+            return true;
+
+        SessionStateInfo? state;
+        try
+        {
+            state = await Hub.GetStateAsync(agent, sessionId);
+        }
+        catch (Exception ex)
+        {
+            Log.LogTrace(
+                "Ownership reconcile for {Agent}/{SessionId} failed: {Message}",
+                agent,
+                sessionId,
+                ex.Message);
+            return false;
+        }
+
+        if (_disposed
+            || !string.Equals(agent, Agent, StringComparison.OrdinalIgnoreCase)
+            || sessionId != SessionId
+            || _streamingFor != $"{agent}/{sessionId}")
+        {
+            return false;
+        }
+
+        _runtimeStatus = state?.RuntimeStatus;
+        if (state is not { Owner: SessionOwner.Host or SessionOwner.Contended })
+            return false;
+
+        _hostHasTakenOver = true;
+        _hostTakeoverPid = state.HostPid
+            ?? (state.ForeignHolderPids.Count > 0
+                ? state.ForeignHolderPids[0]
+                : state.Info.OwnerPid);
+        _hostTakeoverRequester = null;
+        _takeBackNeedsForce = false;
+        _pendingApproval = null;
+        _streamingAssistant = null;
+        _streamingThought = null;
+        _thinking = false;
+        _busy = false;
+        CancelThinkingDebounce();
+        await StopStreamingAsync();
+        StateHasChanged();
+        return true;
     }
 
     private bool CanEditRuntimeStatus =>

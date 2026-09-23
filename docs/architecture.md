@@ -929,8 +929,12 @@ takes the session, the SPA notices): the SPA's `Apply()` reacts to
 `release_requested` by stopping its stream + raising a "host took
 over" MudAlert with a "Take back" button. Even before any takeover,
 `OnParametersSetAsync` calls `GetStateAsync` after the session-list
-fetch and skips streaming entirely if `Owner=Host`. The "Take back"
-flow is **graceful-first**: `release-request(force=false)` then poll
+fetch and skips streaming entirely if `Owner=Host`. If the SSE event is
+missed while the socket remains healthy, manual/visibility refreshes and every
+stream-health tick reconcile `/state`; Host/Contended state still stops the
+stream and locks the composer. This reconciliation only enters takeover state,
+so it cannot auto-unlock during the launcher's pre-acquire grace window. The
+"Take back" flow is **graceful-first**: `release-request(force=false)` then poll
 `GetStateAsync` (up to ~30s, early-exit) waiting for the launcher to
 hand off ON ITS OWN -- tear down its copilot (leaving the terminal on
 its "resume here" prompt) and call `release` itself. The SPA does NOT
