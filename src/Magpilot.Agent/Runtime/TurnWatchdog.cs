@@ -1,15 +1,9 @@
-using Magpilot.Agent.Runtime;
-using Magpilot.Agent.Sessions;
-
-namespace Magpilot.Agent.Acp;
+namespace Magpilot.Agent.Runtime;
 
 /// <summary>
-/// Periodically sweeps for in-flight ACP turns that have wedged -- a copilot
-/// child whose model request hung, so it streams nothing and ignores
-/// session/cancel -- and recovers them by recycling the child. Without this a
-/// hung turn pins the session in flight until the 10-minute session/prompt
-/// timeout, spinning the caller (phone assistant, SPA) and blocking every later
-/// turn on that child until the agent is restarted by hand.
+/// Periodically sweeps for in-flight SDK turns that have stopped producing
+/// events and asks the runtime to abort them. Without this, a hung model
+/// request can pin the session in flight and block later turns.
 ///
 /// A live turn keeps emitting tool-call / message-chunk updates, so the sweep
 /// only fires when a session has produced nothing for the stall window. The
@@ -18,7 +12,6 @@ namespace Magpilot.Agent.Acp;
 /// </summary>
 public sealed class TurnWatchdog(
     IAgentSessionRuntime runtime,
-    SessionRegistry registry,
     ILogger<TurnWatchdog> log) : BackgroundService
 {
     private const int DefaultStallSeconds = 90;
@@ -44,20 +37,19 @@ public sealed class TurnWatchdog(
             {
                 try
                 {
-                    // Bound the sweep so a hung recycle/reload can't wedge the
-                    // watchdog itself; the next tick retries.
+                    // Bound the sweep so a hung abort cannot wedge the watchdog
+                    // itself; the next tick retries.
                     using var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
                     cts.CancelAfter(TimeSpan.FromSeconds(90));
                     var recovered = await runtime.SweepStalledTurnsAsync(
                         threshold,
-                        registry.CwdFor,
                         cts.Token);
                     if (recovered > 0)
                         log.LogWarning("Turn watchdog recovered {Count} stalled session(s)", recovered);
                 }
                 catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
                 {
-                    log.LogWarning("Turn watchdog: a sweep timed out (a recycle/reload took too long)");
+                    log.LogWarning("Turn watchdog: a sweep timed out");
                 }
                 catch (Exception ex)
                 {

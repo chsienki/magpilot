@@ -48,8 +48,7 @@ public sealed class SdkClientPoolIntegrationTests
             NullLogger<SdkSessionRuntime>.Instance);
         var profile = SessionRuntimeProfile.Resolve(
             model: null,
-            reasoningEffort: null,
-            backend: SessionRuntimeBackend.Sdk);
+            reasoningEffort: null);
         string? sessionId = null;
 
         try
@@ -64,7 +63,6 @@ public sealed class SdkClientPoolIntegrationTests
 
             var detached = await runtime.CloseAsync(
                 sessionId,
-                sessionsRoot: null,
                 CancellationToken.None);
 
             Assert.NotNull(detached);
@@ -87,7 +85,6 @@ public sealed class SdkClientPoolIntegrationTests
                 {
                     await runtime.CloseAsync(
                         sessionId,
-                        sessionsRoot: null,
                         CancellationToken.None);
                 }
                 var host = await pool.AcquireAsync(

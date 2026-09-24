@@ -890,7 +890,7 @@
     /// arriving on the stream between LoadStarted and HistoryDone are
     /// dropped instead of appended to <see cref="_messages"/>. Set by
     /// <see cref="StartStreamingAsync"/> whenever the caller is loading
-    /// the session into ACP (<c>load: true</c>) but has already populated
+    /// the session (<c>load: true</c>) but has already populated
     /// the visible chat from <c>restoreFrom</c> (i.e. the paged
     /// /history?tail=50 disk projection). Without this, opening a large
     /// Dormant session re-streams every historical event on top of the
@@ -1076,9 +1076,9 @@
 
     // Per-session in-memory snapshot of messages, keyed by "{Agent}/{SessionId}".
     // We keep this so switching back to an Owned session restores its
-    // chat history without re-issuing session/load (ACP rejects double-load
-    // with -32602 "already loaded"). Snapshots are written when leaving a
-    // session and refreshed on every Apply() while viewing it.
+    // chat history without reopening the attached runtime session. Snapshots
+    // are written when leaving a session and refreshed on every Apply() while
+    // viewing it.
     private readonly Dictionary<string, List<ChatMessage>> _msgCache = new();
     private bool _showThoughts = true;
     private bool _showSessionInfo = true;
@@ -1227,7 +1227,7 @@
     }
 
     /// <summary>
-    /// Drop the agent's ACP copy of the current session back to Dormant
+    /// Drop the agent's runtime attachment for the current session back to Dormant
     /// and navigate to the agent's session-list view. The session
     /// remains on disk -- reopening it triggers an adopt+load, picking
     /// up any events appended in the meantime.
@@ -1603,25 +1603,21 @@
                 return;
             }
 
-            // If we have a cached snapshot AND the session is still loaded
-            // into ACP (Owned), restore the snapshot and connect WITHOUT
-            // requesting a load -- ACP would reject session/load on an
-            // already-loaded session.
+            // If we have a cached snapshot AND the session is still attached
+            // (Owned), restore the snapshot and connect without requesting a
+            // reload.
             //
-            // For Dormant sessions, request load=true so ACP loads the
-            // session into its multiplex child -- BUT also pre-fetch the
+            // For Dormant sessions, request load=true so the runtime resumes
+            // the session -- but also fetch the
             // tail of /history so we can paint the chat instantly and
             // suppress the giant replay storm that session/load would
             // otherwise stream in (see _suppressReplayEvents). Without
             // this, opening a long-running Dormant session animates every
             // historical event on top of itself.
             //
-            // For Owned-without-cache (a fresh browser tab opening a
-            // session that was loaded into ACP by another client, e.g.
-            // the WhatsApp sidecar), neither path works: we can't
-            // load=true (ACP rejects double-load) and we have no in-tab
-            // cache. Fall back to reading the on-disk events.jsonl via
-            // the agent's /history endpoint.
+            // For Owned-without-cache (a fresh browser tab opening a session
+            // already driven by another client, e.g. the WhatsApp sidecar),
+            // read on-disk events.jsonl through the agent's /history endpoint.
             var key = $"{Agent}/{SessionId}";
             var hasCache = _msgCache.TryGetValue(key, out var cached);
             if (hasCache && info?.State == SessionState.Owned)
@@ -1696,7 +1692,7 @@
     }
 
     /// <summary>
-    /// Pre-v0.1.8 agents projected each ACP tool call as TWO history
+    /// Legacy agents projected each tool call as TWO history
     /// entries: "[start] toolname" and "[end] ok|fail". Newer agents
     /// emit a single entry with <see cref="HistoryEntry.ToolStatus"/>
     /// set on the wire. Collapse the legacy two-row shape into the
@@ -2132,10 +2128,9 @@
         // OnParametersSetAsync session-switch branch raised, so the
         // top-of-pane progress bar drops as soon as restoreFrom (or
         // the empty starting state) is rendered. _loading takes over
-        // from here for sessions that still have a session/load
-        // history-replay phase ahead of them.
+        // from here for sessions that still have a load phase ahead of them.
         _switchingSession = false;
-        // Drop ACP history-replay events from session/load when the chat
+        // Drop history-replay events from session load when the chat
         // was already populated from the disk projection. See field comment.
         _suppressReplayEvents = load && restoreFrom is not null;
         if (!isReconnect)
@@ -2405,7 +2400,7 @@
 
     private void Apply(StreamEvent evt)
     {
-        // While ACP is replaying historical session events (between
+        // While the runtime is replaying historical session events (between
         // LoadStarted and HistoryDone) AND the chat was already populated
         // from the disk projection (/history?tail=...), drop content
         // events so we don't double-render history on top of the tail
@@ -2454,11 +2449,10 @@
                     _messages.Add(_streamingThought);
                     _lastThoughtChunkText = null;
                 }
-                // Dedupe consecutive identical thought chunks. Copilot CLI
-                // occasionally emits the SAME agent_thought_chunk text twice
-                // back-to-back (probably the model wire's reasoning-delta
-                // followed by reasoning-summary, both surfaced as the same
-                // ACP kind). Without this, the user sees the same phrase
+                // Dedupe consecutive identical thought chunks. The Copilot
+                // runtime can emit the same reasoning text twice back-to-back
+                // (for example a reasoning delta followed by its summary).
+                // Without this, the user sees the same phrase
                 // duplicated in the thinking bubble -- "Renaming
                 // methodRenaming method" being the canonical witness.
                 if (td.Text.Length > 0
@@ -2470,8 +2464,8 @@
                 _lastThoughtChunkText = td.Text;
                 break;
             case UserDelta d:
-                // Finalize any in-progress assistant message before starting a new turn
-                // (during replay, ACP sends user_message_chunk, agent_message_chunk*, user_message_chunk, ...).
+                // Finalize any in-progress assistant message before starting a
+                // new replayed or live user turn.
                 _streamingAssistant = null;
                 _streamingThought = null;
                 _messages.Add(new ChatMessage { Role = "user", Text = d.Text });
@@ -2556,7 +2550,7 @@
                 // to click anything. Each drained message starts a
                 // fresh turn (sets _busy back to true) so subsequent
                 // queue drains are serial -- no chance of two prompts
-                // racing into ACP at once.
+                // racing into the runtime at once.
                 TryDrainQueue();
                 break;
             case LoadStarted:
@@ -2571,9 +2565,9 @@
             case LoadFailed lf:
                 _loading = false;
                 _suppressReplayEvents = false;
-                // session/load failure means the session genuinely
+                // Session load failure means the session genuinely
                 // isn't loadable -- either the on-disk record is missing
-                // (bogus / stale sessionId) or ACP refused. Don't keep
+                // (bogus / stale sessionId) or the runtime refused. Don't keep
                 // the SSE stream alive on what's effectively a dead
                 // route; flip into the same NotFound state used for the
                 // 404 pre-flight so the user sees a coherent error

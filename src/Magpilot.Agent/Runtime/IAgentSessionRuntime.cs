@@ -3,20 +3,14 @@ using Magpilot.Shared.Models;
 
 namespace Magpilot.Agent.Runtime;
 
-public enum SessionRecycleOutcome
-{
-    NotLoaded,
-    Busy,
-    Recycled,
-}
-
 public readonly record struct SessionInFlightEntry(
     string? Requester,
     DateTimeOffset StartedAt);
 
 /// <summary>
-/// Runtime-independent session operations consumed by the agent HTTP surface,
-/// registry, handoff coordinator, and turn watchdog.
+/// SDK session operations consumed by the agent HTTP surface, registry,
+/// handoff coordinator, and turn watchdog. The interface keeps lifecycle
+/// orchestration testable without exposing SDK types outside the runtime.
 /// </summary>
 public interface IAgentSessionRuntime
 {
@@ -52,13 +46,6 @@ public interface IAgentSessionRuntime
         bool processScopeSpecified,
         CancellationToken ct);
 
-    bool MayBeStale(string sessionId);
-    void ResyncWatermark(string sessionId);
-    Task<SessionRecycleOutcome> RecycleForStaleAsync(
-        string sessionId,
-        Func<string, string?> cwdResolver,
-        CancellationToken ct);
-
     bool HasForeignLiveHolder(string sessionId);
     IReadOnlyList<int> ForeignLiveHolderPids(string sessionId);
     IReadOnlyList<int> EvictForeignLiveHolders(string sessionId);
@@ -82,7 +69,6 @@ public interface IAgentSessionRuntime
     Task CancelAsync(string sessionId, CancellationToken ct);
     Task<SessionRuntimeProfile?> CloseAsync(
         string sessionId,
-        string? sessionsRoot,
         CancellationToken ct);
     Task<SessionRuntimeProfile?> ForceDetachAsync(string sessionId, CancellationToken ct);
 
@@ -92,6 +78,5 @@ public interface IAgentSessionRuntime
 
     Task<int> SweepStalledTurnsAsync(
         TimeSpan threshold,
-        Func<string, string?> cwdResolver,
         CancellationToken ct);
 }

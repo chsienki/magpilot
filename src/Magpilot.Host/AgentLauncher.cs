@@ -36,11 +36,8 @@ namespace Magpilot.Host;
 internal static class AgentLauncher
 {
     private static readonly TimeSpan QuickProbeTimeout = TimeSpan.FromMilliseconds(750);
-    // Generous timeout because the agent's AcpStarter synchronously spawns
-    // copilot --acp and waits for the initialize round-trip during
-    // IHostedService.StartAsync, which blocks Kestrel. 45s comfortably
-    // covers a cold start including plugin loading; user only pays this
-    // once per agent restart.
+    // Generous timeout for a scheduled-task cold start. The common path uses
+    // the quick probe; users pay this budget only while the agent is starting.
     private static readonly TimeSpan StartupTimeout    = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan ProbePollInterval = TimeSpan.FromMilliseconds(500);
 

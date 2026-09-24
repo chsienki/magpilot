@@ -110,7 +110,7 @@ public sealed class HostOwnershipReconciler : BackgroundService
             foreach (var lockPid in _liveLockPids(dir))
             {
                 // A launcher-driven Copilot is a descendant of `magpilot`; the
-                // agent's own ACP child is parented under Magpilot.Agent, and a
+                // agent's own SDK runtime is parented under Magpilot.Agent, and a
                 // bare terminal Copilot under a shell, so neither false-matches.
                 var (found, launcherPid) = _findLauncher(lockPid);
                 if (!found)

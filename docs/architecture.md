@@ -111,9 +111,8 @@ TCP 5099 + UDP 47823.
 
 Responsibilities:
 
-- Owns the active **session runtime** behind `IAgentSessionRuntime`. The public
-  Copilot SDK is the default; the ACP manager remains as a rollback backend and
-  owns `copilot --acp` child processes when selected.
+- Owns the active **Copilot SDK session runtime** behind
+  `IAgentSessionRuntime`.
 - Maintains **sessions**: maps a Magpilot session id to a runtime session id
   and a CWD. State persists in `~/.copilot/session-state/` (events.jsonl
   per session). Adopts dormant sessions on demand when the SPA opens one.
@@ -122,11 +121,10 @@ Responsibilities:
 - Replies to UDP discovery probes with name + URL.
 
 The HTTP endpoints, session registry, cooperative handoff, and turn watchdog
-depend only on `IAgentSessionRuntime`. `SessionRuntimeProfile` carries the
-complete generic configuration needed to create or restore a session.
-`AcpSessionManager` implements the interface through a thin explicit adapter,
-so this seam does not change runtime behavior. It exists so the public Copilot
-SDK can be introduced and canaried without changing the hub or agent API.
+depend only on `IAgentSessionRuntime`. This keeps lifecycle orchestration
+testable without leaking SDK types into the HTTP and ownership layers.
+`SessionRuntimeProfile` carries the complete configuration needed to create or
+restore a session.
 
 The Agent also owns a lazy `SdkClientPool`. It uses the public .NET Copilot SDK
 with `CopilotClientMode.CopilotCli` and the supported out-of-process stdio
@@ -134,25 +132,19 @@ transport. Clients are keyed by `CopilotHome`/SDK `BaseDirectory`; session
 configuration is mapped separately. Merely starting Magpilot.Agent does not
 start an SDK runtime; the first SDK-backed session starts it.
 
-Custom Copilot homes use the same validated layout for ACP and SDK: the
-directory must exist and its `session-state` entry must link to the canonical
-session store scanned by Magpilot. This preserves one durable session catalog
-even when tools, agents, and configuration are isolated.
+Custom Copilot homes use a validated layout: the directory must exist and its
+`session-state` entry must link to the canonical session store scanned by
+Magpilot. This preserves one durable session catalog even when tools, agents,
+and configuration are isolated.
 
-The initial typed profile mapper deliberately rejects `DisableBuiltinMcps`
-instead of silently weakening it until disabling the SDK runtime's complete
-built-in MCP set is proven equivalent to the CLI switch.
+The typed profile maps explicit disabled server names to
+`SessionConfig.DisabledMcpServers`. Restricted consumers disable the built-in
+GitHub MCP by naming its SDK runtime identifier, `github-mcp-server`; tool
+allowlists alone do not prevent that server from starting or authenticating.
 
-`MAGPILOT_RUNTIME_BACKEND=acp|sdk` selects the default backend for ordinary
-sessions (`sdk` when unset). `SessionRuntimeRouter` records the chosen backend
-per attached session, so prompts, cancellation, approvals, detach, and handoff
-continue on the backend that created/resumed it. The backend is also persisted
-in host-handoff metadata; older records without the field mean ACP.
-
-SDK-default startup does not eagerly start either runtime. `SdkClientPool`
-starts on the first SDK session. The ACP pool starts lazily for rollback. This
-keeps the feature switch reversible without paying for two idle Copilot
-processes.
+Agent startup does not eagerly start a Copilot runtime. `SdkClientPool` starts
+the bundled runtime on the first SDK session and keeps separate clients for
+distinct `CopilotHome` values.
 
 SDK sessions use streaming mode. `SdkTurnEventMapper` translates typed
 message/reasoning deltas and tool lifecycle events to the existing
@@ -187,9 +179,6 @@ reporting:
 - session AI Credits (`TotalNanoAiu / 1,000,000,000`);
 - whether live model editing is supported.
 
-ACP sessions provide model/reasoning when their verified profile
-contains them, but context/AIC remain null and editing is disabled. The SPA
-renders unavailable values explicitly rather than treating them as zero.
 The SPA places this status in its own composer bar directly above the input:
 one `Model Name (reasoning)` button opens the shared model settings dialog,
 while context percentage and session AIC remain read-only. The existing Show
@@ -208,79 +197,16 @@ exclude only those recorded PIDs; a later holder remains foreign. This is
 required for terminal handback because otherwise the SDK's own lock looks like
 a terminal writer and prevents ownership from clearing.
 
-The ACP rollback backend does **not** speak to the LLM directly. It speaks ACP
-(Agent Client Protocol -- JSON-RPC over stdio) to a child `copilot` process,
-which in turn calls the GitHub Copilot API.
-
-### ACP rollback runtime
-
-Each agent spawns one (or more) long-running `copilot --acp` subprocesses.
-ACP is a multi-session protocol -- one process can host many independent
-conversations -- so sessions with the same process-scoped configuration share
-a child.
-
-A session create/adopt request may pin a **custom agent**, **model**, and
-**reasoning effort** through ACP configuration. The custom-agent name is also a
-process argument because Copilot 1.0.82 advertises its `_agent` selector only
-when launched with `--agent <name>`. Other process-scoped settings
-(`disableMcpServers`, `availableTools`, `disableBuiltinMcps`,
-`noCustomInstructions`, and `copilotHome`) create a distinct ACP child.
-`copilotHome` becomes that child's `COPILOT_HOME` environment variable; it
-does not alter the daemon's own home.
-
-After both `session/new` and `session/load`, the agent discovers the
-agent/model/reasoning selectors from the returned ACP `configOptions` and calls
-`session/set_config_option` for each requested value.
-It uses advertised option ids and values rather than hard-coding CLI-specific
-identifiers, lists advertised values when a request is unsupported, and fails
-the HTTP request explicitly if an option/value is absent or the ACP response
-does not confirm it. Agent is applied first because it can change model/tool
-policy, followed by model and reasoning. If a later selection fails, earlier
-confirmed selections are rolled back in reverse order before the failure is
-returned. Magpilot stays generic: it exposes the knobs; each API consumer
-chooses the concrete agent, tools, and config root. The complete process flavor
-is retained during host handoff. Already-Owned adopts apply and verify
-agent/model/reasoning against the latest config state; any in-place process
-scope change fails explicitly.
-
-Every attach/configure operation for a session is serialised on a per-session
-gate. Process scope is always checked, while agent/model/reasoning are re-verified
-against the newest config snapshot when the caller explicitly requested them
-or a retained verified expectation exists. ACP `configOptions` is
-optional, so an ordinary unpinned `session/new` or `session/load` with no such
-expectation does not require a snapshot; explicit or retained pins remain
-fail-closed. Two concurrent adopts can therefore neither interleave their
-`set_config_option` calls nor leave the child on a combination nobody asked
-for. prompts use that same gate, so no turn can run between the agent, model, and
-reasoning updates. A session whose later `config_option_update` drifts from any
-explicitly pinned dimension is immediately quarantined again. Shared-child
-recycling also refuses while any co-hosted session is configuring, so
-successful verification cannot race route invalidation. Its global routing
-gate is released after the atomic idle check, client retirement, held-session
-snapshot, and route invalidation -- before process disposal/replacement
-initialization -- so unrelated children can keep accepting work while late
-operations are rejected from the retired generation.
-A session whose
-configuration cannot be applied and verified is **quarantined rather than
-detached**: copilot cannot unload a session, so dropping the route would only
-make the retry's `session/load` answer "already loaded". The route and lock are
-kept, registry ownership is withheld, and the session is refused for prompts
-(409) until a later adopt re-applies and verifies its configuration in place.
-A request rejected before anything is sent -- an unadvertised option or value,
-or a caller cancellation before the first RPC -- leaves the last verified
-configuration live and the session usable; only an actual unverified mutation
-quarantines. An unverified configuration is never served.
-
-The Copilot CLI authenticates with GitHub on its own (device flow, or
-`COPILOT_GITHUB_TOKEN` env). It runs the conversations, calls tools,
-writes/reads files, talks to MCP servers.
+The bundled Copilot runtime authenticates with GitHub through the logged-in
+user or `COPILOT_GITHUB_TOKEN`. It runs conversations, calls tools,
+writes/reads files, and talks to MCP servers.
 
 ### Sidecars (cron, WhatsApp, Preflight)
 
 Each sidecar is a separate process/container. They speak only to the
 **agent HTTP API** (or, for Preflight, to the **hub HTTP API**). They are
 stateless in terms of agent state -- the agent is still the single source
-of truth for session state, cwd, ACP wiring, etc.
+of truth for session state, cwd, and runtime ownership.
 
 A sidecar plugs in by knowing:
 
@@ -573,14 +499,14 @@ works without a configured token.
 | POST   | `/version/refresh`                         | Authenticated hub signal: immediately poll `/api/agent-version`, update the local cache, and return the composite status. Does not install anything. |
 | GET    | `/info`                                    | Agent name, OS, and working directory                      |
 | GET    | `/sessions`                                | List sessions on disk (with state, cwd, last-touched)      |
-| POST   | `/sessions`                                | Create a new session. Body `NewSessionRequest { Cwd?, Name?, InitialPrompt?, Model?, ReasoningEffort?, DisableMcpServers?, Agent?, AvailableTools?, DisableBuiltinMcps?, NoCustomInstructions?, CopilotHome? }`. `Agent`/`Model`/`ReasoningEffort` pin advertised ACP session config options; all other added fields are process-scoped and select an isolated child. `Agent` also supplies the startup `--agent` needed for Copilot to advertise that selector. `AvailableTools` maps to `--available-tools=<selector>`, the booleans map to their CLI switches, and `CopilotHome` sets the child's `COPILOT_HOME`. **400** on an unsafe token/path; **502** if the CLI does not advertise/accept/confirm the requested config. |
+| POST   | `/sessions`                                | Create a new session. Body `NewSessionRequest { Cwd?, Name?, InitialPrompt?, Model?, ReasoningEffort?, DisableMcpServers?, Agent?, AvailableTools?, NoCustomInstructions?, CopilotHome? }`. `DisableMcpServers`, `AvailableTools`, `Agent`, and instruction controls map to typed SDK session configuration; `CopilotHome` selects an isolated SDK client/base directory. **400** on an unsafe token/path; **502** if the runtime cannot apply the requested configuration exactly. |
 | GET    | `/sessions/{id}`                           | Get session metadata                                       |
-| GET    | `/sessions/{id}/state`                     | Rich ownership + activity view (see "Cooperative single-owner handoff" below). Returns `SessionStateInfo`, including optional cached `RuntimeStatus { Backend, ModelId, ModelName, ReasoningEffort, CurrentTokens, TokenLimit, AiCreditsUsed, CanEditModel, UpdatedAt }`. |
-| GET    | `/sessions/{id}/model-options`             | SDK-only runtime-advertised model catalog for an attached, agent-owned session. Includes display names, supported reasoning efforts, and advertised defaults. **409** when not agent-owned; **422** when the backend cannot edit models. |
+| GET    | `/sessions/{id}/state`                     | Rich ownership + activity view (see "Cooperative single-owner handoff" below). Returns `SessionStateInfo`, including optional cached `RuntimeStatus { ModelId, ModelName, ReasoningEffort, CurrentTokens, TokenLimit, AiCreditsUsed, CanEditModel, UpdatedAt }`. |
+| GET    | `/sessions/{id}/model-options`             | Runtime-advertised model catalog for an attached, agent-owned session. Includes display names, supported reasoning efforts, and advertised defaults. **409** when not agent-owned. |
 | POST   | `/sessions/{id}/model`                     | Atomically change model + reasoning for an attached, agent-owned, idle SDK session. Body `SessionModelUpdateRequest { Model, ReasoningEffort? }`. Omitting reasoning preserves the current level when supported, otherwise uses the target model's advertised default. **409** while busy/host-owned; **422** for unavailable combinations; **502** for runtime failure. |
-| POST   | `/sessions/{id}/adopt`                     | Bring a dormant session live (re-attach the ACP child). Body accepts the same optional session/process fields as create, with nullable process booleans so omission retains a recorded handoff flavor. Dormant sessions load with the requested process scope and config. Already-Owned sessions apply/verify agent/model/reasoning in place; a requested process-scope change fails explicitly because it requires another child. **502** if config cannot be applied exactly; **422** + `notLoadable` when the on-disk session has no `events.jsonl` and is not still resident in a live child. |
-| POST   | `/sessions/{id}/detach[?force=true]`       | Detach without deleting on-disk state. `force=true` recycles the owning child when a prompt does not reach a cancellation boundary; co-hosted active turns veto the recycle. |
-| POST   | `/sessions/{id}/messages`                  | Send a prompt; returns 202; SSE delivers the reply. **Returns 409** + `HostOwnedResponse` when a magpilot launcher holds the session (see handoff section), and **409** + `{ needsReadopt: true }` when the session is quarantined because its ACP config could not be verified. Body `PromptRequest { Text, Source? }` -- an optional `Source` (e.g. `assistant`, `whatsapp`) tags an out-of-band injection: the agent prefixes the prompt with `[via <source>]` for the brain and echoes a `UserDelta { Text, Source }` to subscribers so watchers see the question, not just the answer. |
+| POST   | `/sessions/{id}/adopt`                     | Bring a dormant session live. Body accepts the same optional session/process fields as create; omitted process fields retain a recorded handoff profile. Dormant sessions load with the requested process scope and config. Already-Owned sessions apply/verify agent/model/reasoning in place; a requested process-scope change fails explicitly because it requires another runtime process. **502** if config cannot be applied exactly; **422** + `notLoadable` when the on-disk session has no `events.jsonl` and is not still resident in a live runtime. |
+| POST   | `/sessions/{id}/detach[?force=true]`       | Detach without deleting on-disk state. `force=true` aborts an in-flight turn before disposing the SDK session. |
+| POST   | `/sessions/{id}/messages`                  | Send a prompt; returns 202; SSE delivers the reply. **Returns 409** + `HostOwnedResponse` when a magpilot launcher holds the session (see handoff section), and **409** + `{ needsReadopt: true }` when runtime configuration could not be verified. Body `PromptRequest { Text, Source? }` -- an optional `Source` (e.g. `assistant`, `whatsapp`) tags an out-of-band injection: the agent prefixes the prompt with `[via <source>]` for the brain and echoes a `UserDelta { Text, Source }` to subscribers so watchers see the question, not just the answer. |
 | GET    | `/sessions/{id}/stream`                    | SSE stream of session events (deltas, tool calls, etc.)    |
 | POST   | `/sessions/{id}/interrupt`                 | Cancel the in-flight turn. **Returns 409** when host-owned. |
 | POST   | `/sessions/{id}/approvals/{approvalId}`    | Resolve an approval prompt. **Returns 409** when host-owned. |
@@ -603,7 +529,7 @@ works without a configured token.
                                                               else:
                                                                 create ephemeral
                                                                   |
-                                                              subscribe to ACP
+                                                              subscribe to runtime
                                                                   |
                                                               send prompt
                                                                   |
@@ -644,7 +570,7 @@ pinned to Magnus's well-known session id).
 
 - **Ephemeral session**: created by `quick-prompt` without a `sessionId`,
   used for one turn, then detached. The `events.jsonl` stays on disk
-  forever (you can later replay it in the SPA), but no live ACP subscription
+  forever (you can later replay it in the SPA), but no live runtime attachment
   exists.
 - **Pinned session**: a long-lived session you `/sessions/{id}/adopt` once
   and then keep using. This is what the SPA does for any session you
@@ -656,12 +582,9 @@ Magpilot's adopt-on-demand logic re-activates a dormant pinned session
 lazily, but **only** through the endpoints that call `AdoptAsync`:
 `POST /quick-prompt` (with a pinned `sessionId`), `POST /sessions/{id}/adopt`,
 and `GET /stream?load=true`. **`POST /messages` and a plain `GET /stream`
-do NOT adopt** -- they drive `session/prompt` on the ACP child directly and
-assume the session is already loaded. Prompting a dormant session that way
-fails silently: `session/prompt` errors, the turn ends `stopReason="error"`
-with no assistant text. A client that pins a session must make sure it is
-loaded first -- open it in the SPA, hit `/adopt`, or have the deployment's
-bootstrap adopt it on every restart.
+do NOT adopt** -- they assume the SDK session is already attached. A client
+that pins a session must make sure it is loaded first -- open it in the SPA,
+hit `/adopt`, or have the deployment's bootstrap adopt it on every restart.
 
 ## End-to-end: what happens when you...
 
@@ -673,7 +596,7 @@ sequenceDiagram
     participant B as Browser SPA
     participant H as Hub
     participant A as Magnus agent
-    participant C as copilot --acp child
+    participant C as Copilot SDK runtime
 
     B->>H: GET /api/agents (cookie)
     H-->>B: [magnus, hendrik, sandbox]
@@ -684,14 +607,13 @@ sequenceDiagram
 
     B->>H: GET /api/agents/magnus/sessions/cbec.../stream?load=true
     H->>A: GET /api/sessions/cbec.../stream?load=true (bearer)
-    A->>C: ACP session/load (replays events.jsonl)
-    C-->>A: streams historical events
-    A-->>H: SSE: heartbeat, history events, HistoryDone
+    A->>C: resume session
+    A-->>H: SSE: heartbeat, HistoryDone
     H-->>B: forwarded SSE
 
     B->>H: POST /api/agents/magnus/sessions/cbec.../messages {text: "what's on my plate today?"}
     H->>A: POST /api/sessions/cbec.../messages
-    A->>C: ACP session/prompt
+    A->>C: SDK send
     A-->>H: 202 Accepted
     C-->>A: assistant deltas, tool calls, etc.
     A-->>H: SSE: AssistantDelta, ToolCall, ...TurnComplete
@@ -706,12 +628,12 @@ sequenceDiagram
     participant U as User's phone (WA)
     participant W as magpilot-whatsapp sidecar
     participant A as Magnus agent
-    participant C as copilot --acp child
+    participant C as Copilot SDK runtime
 
     U->>W: WA Web message {fromMe:true, remoteJid: <own LID>, text}
     Note over W: isSelfChat? compare<br/>to sock.user.lid<br/>(yes) -- process
     W->>A: POST /api/quick-prompt<br/>{ prompt, sessionId: pinned }
-    A->>C: ACP session/prompt (on Magnus's pinned session)
+    A->>C: SDK send (on Magnus's pinned session)
     C-->>A: AssistantDelta, ...TurnComplete
     A-->>W: { responseText, sessionId }
     Note over W: rememberSent(replyMsgId)<br/>so the echo doesn't loop
@@ -730,12 +652,12 @@ sequenceDiagram
     participant K as crond (LXC host)
     participant R as run.sh
     participant A as Magnus agent
-    participant C as copilot --acp child
+    participant C as Copilot SDK runtime
 
     K->>R: 0 10 * * * run.sh github-daily-report
     Note over R: parse jobs.yaml<br/>find prompt template
     R->>A: POST /api/quick-prompt {prompt, timeoutSeconds: 240}
-    A->>C: ACP prompt (ephemeral session)
+    A->>C: SDK send (ephemeral session)
     C->>C: shell tool: bin/github-daily-report.sh
     C-->>A: AssistantDelta (the markdown report) + TurnComplete
     A-->>R: { responseText }
@@ -755,8 +677,8 @@ dedicated "cron context" session is a future option.
 - **Hub stays small.** It's basically a registry + HTTP proxy + auth +
   the SPA host. All conversation/state logic is in agents.
 - **Agents stay portable.** Same .NET binary runs on Windows (HENDRIK,
-  SANDBOX) and Linux (Magnus). Runtime backend and process-scoped Copilot
-  configuration are selected per deployment/session.
+  SANDBOX) and Linux (Magnus). Process-scoped Copilot configuration is
+  selected per deployment/session.
 - **Sessions are durable on disk.** Restart any process; conversations
   resume. The agent's adopt-on-demand logic means clients can ask for an
   old session at any time and it'll be brought back online.
@@ -776,9 +698,8 @@ end of the contract.
 
 ### Edge 1: history empty in SPA when WA loaded the session first
 
-- ACP refuses to `session/load` a session that's already loaded.
-- The SPA (when state == Owned) skips `load=true` to avoid that rejection
-  and relies on the in-tab JS cache for history.
+- The SPA (when state == Owned) skips `load=true` and relies on the in-tab
+  cache for history.
 - A fresh tab with no cache + an Owned session = empty UI, even though
   `events.jsonl` on disk has full history.
 
@@ -787,14 +708,11 @@ end of the contract.
 and projects it into a flat `List<{Role,Text,ToolCallId}>`. The SPA
 falls back to that endpoint when state==Owned and there's no in-tab
 cache, then connects to `/stream` without `load=true` for live updates.
-ACP is bypassed entirely; the events file is the durable source of
-truth that ACP itself was going to replay anyway.
+The events file is the durable source of truth.
 
 ### Edge 2: WA-side prompts not visible in SPA stream
 
-- ACP only emits `user_message_chunk` during history *replay*
-  (session/load), not during live prompts -- the prompt text IS the
-  input.
+- Runtime events do not echo the caller's live prompt text.
 - The SPA renders the user's typed prompt locally before submitting;
   nothing echoes it on the server side.
 - A WA prompt sent via `/api/quick-prompt` with a pinned `sessionId`
@@ -803,9 +721,10 @@ truth that ACP itself was going to replay anyway.
 
 **Fix in place**: agent's `quick-prompt` handler, when `sessionId` is
 pinned, publishes a synthesized `UserDelta(req.Prompt)` into the
-session's broadcast channel before dispatching to ACP. All other
+session's broadcast channel before dispatching to the SDK. All other
 subscribers (the SPA) see "the user said X" before the assistant
-deltas arrive. Used `AcpSessionManager.PublishToSubscribers` (a thin
+deltas arrive. `IAgentSessionRuntime.PublishToSubscribers` keeps this behavior
+behind the runtime abstraction.
 
 **Provenance generalization**: the same synthesized-`UserDelta` mechanism
 carries an optional **`source`** on `/messages` (and `/quick-prompt`). When a
@@ -816,15 +735,14 @@ a `UserDelta { Text, Source }`, so a persistent watcher (WhatsApp's coherent
 stream) or the SPA sees the out-of-band question tagged, not just the answer.
 Sourceless sends (the SPA's own) skip the synthesis so they don't double-render
 against the SPA's local echo.
-wrapper over the existing private Publish).
 
 ### Edge 3: phone or SPA wants to drive a session a terminal owns
 
 The earlier "edges" both assumed the agent was always the driver. The
 shim project (`copilot-context/ideas/projects/magpilot-shim.md`)
 introduces a third class of client: a `magpilot` wrapper running
-in the user's terminal. When the user runs `copilot --resume=<sid>`
-(PATH-installed as `magpilot`), the wrapper takes ownership of the
+in the user's terminal. When the user runs `magpilot --resume=<sid>`,
+the wrapper takes ownership of the
 session for an interactive terminal turn. While it's holding the
 session, the agent must NOT silently drive the same session from the
 SPA or WhatsApp, because that would fork `events.jsonl` (we proved it
@@ -847,7 +765,7 @@ one re-reads the file before writing).
    the persisted map never recorded. The reconciler first excludes
    sessions resident in the active Agent runtime; this prevents a
    development Agent launched from a Magpilot terminal from
-   reclassifying its own SDK/ACP child as Host-owned. The launcher's own
+   reclassifying its own SDK runtime as Host-owned. The launcher's own
    `release_requested` subscription reconnects with backoff across
    agent restarts (`SubscribeWithReconnectAsync`, over a dedicated
    infinite-timeout `AgentClient._streamHttp` so the reconnect's header
@@ -860,10 +778,9 @@ one re-reads the file before writing).
    system does nothing to prevent it. (Verified empirically
    2026-05-13.)
 2. `POST /api/sessions/{id}/acquire-for-host { HostPid, Force }`
-   atomically waits for any in-flight ACP turn to reach a clean
-   boundary. With `force=true` it sends cancel, gives the turn a 2s
-   grace, then recycles the owning ACP child if the turn still has not
-   stopped; an active co-hosted turn vetoes that destructive recycle.
+   atomically waits for any in-flight SDK turn to reach a clean
+   boundary. With `force=true` it aborts the turn and refuses the handoff
+   if the runtime does not reach a boundary.
    Only after the old writer is gone does it drop the agent's ownership
    and creates a generated terminal lease. Returns `SessionStateInfo` with
    `HostLeaseId`; the launcher retains it for the complete ownership cycle.
@@ -889,28 +806,16 @@ one re-reads the file before writing).
    BEFORE re-acquiring, exactly like the initial spawn paths, so a
    SPA tab that took the session over sees the live "terminal took
    over" banner instead of only finding out on its next 409 / refresh.
-6. The agent's `DetachAsync` (called from `acquire-for-host` step 2
-   above) deletes session locks written by its own ACP process tree. On Linux
-   the platform-binary grandchild, not the spawned Node shim, writes
-   `inuse.<pid>.lock`; descendant matching removes that lock while preserving
-   live foreign holders. Without this cleanup, the new copilot prints a
-   "session is already in use by another process" warning and the
-   on-disk state ends up in the multi-lock advisory mode documented
-   in the SessionScanner gotchas. `acquire-for-host` also snapshots the
-   session's effective flavor -- process/tool/config-home scope plus the
-   agent, model, and reasoning the ACP child last confirmed -- into the (persisted)
-   host-ownership entry while holding the same per-session gate that excludes
-   concurrent configuration, and the agent remembers which child still has
-   the session resident even after the detach.
+6. `acquire-for-host` snapshots the effective SDK profile --
+   process/tool/config-home scope plus agent, model, and reasoning -- into the
+   persisted host-ownership entry while holding the same per-session gate that
+   excludes concurrent configuration.
 7. `release` verifies the exact lease and re-attaches with that recorded
-   profile rather than the
-   default. Because copilot implements neither `session/close` nor a
-   disk re-read for an already-loaded session, the child still holding
-   the session is recycled first, so the reload genuinely picks up what
-   the terminal wrote; the agent/model/reasoning are then re-applied and
-   verified. The session is only marked agent-owned, and host ownership only
+   profile rather than the default. The SDK session was disposed before the
+   terminal acquired ownership, so cold resume reads what the terminal wrote.
+   The session is only marked agent-owned, and host ownership only
    cleared, once load plus full configuration verification succeeds. A failure
-   after load retains a quarantined route and the recorded handback flavor so a
+   after load retains a quarantined route and the recorded handback profile so a
    later release/adopt can retry configuration in place without another
    `session/load`. A wrong or stale lease cannot affect the current owner.
 
@@ -969,7 +874,7 @@ was not delivered." (Force-take from WA isn't supported -- the user
 must come to the SPA for that.)
 
 > **If you add a new caller of `/messages` (or anything that drives
-> ACP), wrap it with the same retry-on-409 pattern.** Don't
+> the runtime), wrap it with the same retry-on-409 pattern.** Don't
 > re-implement ad hoc.
 
 ## How to add a new sidecar
@@ -1036,12 +941,10 @@ production agent.
 
 ## Glossary
 
-- **ACP** -- Agent Client Protocol. JSON-RPC-over-stdio between the agent
-  process and the Copilot CLI child. One ACP child can host many sessions.
 - **Pinned session** -- a long-lived session that survives many
   conversations and many restarts. Created once, adopted on each restart.
-- **Adopt** -- bring a dormant session back online by respawning ACP wiring
-  and replaying events.
+- **Adopt** -- bring a dormant session back online by resuming it through the
+  SDK runtime.
 - **MEMORY.md / SOUL.md / IDENTITY.md** -- convention from OpenClaw,
   carried into Magnus. Knowledge files in `~/magnus/` that the model reads
   at session start and updates before /compact.

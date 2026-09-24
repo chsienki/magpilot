@@ -47,8 +47,7 @@ What he wants from his phone:
 A small **per-host agent** daemon runs on each computer. It speaks
 the public GitHub Copilot SDK to the native Copilot runtime, which gives us
 first-class sessions, structured streaming, typed tool permissions, and
-resumable state. ACP remains an explicit rollback path. The agent exposes a
-tiny HTTP+SSE API to the LAN.
+resumable state. The agent exposes a tiny HTTP+SSE API to the LAN.
 
 A central **hub** daemon runs on the docker LXC. It auto-discovers
 agents via UDP broadcast, aggregates their sessions, proxies
@@ -69,7 +68,7 @@ codebase** (MAUI Blazor Hybrid):
 
 | Name              | What                                                     | Where it runs              |
 |-------------------|----------------------------------------------------------|----------------------------|
-| `Magpilot.Agent`  | Copilot SDK/ACP runtime adapter, one per machine         | HENDRIK, Linux container, etc. |
+| `Magpilot.Agent`  | Copilot SDK runtime host, one per machine                | HENDRIK, Linux container, etc. |
 | `Magpilot.Hub`    | Aggregator, discovery, OAuth, central log, serves the web SPA | docker LXC (CT 102)   |
 | `Magpilot.Host`   | Native launcher that coordinates terminal ownership      | User terminals        |
 | `Magpilot.UI`     | Shared Blazor UI library (chat, sessions, theme)         | Future MAUI WebView + browser |
@@ -96,9 +95,7 @@ installer** + autoupdate path
 check) is in place; HENDRIK runs the agent as a scheduled task at user logon.
 The hub's Agents page reports each machine's running/update version and can
 force an immediate hub + agent update check without remotely installing
-anything. The Agent uses the Copilot SDK runtime by default; set
-`MAGPILOT_RUNTIME_BACKEND=acp` for rollback.
-SDK-backed chats show the active model, context-window percentage, session AI
+anything. SDK-backed chats show the active model, context-window percentage, session AI
 Credits, and reasoning effort in the SPA; idle sessions can change model and
 reasoning from the same status row.
 
@@ -115,12 +112,11 @@ magpilot/
    docs/plan.md              <- design doc (start here for the long version)
    docs/architecture.md      <- topology + the agent HTTP contract
    AGENTS.md  <- orientation for AI agents working on this repo
-   spikes/acp-smoke/         <- standalone ACP smoke test
    scripts/build-hub.ps1     <- builds web SPA + copies into hub wwwroot
    scripts/test-shim-phase1.sh <- bash acceptance test for the shim endpoints
    src/
       Magpilot.Shared/      <- DTOs, SSE event types (incl. shim contract)
-      Magpilot.Agent/       <- per-host daemon (SDK/ACP runtime + HTTP/SSE API
+      Magpilot.Agent/       <- per-host daemon (Copilot SDK + HTTP/SSE API
                                 + HostOwnership for the cooperative handoff)
       Magpilot.Hub/         <- central daemon (proxy, OAuth, SPA host,
                                 central /api/log sink + viewer)

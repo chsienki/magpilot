@@ -1,4 +1,3 @@
-using Magpilot.Agent.Acp;
 using Magpilot.Agent.Api;
 using Magpilot.Agent.Discovery;
 using Magpilot.Agent.Logging;
@@ -37,17 +36,12 @@ if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ASPNETCORE_URLS"))
 // MAGPILOT_HUB_BEARER aren't set, so dev runs without a hub still work.
 builder.Logging.AddProvider(new HubLoggerProvider());
 
-builder.Services.AddSingleton(
-    SessionRuntimeBackendOptions.FromEnvironment());
-builder.Services.AddSingleton<AcpFlavorPool>();
-builder.Services.AddSingleton<AcpSessionManager>();
 builder.Services.AddSingleton<SdkClientPool>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<SdkClientPool>());
 builder.Services.AddSingleton<SdkPermissionBroker>();
 builder.Services.AddSingleton<SdkSessionRuntime>();
-builder.Services.AddSingleton<SessionRuntimeRouter>();
 builder.Services.AddSingleton<IAgentSessionRuntime>(
-    sp => sp.GetRequiredService<SessionRuntimeRouter>());
+    sp => sp.GetRequiredService<SdkSessionRuntime>());
 builder.Services.AddSingleton<SessionScanner>();
 builder.Services.AddSingleton<HostOwnership>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<HostOwnership>());
@@ -63,8 +57,7 @@ builder.Services.AddHttpClient("hub-update", c => c.Timeout = TimeSpan.FromSecon
 builder.Services.AddSingleton<Magpilot.Agent.Update.UpdatePoller>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<Magpilot.Agent.Update.UpdatePoller>());
 builder.Services.AddHostedService<DiscoveryResponder>();
-builder.Services.AddHostedService<AcpStarter>();
-builder.Services.AddHostedService<Magpilot.Agent.Acp.TurnWatchdog>();
+builder.Services.AddHostedService<TurnWatchdog>();
 
 var token = builder.Configuration["Agent:Token"]
     ?? Environment.GetEnvironmentVariable("MAGPILOT_AGENT_TOKEN")
@@ -158,34 +151,4 @@ internal sealed class BearerHandler(
         return Task.FromResult(AuthenticateResult.Success(
             new AuthenticationTicket(new ClaimsPrincipal(id), "Bearer")));
     }
-}
-
-internal sealed class AcpStarter(
-    AcpFlavorPool pool,
-    AcpSessionManager mgr,
-    SessionRuntimeBackendOptions runtimeOptions,
-    ILoggerFactory loggerFactory,
-    ILogger<AcpStarter> log) : IHostedService
-{
-    public async Task StartAsync(CancellationToken ct)
-    {
-        if (runtimeOptions.DefaultBackend == SessionRuntimeBackend.Sdk)
-        {
-            log.LogInformation(
-                "Skipping eager default ACP child because the SDK backend is selected; ACP remains available lazily for rollback.");
-            _ = mgr;
-            return;
-        }
-
-        log.LogInformation("Starting default ACP child process...");
-        // Eagerly start the default flavor and pre-register it so the pool
-        // doesn't try to spawn a duplicate on first use.
-        var client = new AcpClient(loggerFactory.CreateLogger<AcpClient>(),
-            AcpFlavor.Default.Exe, AcpFlavor.Default.Args);
-        await client.StartAsync(ct);
-        await pool.RegisterAsync(AcpFlavor.Default, client);
-        // Keep mgr alive (it subscribes to pool events in its constructor).
-        _ = mgr;
-    }
-    public Task StopAsync(CancellationToken ct) => Task.CompletedTask;
 }

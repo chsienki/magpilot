@@ -9,7 +9,6 @@ internal static class SdkSessionProfileMapper
         string workingDirectory,
         string? sessionId = null)
     {
-        ValidateSupported(profile);
         return new SessionConfig
         {
             SessionId = sessionId,
@@ -28,7 +27,6 @@ internal static class SdkSessionProfileMapper
         SessionRuntimeProfile profile,
         string workingDirectory)
     {
-        ValidateSupported(profile);
         return new ResumeSessionConfig
         {
             WorkingDirectory = workingDirectory,
@@ -40,15 +38,6 @@ internal static class SdkSessionProfileMapper
             DisabledMcpServers = OptionalList(profile.DisabledMcpServers),
             SkipCustomInstructions = profile.NoCustomInstructions ? true : null,
         };
-    }
-
-    private static void ValidateSupported(SessionRuntimeProfile profile)
-    {
-        if (profile.DisableBuiltinMcps)
-        {
-            throw new NotSupportedException(
-                "The SDK backend cannot yet prove equivalence for disabling every built-in MCP server.");
-        }
     }
 
     private static IList<string>? OptionalList(IReadOnlyList<string>? values) =>

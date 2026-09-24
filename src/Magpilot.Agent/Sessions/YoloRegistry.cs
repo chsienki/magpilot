@@ -4,8 +4,7 @@ namespace Magpilot.Agent.Sessions;
 
 /// <summary>
 /// Per-session "yolo mode" flag. When a session is yolo-enabled, the
-/// agent auto-approves permission callbacks through the active backend's
-/// native decision surface. The env-wide
+/// agent auto-approves ordinary SDK permission callbacks. The env-wide
 /// <c>MAGPILOT_AUTO_APPROVE=true</c> applies the same policy globally; this
 /// registry scopes it to one session that the user explicitly opted in via
 /// the SPA toggle.

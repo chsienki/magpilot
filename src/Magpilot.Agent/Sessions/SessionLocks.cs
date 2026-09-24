@@ -56,7 +56,7 @@ public static class SessionLocks
     /// The LIVE holders whose pid is not "ours" per <paramref name="isOurs"/> --
     /// i.e. genuinely foreign attached processes (a launcher's interactive
     /// copilot, a stray <c>copilot --resume</c>), as opposed to the agent's own
-    /// ACP child. Pure: both liveness (<see cref="Holder.Alive"/>) and ownership
+    /// SDK runtime. Pure: both liveness (<see cref="Holder.Alive"/>) and ownership
     /// are caller-supplied, so this is unit-testable without a process table or
     /// the agent's session bookkeeping. Load-bearing safety property: a pid the
     /// predicate calls ours is never returned, so callers that kill the result

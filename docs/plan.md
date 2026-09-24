@@ -1,25 +1,10 @@
-# magpilot — Design Plan (v6: Copilot SDK Runtime + Blazor Clients)
+# magpilot -- Design Plan
 
 > A purpose-built **shared Blazor UI** that runs both inside a .NET MAUI
 > Android shell on the Pixel and as a WebAssembly SPA at
 > `https://magpilot.home.sienkiewi.cz`, plus a central hub on the docker
 > LXC and per-host agent daemons. Drives the native Copilot agent runtime
-> through the public GitHub Copilot SDK, with ACP retained for rollback and
-> diagnostics.
->
-> **v6 (2026-09-21):** Moved the per-host Agent onto the public Copilot SDK
-> runtime boundary. SDK is the default for ordinary sessions after a successful
-> 24-hour HENDRIK soak; `MAGPILOT_RUNTIME_BACKEND=acp` remains the explicit
-> rollback.
->
-> **v5 (2026-04-25):** Added a first-class web client. Switched UI
-> strategy to **MAUI Blazor Hybrid** so the phone and web share a single
-> Blazor UI codebase. Added GitHub OAuth as the web auth model and
-> Web Push (VAPID) alongside FCM for notifications.
->
-> **v4 (2026-04-25):** Replaced PTY wrapping with the official
-> Agent Client Protocol (ACP) transport. Per-host agent is a thin
-> ACP-to-HTTP/SSE adapter; one `copilot --acp` process per host.
+> through the public GitHub Copilot SDK.
 
 ---
 
@@ -49,50 +34,23 @@
 8. **Multi-host:** Hub auto-discovers per-host agents on the LAN via
    UDP broadcast. Manual add as fallback.
 9. **Session takeover:** When a Copilot session is already running on
-   a host (detected by `inuse.<PID>.lock`), the client can adopt it —
-   the per-host agent kills the foreground process and `session/load`s
-   the same id under its own ACP-managed copilot process.
+   a host (detected by `inuse.<PID>.lock`), the client can adopt it through
+   the cooperative launcher/agent ownership protocol.
 10. **Past sessions:** Clients list historical sessions per host
     (those without an `inuse.*.lock`) so the user can resume any of
     them or start fresh.
 
 ---
 
-## What ACP gives us (and why this is the design)
+## What the Copilot SDK gives us
 
-### Lifecycle methods (agent-side, called by us)
-
-| Method | When we call it | Meaning |
-|---|---|---|
-| `initialize` | Once on agent boot per copilot child | Capability negotiation |
-| `session/new` | "+ New chat" in client | Fresh session, returns `sessionId` |
-| `session/load` | Client opens a Past session | Replays full history via `session/update` notifications, then resolves |
-| `session/resume` | Client re-attaches to an owned session | Reconnect without replay |
-| `session/prompt` | User sends a message | Standard request |
-| `session/cancel` | User hits "stop" | In-flight cancellation |
-| `session/close` | User discards a session | Frees agent resources |
-
-### Notifications (agent-side, sent to us)
-
-| Notification | What we do |
-|---|---|
-| `session/update` (`agent_message_chunk`) | Forward as SSE `assistant_delta` |
-| `session/update` (`tool_call_*`) | Forward as structured `tool_call_*` events |
-| `session/update` (`user_message_chunk`, on `session/load`) | Build past history, send as `history_*` events |
-
-### Client methods we MUST implement (called by the agent)
-
-| Method | v1 strategy |
-|---|---|
-| `session/request_permission` | Forward as SSE `approval_required`; client shows modal; reply with user's choice |
-| (optional) `fs/read_text_file`, `fs/write_text_file`, `terminal/*` | **Skip in v1** — let copilot use built-in tools directly on the host. v2 may proxy. |
-
-### Why one ACP process per host (not per session)
-
-ACP multiplexes sessions natively. One long-lived `copilot --acp --port N`
-hosts every chat on the host. If it crashes, agent re-spawns +
-`session/load`s every owned session — no state lost (lives on disk in
-`~/.copilot/session-state/`).
+- Typed create/resume/send/abort/session-dispose lifecycle APIs.
+- Structured message, reasoning, tool, usage, and model-change events.
+- Typed permission callbacks with managed-policy awareness.
+- Runtime-advertised model and reasoning capabilities.
+- Session-scoped tool/MCP/instruction configuration.
+- A bundled out-of-process runtime that does not depend on an npm-installed
+  Copilot CLI.
 
 ---
 
@@ -131,13 +89,11 @@ hosts every chat on the host. If it crashes, agent re-spawns +
        +----+ +----+ +-------------+
        copilot-agent (.NET 9)
             |
-            | speaks ACP (JSON-RPC) over TCP loopback
+            | typed SDK RPC over stdio
             v
        +-----------------------+
-       | copilot --acp         |
-       |   --port <ephemeral>  |
-       | (one per host, multi- |
-       |  session)             |
+       | bundled Copilot       |
+       | runtime               |
        +-----------------------+
 
                   FCM v1 / Web Push (VAPID)
@@ -152,11 +108,9 @@ hosts every chat on the host. If it crashes, agent re-spawns +
 
 ## Component 1 — `copilot-agent` (per-host daemon)
 
-**Unchanged from v4.** Small .NET 9 daemon that wraps a single
-`copilot --acp --port N` ACP child, scans `~/.copilot/session-state/`
-for live-orphan and past sessions, exposes a tiny HTTP+SSE API to the
-hub. See v4 §1 for full detail (bootstrap, enumeration, takeover,
-HTTP API, discovery, auth, crash resilience, approval handling).
+Small .NET 9 daemon that owns lazy Copilot SDK clients, scans
+`~/.copilot/session-state/`, exposes the HTTP+SSE API, and coordinates
+single-writer ownership with terminal launchers.
 
 ---
 
@@ -350,7 +304,7 @@ deliver via the right channel → drop subscriptions on `410 Gone` /
 - **Web↔hub:** TLS via NPM cert, GitHub OAuth → HttpOnly Secure
   SameSite=Lax cookie. CSRF token on all POSTs.
 - **Hub↔agents:** TLS + per-agent bearer; LAN only.
-- **ACP child:** loopback-only TCP.
+- **Bundled runtime:** child process over private stdio.
 - **OAuth allowlist** enforced server-side; if a non-allowed GitHub
   user logs in, hub returns 403 immediately. No way to set the
   allowlist from the UI; lives in env / config file.
@@ -361,11 +315,11 @@ deliver via the right channel → drop subscriptions on `410 Gone` /
 
 | Component | Where | Install |
 |---|---|---|
-| `copilot-hub` | docker LXC 102 | Add to `/srv/openclaw/docker-compose.yml`, `docker compose up -d copilot-hub`. Watchtower auto-updates. |
-| `copilot-agent` Windows | HENDRIK | `copilot-agent install --service` |
-| `copilot-agent` macOS | Mac | `copilot-agent install --service` (launchd) |
+| `Magpilot.Hub` | docker LXC 102 | GHCR image + compose under `/srv/magpilot`; Watchtower tracks release `:latest`. |
+| `Magpilot.Agent` Windows | HENDRIK | Inno Setup installer registers the user-logon scheduled task. |
+| `Magpilot.Agent` Linux | Magnus | GHCR image consumed by the outer deployment with bind-mounted home and bootstrap hooks. |
 | `Magpilot.Web` SPA | inside hub container | Built into hub image; served at `/` |
-| `CopilotChat.Maui` APK | Pixel | Obtainium → GitHub Releases |
+| Future MAUI shell | Pixel | GitHub Releases / sideload |
 
 NPM proxy host `magpilot.home.sienkiewi.cz` → `192.168.1.239:8443`,
 with the existing wildcard cert.
@@ -374,30 +328,24 @@ with the existing wildcard cert.
 
 ## Open questions / decisions to revisit
 
-1. **ACP id compatibility.** Are ACP `sessionId`s the same as on-disk
-   `~/.copilot/session-state/<id>/` UUIDs? Spike A confirms.
-2. **MAUI Blazor Hybrid Android JS perf.** The Pixel's WebView is
+1. **MAUI Blazor Hybrid Android JS perf.** The Pixel's WebView is
    fast, but verify chat scrollback with thousands of messages stays
    smooth. Mitigation: virtualize the message list (already standard
    in the Blazor lib).
-3. **GitHub OAuth callback URL behind NPM.** Need to register
+2. **GitHub OAuth callback URL behind NPM.** Register
    `https://magpilot.home.sienkiewi.cz/oauth/callback` on a personal
    GitHub OAuth App. NPM passes through the path; hub handles it.
-4. **Web Push from a self-hosted home service.** VAPID is straight-
+3. **Web Push from a self-hosted home service.** VAPID is straight-
    forward but browser push endpoints (mozilla, google) need internet
    reachable from the hub — which it has.
-5. **Cookie + Service Worker + scope.** The web app's service worker
+4. **Cookie + Service Worker + scope.** The web app's service worker
    must be scoped to `/` to receive push for `/api/...` traffic.
    Standard.
-6. **Should the web client also support multiple identities later?**
-   Out of scope for v1 (always Chris); but the cookie session model
-   is identity-aware, so no rework needed when this happens.
-7. **MCP servers in `session/new` / `session/load` calls.** Default
-   to user's `~/.copilot/mcp-config.json` on the agent host.
-8. **Concurrent clients on the same session.** A phone tab and a
-   browser tab both attached: hub fan-out on SSE; ACP itself stays
-   single-client per session via the agent multiplexer.
-9. **MAUI iOS / Mac later.** Same MAUI Blazor Hybrid project, no
+5. **MCP policy UX.** Session profiles support explicit tool and MCP controls,
+   but the SPA does not expose them.
+6. **Concurrent clients on the same session.** Hub fan-out supports multiple
+   watchers; the Agent serializes turns and terminal ownership remains exclusive.
+7. **MAUI iOS / Mac later.** Same MAUI Blazor Hybrid project, no
    per-platform UI rewrite.
 
 ---
@@ -409,32 +357,15 @@ with the existing wildcard cert.
 - ❌ WhatsApp / multi-channel delivery
 - ❌ MCP server registry / web UI for config
 - ❌ Smart home control
-- ❌ Multi-tenant or multi-user
 
 ---
 
-## Suggested build order
+## Current roadmap
 
-1. **Spike A — ACP smoke test** (single biggest risk-retirement).
-   Spawn `copilot --acp --port N`, do `initialize` +
-   `session/new` + `session/prompt`. Then start a session in a
-   regular terminal, kill it, `session/load` against its id from the
-   ACP server. Confirm id compatibility.
-2. **`copilot-agent` v0.** Single host, eight API endpoints, no
-   auth, no TLS. Test from `curl`.
-3. **`copilot-hub` v0.** Pure proxy + agent address book.
-4. **`Magpilot.UI` v0.** Sessions tree + chat + approvals as Razor
-   components, in a standalone Blazor WASM test harness pointed at
-   the hub.
-5. **Web shell.** Wrap UI in `Magpilot.Web`, add GitHub OAuth +
-   cookie auth on the hub, serve static.
-6. **MAUI shell.** Wrap the same UI in `CopilotChat.Maui` with
-   Android FCM and SecureStorage.
-7. **Multi-agent + LAN UDP discovery.**
-8. **Orphan adoption + past-session resume + history rendering.**
-9. **TLS for hub↔agents (TOFU pinning on hub side).**
-10. **FCM + Web Push from the hub.**
-11. **NPM proxy host + Watchtower-friendly compose service.**
-12. **iOS target** (free with MAUI Blazor Hybrid). TestFlight.
-
-Each step shippable independently.
+1. Decompose the large SPA orchestration component and align UI controls with
+   the session-profile API.
+2. Build the MAUI Blazor Hybrid shell and real FCM/Web Push delivery.
+3. Add approval-modal UX for managed and risky tool requests.
+4. Add TLS between the hub and per-host agents.
+5. Expand packaging and deployment support beyond Windows and the Magnus
+   container.

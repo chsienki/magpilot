@@ -15,7 +15,7 @@ namespace Magpilot.Agent.Sessions;
 /// walkable descendant of the launcher process. Walking up from the lock's PID
 /// and finding a process named
 /// <c>magpilot</c> identifies a launcher-driven session, distinct from the
-/// agent's own <c>copilot --acp</c> children (parented under
+/// agent's own SDK runtime (parented under
 /// <c>Magpilot.Agent</c>) and from bare terminal <c>copilot</c> sessions
 /// (parented under a shell).</para>
 ///

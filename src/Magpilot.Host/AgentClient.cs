@@ -43,11 +43,9 @@ public sealed class AgentClient : IDisposable
         // Separate client for the long-lived SSE subscribe. It MUST NOT carry a
         // wall-clock timeout: the stream is open for the life of the session
         // (idle but for a ~15s heartbeat), and -- critically -- its reconnect
-        // path fetches fresh headers right when the agent is restarting, when
-        // Kestrel is blocked ~30-45s by AcpStarter. A 15s timeout there throws
-        // TaskCanceledException mid-reconnect; infinite timeout lets the header
-        // fetch simply wait for Kestrel to come back. Teardown is driven by the
-        // CancellationToken, not the clock.
+        // path fetches fresh headers right when the agent is restarting.
+        // Infinite timeout lets the header fetch wait for Kestrel to come back;
+        // teardown is driven by the CancellationToken, not the clock.
         _streamHttp = new HttpClient { BaseAddress = baseUri, Timeout = Timeout.InfiniteTimeSpan };
         _streamHttp.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", agentToken);
     }

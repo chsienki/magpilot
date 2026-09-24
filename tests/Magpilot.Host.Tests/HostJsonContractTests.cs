@@ -69,7 +69,6 @@ public class HostJsonContractTests
           "inFlight": { "driver": "spa", "startedAtMs": 100 },
           "lastEvent": { "type": "assistant_delta", "id": "e1", "timestamp": null },
           "runtimeStatus": {
-            "backend": "sdk",
             "modelId": "model-1",
             "modelName": "Model One",
             "reasoningEffort": "high",

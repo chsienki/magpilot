@@ -232,12 +232,6 @@ internal sealed class SdkSessionRuntime(
         {
             var attached = SessionFor(sessionId);
             var current = attached.Status.Profile;
-            if (requested.Backend != current.Backend)
-            {
-                throw new SessionRuntimeConfigurationException(
-                    $"Session {sessionId} is attached to {current.Backend}, not {requested.Backend}.");
-            }
-
             if (processScopeSpecified && !SameProcessScope(current, requested))
             {
                 throw new SessionRuntimeConfigurationException(
@@ -294,18 +288,6 @@ internal sealed class SdkSessionRuntime(
             gate.Release();
         }
     }
-
-    public bool MayBeStale(string sessionId) => false;
-
-    public void ResyncWatermark(string sessionId)
-    {
-    }
-
-    public Task<SessionRecycleOutcome> RecycleForStaleAsync(
-        string sessionId,
-        Func<string, string?> cwdResolver,
-        CancellationToken ct) =>
-        Task.FromResult(SessionRecycleOutcome.NotLoaded);
 
     public bool HasForeignLiveHolder(string sessionId)
         => ForeignLiveHolderPids(sessionId).Count > 0;
@@ -465,7 +447,6 @@ internal sealed class SdkSessionRuntime(
 
     public async Task<SessionRuntimeProfile?> CloseAsync(
         string sessionId,
-        string? sessionsRoot,
         CancellationToken ct)
     {
         var gate = await AcquireSessionGateAsync(sessionId, ct);
@@ -512,7 +493,7 @@ internal sealed class SdkSessionRuntime(
             }
         }
 
-        return await CloseAsync(sessionId, sessionsRoot: null, ct);
+        return await CloseAsync(sessionId, ct);
     }
 
     public ChannelReader<StreamEvent> Subscribe(string sessionId)
@@ -548,7 +529,6 @@ internal sealed class SdkSessionRuntime(
 
     public async Task<int> SweepStalledTurnsAsync(
         TimeSpan threshold,
-        Func<string, string?> cwdResolver,
         CancellationToken ct)
     {
         var now = DateTimeOffset.UtcNow;
@@ -558,9 +538,11 @@ internal sealed class SdkSessionRuntime(
             bool stalled;
             lock (turn.Sync)
             {
-                stalled =
-                    turn.OpenToolCalls.Count == 0 &&
-                    now - turn.LastEventAt >= threshold;
+                stalled = IsTurnStalled(
+                    turn.LastEventAt,
+                    now,
+                    threshold,
+                    turn.OpenToolCalls.Count > 0);
             }
             if (!stalled)
                 continue;
@@ -586,6 +568,13 @@ internal sealed class SdkSessionRuntime(
         }
         return recovered;
     }
+
+    internal static bool IsTurnStalled(
+        DateTimeOffset lastEventAt,
+        DateTimeOffset now,
+        TimeSpan threshold,
+        bool hasOpenToolCall = false) =>
+        !hasOpenToolCall && now - lastEventAt >= threshold;
 
     private AttachedSession Attach(
         CopilotSession session,
@@ -817,11 +806,6 @@ internal sealed class SdkSessionRuntime(
 
     private static void ValidateProfile(SessionRuntimeProfile profile)
     {
-        if (profile.Backend != SessionRuntimeBackend.Sdk)
-        {
-            throw new SessionRuntimeConfigurationException(
-                $"SDK runtime received a {profile.Backend} profile.");
-        }
         try
         {
             _ = SdkSessionProfileMapper.Create(
@@ -851,7 +835,6 @@ internal sealed class SdkSessionRuntime(
         (left.AvailableTools ?? []).SequenceEqual(
             right.AvailableTools ?? [],
             StringComparer.OrdinalIgnoreCase) &&
-        left.DisableBuiltinMcps == right.DisableBuiltinMcps &&
         left.NoCustomInstructions == right.NoCustomInstructions;
 
     private static SessionRuntimeConfigurationException WrapConfigurationFailure(

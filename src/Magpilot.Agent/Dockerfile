@@ -31,7 +31,7 @@ RUN dotnet publish src/Magpilot.Agent/Magpilot.Agent.csproj \
 # --------- Runtime image ---------
 FROM mcr.microsoft.com/dotnet/aspnet:${DOTNET_RUNTIME} AS runtime
 
-# Install Node.js 22 for the ACP rollback/Agency path + git/curl/openssh-client/ca-certs
+# Install Node.js 22 for deployer bootstrap hooks + git/curl/openssh-client/ca-certs
 # + ffmpeg (audio transcoding for voice tools / Wyoming pipeline)
 # + poppler-utils (pdftotext -- lets any agent extract text from PDF
 #   attachments the user drops on disk; ~5 MB layer, no runtime cost)
@@ -46,9 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && dpkg -i /tmp/packages-microsoft-prod.deb \
  && rm /tmp/packages-microsoft-prod.deb \
  && apt-get update && apt-get install -y --no-install-recommends powershell \
- && rm -rf /var/lib/apt/lists/* \
- && npm install -g @github/copilot \
- && npm cache clean --force
+ && rm -rf /var/lib/apt/lists/*
 
 # The agent runs as a non-root user. Default: "magnus" (uid 1000) for
 # historical reasons; overridable via MAGPILOT_AGENT_USER + a custom image.

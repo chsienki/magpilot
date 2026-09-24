@@ -67,7 +67,7 @@ internal static class PostSpawnDetector
         // that's the resume-of-stranded-session shape we're looking for.
         // Live-lock sessions are excluded so unrelated activity on the
         // box (the user's other copilot process, a magpilot agent driving
-        // a session via ACP) can never false-positive this pass.
+        // a session via the SDK) can never false-positive this pass.
         var beforeEvents = new Dictionary<string, DateTime>(StringComparer.Ordinal);
         var beforeWorkspace = new Dictionary<string, DateTime>(StringComparer.Ordinal);
         foreach (var sessionDir in SafeEnumerateDirectories(root))

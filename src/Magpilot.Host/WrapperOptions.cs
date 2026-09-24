@@ -9,7 +9,7 @@ namespace Magpilot.Host;
 public sealed record WrapperOptions(
     /// <summary>Auto-Y on the take-over prompt: polite take, waits for the in-flight turn.</summary>
     bool Take,
-    /// <summary>Auto-f on the take-over prompt: aborts in-flight (ACP cancel + 2s grace) and takes immediately. Implies <see cref="Take"/>.</summary>
+    /// <summary>Auto-f on the take-over prompt: aborts the in-flight SDK turn and takes immediately. Implies <see cref="Take"/>.</summary>
     bool Force,
     /// <summary>Auto-n on the take-over prompt: if owned by anything else, exit non-zero rather than prompt or take.</summary>
     bool NoTake,
@@ -180,7 +180,7 @@ public sealed record WrapperOptions(
         Wrapper-only flags (all stripped before exec; everything else is forwarded to copilot):
 
           --magpilot-take              auto-confirm take-over (polite: waits for in-flight turn)
-          --magpilot-force             auto-confirm + abort in-flight (ACP cancel + 2s grace). Implies --magpilot-take.
+          --magpilot-force             auto-confirm + abort in-flight SDK turn. Implies --magpilot-take.
           --magpilot-no-take           if owned by anything else, exit non-zero (safe for scripting)
           --magpilot-skip-check        bypass the agent entirely; exec real copilot as a passthrough
           --magpilot-no-tui-changes    disable Magpilot's terminal env hints, palette changes, colour

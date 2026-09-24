@@ -1,5 +1,4 @@
 using System.Text.Json;
-using Magpilot.Agent.Acp;
 using Magpilot.Agent.Runtime;
 using Magpilot.Agent.Sessions;
 using Magpilot.Agent.Update;
@@ -72,12 +71,10 @@ public static class AgentEndpoints
 
         // Read the session's events.jsonl directly and project it into a
         // flat role/text/toolCallId list. This is the SPA's escape hatch
-        // for hydrating an Owned session that another client (e.g. the WA
-        // sidecar) loaded into ACP first -- ACP refuses to load again, so
-        // we bypass it entirely.
+        // for hydrating an attached session that another client (e.g. the WA
+        // sidecar) has already driven.
         // Reads the persisted message history for a session straight from
-        // events.jsonl. Bypasses ACP entirely (which would refuse a
-        // session/load on an already-loaded session). Paging:
+        // events.jsonl instead of replaying the runtime session. Paging:
         //   ?tail=N       -- most recent N entries (default 50)
         //   ?before=X&limit=N -- N entries immediately older than ordinal X
         //   ?all=true     -- full history (use sparingly; legacy)
@@ -120,7 +117,6 @@ public static class AgentEndpoints
                     disableMcpServers: req.DisableMcpServers,
                     agent: req.Agent,
                     availableTools: req.AvailableTools,
-                    disableBuiltinMcps: req.DisableBuiltinMcps,
                     noCustomInstructions: req.NoCustomInstructions,
                     copilotHome: req.CopilotHome);
             }
@@ -240,10 +236,9 @@ public static class AgentEndpoints
 
                 // Echo the prompt as a UserDelta into the broadcast channel so
                 // other connected subscribers (the SPA) render "the user said
-                // X" before the assistant deltas arrive. ACP doesn't emit
-                // user_message_chunk for live prompts (only during
-                // session/load history replay), so without this the SPA would
-                // see Magnus's reply but no question. When a source is set,
+                // X" before the assistant deltas arrive. Runtime events do not
+                // echo externally injected live prompts, so without this the
+                // SPA would see the reply but no question. When a source is set,
                 // PromptAsync publishes the tagged UserDelta instead, so skip
                 // this to avoid a double render.
                 if (string.IsNullOrEmpty(req.Source))
@@ -361,7 +356,6 @@ public static class AgentEndpoints
                     req.DisableMcpServers,
                     req.Agent,
                     req.AvailableTools,
-                    req.DisableBuiltinMcps,
                     req.NoCustomInstructions,
                     req.CopilotHome);
                 return Results.Ok(info);
@@ -553,9 +547,8 @@ public static class AgentEndpoints
 
         // Per-session yolo mode toggle. The agent's YoloRegistry keeps a
         // sessionId -> bool map in memory; when a session is yolo-enabled
-        // the ACP approval handler short-circuits each
-        // session/request_permission to an allow option (same shortcut as
-        // the env-wide MAGPILOT_AUTO_APPROVE, but scoped per-session).
+        // the SDK permission broker approves ordinary requests (same shortcut
+        // as the env-wide MAGPILOT_AUTO_APPROVE, but scoped per-session).
         //
         // 403 + { error, hostDisabled: true } if the host has
         // MAGPILOT_YOLO_DISABLED=true set, so per-host opt-out wins
@@ -611,7 +604,7 @@ public static class AgentEndpoints
             if (runtime.IsQuarantined(id))
                 return Results.Conflict(new
                 {
-                    error = $"Session {id} is quarantined: its ACP session configuration could not be " +
+                    error = $"Session {id} is quarantined: its runtime configuration could not be " +
                             "verified. Re-adopt it with the intended model/reasoning before prompting.",
                     needsReadopt = true,
                 });
@@ -688,7 +681,7 @@ public static class AgentEndpoints
             ctx.Response.Headers.CacheControl = "no-cache";
             ctx.Response.Headers["X-Accel-Buffering"] = "no";
 
-            // Single writer pattern: every producer (acp updates, heartbeat,
+            // Single writer pattern: every producer (runtime updates, heartbeat,
             // load lifecycle) writes into this channel; one task drains it
             // to ctx.Response. Avoids interleaved bytes mid-event.
             var outbound = System.Threading.Channels.Channel.CreateUnbounded<StreamEvent>(

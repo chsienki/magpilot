@@ -178,12 +178,10 @@ public sealed class HubClient
     }
 
     /// <summary>
-    /// Detach the agent's ACP copy of the session, dropping it back to
+    /// Detach the agent's runtime session, dropping it back to
     /// Dormant on disk. The agent's <c>SessionRegistry.DetachAsync</c>
-    /// removes the session from its owned map and calls
-    /// <c>session/close</c> (which is a no-op in the current copilot
-    /// CLI, but that's an upstream limitation -- see the gotcha in the
-    /// magpilot AGENTS.md). Returns 204 on success; we
+    /// disposes the SDK session and removes it from the owned map.
+    /// Returns 204 on success; we
     /// surface errors with the standard EnsureSuccessStatusCode path.
     /// </summary>
     public async Task DetachAsync(string agent, string id, CancellationToken ct = default)
@@ -195,8 +193,7 @@ public sealed class HubClient
     /// <summary>
     /// Stop the in-flight turn for the given session by issuing
     /// <c>POST /sessions/{id}/interrupt</c>, which on the agent calls
-    /// ACP <c>session/cancel</c>. The model stops generating at the next
-    /// chunk boundary; the agent still emits a <c>TurnComplete</c> so
+    /// the SDK abort API. The agent still emits a <c>TurnComplete</c> so
     /// the SPA's <c>_busy</c> flag flips back to idle. Idempotent; safe
     /// to call when no turn is active (the agent returns 204 either way).
     /// 409 means a magpilot launcher holds the session -- not our

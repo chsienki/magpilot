@@ -9,7 +9,6 @@ public sealed record NewSessionRequest(
     string[]? DisableMcpServers = null,
     string? Agent = null,
     string[]? AvailableTools = null,
-    bool DisableBuiltinMcps = false,
     bool NoCustomInstructions = false,
     string? CopilotHome = null);
 public sealed record PromptRequest(string Text, string? Source = null);
@@ -20,15 +19,12 @@ public sealed record AdoptRequest(
     string[]? DisableMcpServers = null,
     string? Agent = null,
     string[]? AvailableTools = null,
-    bool? DisableBuiltinMcps = null,
     bool? NoCustomInstructions = null,
     string? CopilotHome = null);
 public sealed record ApprovalResponse(string OptionId);
 public sealed record SessionModelUpdateRequest(
     string Model,
     string? ReasoningEffort = null);
-
-public sealed record SessionDetails(SessionInfo Info, string? AcpSessionId);
 
 /// <summary>
 /// Body for <c>POST /api/sessions/{id}/release-request</c>. Triggers a
@@ -46,7 +42,7 @@ public sealed record ReleaseRequestBody(
 /// supplies its own PID so the agent can verify liveness later. If the
 /// agent currently owns the session and a turn is in flight, the agent
 /// waits for the next turn boundary unless <see cref="Force"/> is true,
-/// in which case it sends an ACP cancel and proceeds after a short
+/// in which case it aborts the SDK turn and proceeds after a short
 /// grace period.
 /// </summary>
 public sealed record AcquireForHostBody(int HostPid, bool Force = false);
@@ -73,7 +69,7 @@ public sealed record TakeOverSessionRequest(bool Force = false);
 public sealed record YoloRequest(bool Enabled);
 
 /// <summary>
-/// Response body returned by ACP-driving endpoints (<c>POST /messages</c>,
+/// Response body returned by runtime-driving endpoints (<c>POST /messages</c>,
 /// <c>POST /interrupt</c>, <c>POST /approvals/{id}</c>) with status code
 /// <c>409 Conflict</c> when the session is currently held by a
 /// magpilot launcher. Callers (SPA, WhatsApp) react by firing

@@ -16,9 +16,9 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<Magpilot.Hub.Loggi
 // so a single dead agent can't stall SPA aggregation.
 var agentTimeoutSec = builder.Configuration.GetValue("Hub:AgentHttpTimeoutSec", 10);
 builder.Services.AddHttpClient("agent", c => c.Timeout = TimeSpan.FromSeconds(agentTimeoutSec));
-// Longer budget for mutating calls that drive ACP (session/new, session/load).
-// ACP's own session/new defaults to 120s and session/load to 300s; this client
-// must outlive the typical ACP wait or the hub will return 502 to the SPA and
+// Longer budget for mutating calls that create or resume SDK sessions.
+// These calls can start the bundled runtime and load a large session; this
+// client must outlive the typical wait or the hub will return 502 to the SPA and
 // mark a perfectly healthy agent offline. Tunable via Hub:AgentActionTimeoutSec.
 var agentActionTimeoutSec = builder.Configuration.GetValue("Hub:AgentActionTimeoutSec", 90);
 builder.Services.AddHttpClient("agent-action", c => c.Timeout = TimeSpan.FromSeconds(agentActionTimeoutSec));

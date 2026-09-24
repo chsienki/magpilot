@@ -6,8 +6,8 @@ namespace Magpilot.Hub.Agents;
 /// <list type="bullet">
 ///   <item><c>Read</c> -- short (10s default). Use for fast aggregation calls
 ///     (e.g. GET /api/sessions) where one slow agent shouldn't stall the SPA.</item>
-///   <item><c>Action</c> -- medium (90s default). Use for ACP-driving mutations
-///     (session/new, session/load) that can legitimately take tens of seconds.</item>
+///   <item><c>Action</c> -- medium (90s default). Use for runtime mutations
+///     (session create/resume) that can legitimately take tens of seconds.</item>
 ///   <item><c>Stream</c> -- infinite. Use for SSE / quick-prompt where a turn
 ///     can run for many minutes.</item>
 /// </list>

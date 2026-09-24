@@ -964,8 +964,7 @@ static async Task SubscribeWithReconnectAsync(
         // or the session was handed off (sseCts.Cancel()). Any OTHER
         // OperationCanceledException is a transient fault to retry, NOT a
         // shutdown. The one that bit us: HttpClient.Timeout firing on
-        // SubscribeAsync's header fetch while the agent is mid-restart (its
-        // AcpStarter blocks Kestrel ~30-45s, longer than the client timeout).
+        // SubscribeAsync's header fetch while the agent is mid-restart.
         // That surfaces as a TaskCanceledException whose token is the internal
         // timeout, not ct -- so the old blanket `catch (OperationCanceledException)`
         // mistook it for a real cancel, returned, and left the launcher

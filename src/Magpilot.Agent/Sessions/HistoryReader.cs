@@ -8,14 +8,10 @@ namespace Magpilot.Agent.Sessions;
 /// into a flat list of role/text rows suitable for the SPA's chat history
 /// rehydration.
 ///
-/// Why this exists: ACP's <c>session/load</c> is the only way to make a
-/// dormant session live, AND it streams the full history back as
-/// user_message_chunk + agent_message_chunk events. But ACP rejects
-/// double-load on an already-loaded session (-32602), so when an Owned
-/// session has been touched by another client (e.g. the WhatsApp sidecar)
-/// the SPA can't request load=true to retrieve history. Reading the
-/// canonical events.jsonl bypasses ACP entirely; the file is the durable
-/// source of truth that ACP itself was going to replay anyway.
+/// Why this exists: an attached session may have been driven by another client
+/// (e.g. the WhatsApp sidecar), leaving a fresh SPA tab without an in-memory
+/// message cache. Reading canonical <c>events.jsonl</c> hydrates that tab
+/// without disturbing the live runtime session.
 ///
 /// Paging: long-lived pinned sessions (Magnus) can grow into thousands of
 /// messages; sending the entire projection on every fresh tab open is
@@ -128,7 +124,7 @@ public sealed class HistoryReader
         // that announced the tool request. We project one entry per
         // tool call (no separate [start] / [end] pair), then mutate
         // its status in place when the matching complete event lands.
-        // This map keys by ACP toolCallId -> index into rows[].
+        // This map keys by toolCallId -> index into rows[].
         var toolIndexById = new Dictionary<string, int>(StringComparer.Ordinal);
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         using var reader = new StreamReader(stream);

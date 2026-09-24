@@ -46,36 +46,32 @@ public sealed class HostOwnershipTests : IDisposable
     }
 
     [Fact]
-    public async Task Session_flavor_survives_a_restart()
+    public async Task Session_profile_survives_a_restart()
     {
         var sid = Guid.NewGuid().ToString();
-        var flavor = new HostSessionFlavor(
+        var profile = new HostSessionProfile(
             Model: "example-model",
             ReasoningEffort: "low",
-            DisabledMcpServers: ["example-server"],
+            DisabledMcpServers: ["example-server", "github-mcp-server"],
             Agent: "magnus-phone",
             AvailableTools: ["magnus-phone", "server(tool_name)"],
-            DisableBuiltinMcps: true,
             NoCustomInstructions: true,
-            CopilotHome: Path.Combine(Path.GetTempPath(), "copilot-phone"),
-            Backend: SessionRuntimeBackend.Sdk);
-        New().Set(sid, Environment.ProcessId, flavor);
+            CopilotHome: Path.Combine(Path.GetTempPath(), "copilot-phone"));
+        New().Set(sid, Environment.ProcessId, profile);
 
         var reloaded = New();
         await reloaded.StartAsync(default);
         try
         {
             Assert.True(reloaded.TryGet(sid, out var entry));
-            Assert.NotNull(entry.Flavor);
-            Assert.Equal(flavor.Model, entry.Flavor.Model);
-            Assert.Equal(flavor.ReasoningEffort, entry.Flavor.ReasoningEffort);
-            Assert.Equal(flavor.DisabledMcpServers, entry.Flavor.DisabledMcpServers);
-            Assert.Equal(flavor.Agent, entry.Flavor.Agent);
-            Assert.Equal(flavor.AvailableTools, entry.Flavor.AvailableTools);
-            Assert.Equal(flavor.DisableBuiltinMcps, entry.Flavor.DisableBuiltinMcps);
-            Assert.Equal(flavor.NoCustomInstructions, entry.Flavor.NoCustomInstructions);
-            Assert.Equal(flavor.CopilotHome, entry.Flavor.CopilotHome);
-            Assert.Equal(flavor.Backend, entry.Flavor.Backend);
+            Assert.NotNull(entry.Profile);
+            Assert.Equal(profile.Model, entry.Profile.Model);
+            Assert.Equal(profile.ReasoningEffort, entry.Profile.ReasoningEffort);
+            Assert.Equal(profile.DisabledMcpServers, entry.Profile.DisabledMcpServers);
+            Assert.Equal(profile.Agent, entry.Profile.Agent);
+            Assert.Equal(profile.AvailableTools, entry.Profile.AvailableTools);
+            Assert.Equal(profile.NoCustomInstructions, entry.Profile.NoCustomInstructions);
+            Assert.Equal(profile.CopilotHome, entry.Profile.CopilotHome);
         }
         finally
         {
@@ -111,15 +107,15 @@ public sealed class HostOwnershipTests : IDisposable
     }
 
     [Fact]
-    public async Task Dead_owner_flavor_remains_available_for_release_after_restart()
+    public async Task Dead_owner_profile_remains_available_for_release_after_restart()
     {
         var sid = Guid.NewGuid().ToString();
         const int deadPid = 2147483646;
-        var flavor = new HostSessionFlavor(
+        var profile = new HostSessionProfile(
             Model: "example-model",
             ReasoningEffort: "none",
             DisabledMcpServers: ["example-server"]);
-        New().Set(sid, deadPid, flavor);
+        New().Set(sid, deadPid, profile);
 
         var reloaded = New();
         await reloaded.StartAsync(default);
@@ -128,10 +124,10 @@ public sealed class HostOwnershipTests : IDisposable
             Assert.False(reloaded.TryGet(sid, out _));
             Assert.True(reloaded.TryGetRecorded(sid, out var entry));
             Assert.Equal(deadPid, entry.HostPid);
-            Assert.NotNull(entry.Flavor);
-            Assert.Equal(flavor.Model, entry.Flavor.Model);
-            Assert.Equal(flavor.ReasoningEffort, entry.Flavor.ReasoningEffort);
-            Assert.Equal(flavor.DisabledMcpServers, entry.Flavor.DisabledMcpServers);
+            Assert.NotNull(entry.Profile);
+            Assert.Equal(profile.Model, entry.Profile.Model);
+            Assert.Equal(profile.ReasoningEffort, entry.Profile.ReasoningEffort);
+            Assert.Equal(profile.DisabledMcpServers, entry.Profile.DisabledMcpServers);
         }
         finally
         {

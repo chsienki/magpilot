@@ -63,16 +63,15 @@ public sealed class SdkSessionProfileMapperTests
     }
 
     [Fact]
-    public void Disable_builtin_mcps_is_rejected_until_equivalence_is_proven()
+    public void Create_maps_explicit_builtin_github_mcp_exclusion()
     {
         var profile = SessionRuntimeProfile.Resolve(
             model: null,
             reasoningEffort: null,
-            disableBuiltinMcps: true);
+            disableMcpServers: ["github-mcp-server"]);
 
-        var ex = Assert.Throws<NotSupportedException>(() =>
-            SdkSessionProfileMapper.Create(profile, "C:\\work"));
+        var config = SdkSessionProfileMapper.Create(profile, "C:\\work");
 
-        Assert.Contains("cannot yet prove equivalence", ex.Message);
+        Assert.Equal(["github-mcp-server"], config.DisabledMcpServers);
     }
 }

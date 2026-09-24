@@ -165,7 +165,7 @@ public sealed class SessionOwnershipTests : IDisposable
     }
 
     [Fact]
-    public async Task Profileless_terminal_handback_uses_configured_default_backend()
+    public async Task Profileless_terminal_handback_uses_default_profile()
     {
         const string sessionId = "default-backend-handback";
         WriteSession(sessionId);
@@ -183,7 +183,7 @@ public sealed class SessionOwnershipTests : IDisposable
             CancellationToken.None);
 
         Assert.Equal(SessionOwner.Agent, released.Owner);
-        Assert.Equal(SessionRuntimeBackend.Sdk, runtime.LastProfile!.Backend);
+        Assert.Equal(SessionRuntimeProfile.Default, runtime.LastProfile);
     }
 
     public void Dispose()
@@ -210,8 +210,7 @@ public sealed class SessionOwnershipTests : IDisposable
                 NullLogger<HostOwnership>.Instance,
                 config),
             new YoloRegistry(NullLogger<YoloRegistry>.Instance),
-            NullLogger<SessionRegistry>.Instance,
-            SessionRuntimeBackendOptions.SdkDefault);
+            NullLogger<SessionRegistry>.Instance);
     }
 
     private void WriteSession(string sessionId)
@@ -304,13 +303,6 @@ public sealed class SessionOwnershipTests : IDisposable
             return Task.CompletedTask;
         }
 
-        public bool MayBeStale(string sessionId) => false;
-        public void ResyncWatermark(string sessionId) { }
-        public Task<SessionRecycleOutcome> RecycleForStaleAsync(
-            string sessionId,
-            Func<string, string?> cwdResolver,
-            CancellationToken ct) =>
-            Task.FromResult(SessionRecycleOutcome.NotLoaded);
         public bool HasForeignLiveHolder(string sessionId) => ForeignPids.Length > 0;
         public IReadOnlyList<int> ForeignLiveHolderPids(string sessionId) => ForeignPids;
         public IReadOnlyList<int> EvictForeignLiveHolders(string sessionId)
@@ -339,7 +331,6 @@ public sealed class SessionOwnershipTests : IDisposable
             Task.CompletedTask;
         public Task<SessionRuntimeProfile?> CloseAsync(
             string sessionId,
-            string? sessionsRoot,
             CancellationToken ct)
         {
             Attached = false;
@@ -360,7 +351,6 @@ public sealed class SessionOwnershipTests : IDisposable
         public bool ResolveApproval(string approvalId, string optionId) => false;
         public Task<int> SweepStalledTurnsAsync(
             TimeSpan threshold,
-            Func<string, string?> cwdResolver,
             CancellationToken ct) =>
             Task.FromResult(0);
 

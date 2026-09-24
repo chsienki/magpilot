@@ -17,8 +17,7 @@ public sealed class SdkSessionStatusTrackerTests
         var tracker = new SdkSessionStatusTracker(
             SessionRuntimeProfile.Resolve(
                 model: null,
-                reasoningEffort: null,
-                backend: SessionRuntimeBackend.Sdk));
+                reasoningEffort: null));
         tracker.SetModels(
         [
             new ModelInfo
@@ -64,10 +63,7 @@ public sealed class SdkSessionStatusTrackerTests
     public void Live_usage_is_reconciled_by_the_authoritative_checkpoint()
     {
         var tracker = new SdkSessionStatusTracker(
-            SessionRuntimeProfile.Default with
-            {
-                Backend = SessionRuntimeBackend.Sdk,
-            });
+            SessionRuntimeProfile.Default);
 
         tracker.Apply(new AssistantUsageEvent
         {
@@ -96,10 +92,7 @@ public sealed class SdkSessionStatusTrackerTests
     public void Model_options_preserve_runtime_metadata()
     {
         var tracker = new SdkSessionStatusTracker(
-            SessionRuntimeProfile.Default with
-            {
-                Backend = SessionRuntimeBackend.Sdk,
-            });
+            SessionRuntimeProfile.Default);
         tracker.SetModels(
         [
             new ModelInfo

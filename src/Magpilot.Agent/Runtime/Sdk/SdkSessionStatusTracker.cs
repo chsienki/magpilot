@@ -15,7 +15,6 @@ internal sealed class SdkSessionStatusTracker(SessionRuntimeProfile profile)
         new(StringComparer.OrdinalIgnoreCase);
     private SessionRuntimeProfile _profile = profile;
     private SessionRuntimeStatus _status = new(
-        "sdk",
         profile.Model,
         profile.Model,
         profile.ReasoningEffort,

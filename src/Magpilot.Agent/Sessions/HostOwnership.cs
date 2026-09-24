@@ -32,7 +32,7 @@ public sealed class HostOwnership : IHostedService, IDisposable
     private readonly ConcurrentDictionary<string, HostOwnerEntry> _entries = new();
     // Durable handback metadata is kept separately from live ownership. The
     // launcher intentionally calls /release only after its copilot child exits,
-    // so PID liveness cannot be the lifetime of the flavor information needed
+    // so PID liveness cannot be the lifetime of the profile information needed
     // to restore that session after an agent restart.
     private readonly ConcurrentDictionary<string, HostOwnerEntry> _releaseEntries = new();
     private readonly string _statePath;
@@ -66,21 +66,21 @@ public sealed class HostOwnership : IHostedService, IDisposable
     /// <summary>
     /// Mark the session as host-owned. Replaces any prior entry; the
     /// caller is responsible for ensuring the agent has already released
-    /// any in-flight ACP work for this session before calling. The
+    /// any in-flight runtime work for this session before calling. The
     /// holder's process start time is captured so a reload after an agent
     /// restart can tell the real holder from a reused PID.
-    /// <paramref name="flavor"/> records what the session was running under when
-    /// the agent let go, so a later handback restores the same child scope and
+    /// <paramref name="profile"/> records what the session was running under when
+    /// the agent let go, so a later handback restores the same process scope and
     /// session configuration instead of silently demoting it to the default.
     /// </summary>
-    public HostOwnerEntry Set(string sessionId, int hostPid, HostSessionFlavor? flavor = null)
+    public HostOwnerEntry Set(string sessionId, int hostPid, HostSessionProfile? profile = null)
     {
         var entry = new HostOwnerEntry(
             Guid.NewGuid(),
             hostPid,
             DateTimeOffset.UtcNow,
             TryGetStartTicks(hostPid),
-            flavor);
+            profile);
         _entries[sessionId] = entry;
         _releaseEntries[sessionId] = entry;
         _logger.LogInformation(
@@ -219,7 +219,7 @@ public sealed class HostOwnership : IHostedService, IDisposable
                 e.HostPid,
                 e.AcquiredAt,
                 e.HostStartTicks,
-                e.Flavor);
+                e.Profile);
             _releaseEntries[e.SessionId] = entry;
             if (IsSameProcess(entry))
             {
@@ -246,7 +246,7 @@ public sealed class HostOwnership : IHostedService, IDisposable
                         kv.Value.HostPid,
                         kv.Value.AcquiredAt,
                         kv.Value.HostStartTicks,
-                        kv.Value.Flavor))
+                        kv.Value.Profile))
                     .ToList();
                 var json = JsonSerializer.Serialize(snapshot);
                 Directory.CreateDirectory(Path.GetDirectoryName(_statePath)!);
@@ -271,7 +271,7 @@ public sealed class HostOwnership : IHostedService, IDisposable
         int HostPid,
         DateTimeOffset AcquiredAt,
         long HostStartTicks,
-        HostSessionFlavor? Flavor = null);
+        HostSessionProfile? Profile = null);
 }
 
 /// <summary>
@@ -279,23 +279,20 @@ public sealed class HostOwnership : IHostedService, IDisposable
 /// launcher: the process-scoped tool surface plus the session-scoped model and
 /// reasoning. Purely descriptive (no runtime implementation types) so the
 /// ownership map stays a plain serialisable record; the registry turns it back
-/// into a runtime profile on handback. A null (e.g. an entry persisted by an
-/// older agent) simply falls back to the default profile.
+/// into a runtime profile on handback. A null profile falls back to the default.
 /// </summary>
-public sealed record HostSessionFlavor(
+public sealed record HostSessionProfile(
     string? Model = null,
     string? ReasoningEffort = null,
     string[]? DisabledMcpServers = null,
     string? Agent = null,
     string[]? AvailableTools = null,
-    bool DisableBuiltinMcps = false,
     bool NoCustomInstructions = false,
-    string? CopilotHome = null,
-    SessionRuntimeBackend? Backend = null);
+    string? CopilotHome = null);
 
 public readonly record struct HostOwnerEntry(
     Guid LeaseId,
     int HostPid,
     DateTimeOffset AcquiredAt,
     long HostStartTicks,
-    HostSessionFlavor? Flavor = null);
+    HostSessionProfile? Profile = null);

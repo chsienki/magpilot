@@ -1,14 +1,7 @@
 namespace Magpilot.Agent.Runtime;
 
-public enum SessionRuntimeBackend
-{
-    Acp,
-    Sdk,
-}
-
 /// <summary>
-/// Complete configuration needed to create, resume, or restore a Copilot
-/// session independently of the runtime transport used to host it.
+/// Complete configuration needed to create, resume, or restore an SDK session.
 /// </summary>
 public sealed record SessionRuntimeProfile(
     string? Model = null,
@@ -16,10 +9,8 @@ public sealed record SessionRuntimeProfile(
     IReadOnlyList<string>? DisabledMcpServers = null,
     string? Agent = null,
     IReadOnlyList<string>? AvailableTools = null,
-    bool DisableBuiltinMcps = false,
     bool NoCustomInstructions = false,
-    string? CopilotHome = null,
-    SessionRuntimeBackend Backend = SessionRuntimeBackend.Acp)
+    string? CopilotHome = null)
 {
     public static readonly SessionRuntimeProfile Default = new();
 
@@ -29,10 +20,8 @@ public sealed record SessionRuntimeProfile(
         IReadOnlyList<string>? disableMcpServers = null,
         string? agent = null,
         IReadOnlyList<string>? availableTools = null,
-        bool disableBuiltinMcps = false,
         bool noCustomInstructions = false,
-        string? copilotHome = null,
-        SessionRuntimeBackend backend = SessionRuntimeBackend.Acp)
+        string? copilotHome = null)
     {
         var requestedModel = string.IsNullOrWhiteSpace(model) ? null : ValidateModel(model);
         var effort = ValidateEffort(reasoningEffort);
@@ -49,10 +38,8 @@ public sealed record SessionRuntimeProfile(
             disabled,
             requestedAgent,
             tools,
-            disableBuiltinMcps,
             noCustomInstructions,
-            requestedCopilotHome,
-            backend);
+            requestedCopilotHome);
     }
 
     public static void ValidateAvailableToolsRequest(IReadOnlyList<string>? selectors)
