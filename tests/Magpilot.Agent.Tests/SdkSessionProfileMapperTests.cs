@@ -1,3 +1,4 @@
+using GitHub.Copilot;
 using Magpilot.Agent.Runtime;
 using Magpilot.Agent.Runtime.Sdk;
 using Xunit;
@@ -20,13 +21,25 @@ public sealed class SdkSessionProfileMapperTests
         var config = SdkSessionProfileMapper.Create(
             profile,
             workingDirectory: "C:\\work",
-            sessionId: "session-1");
+            sessionId: "session-1",
+            customAgents:
+            [
+                new CustomAgentConfig
+                {
+                    Name = "example-agent",
+                    Description = "Example",
+                    Prompt = "Act as an example.",
+                },
+            ]);
 
         Assert.Equal("session-1", config.SessionId);
         Assert.Equal("C:\\work", config.WorkingDirectory);
         Assert.Equal("example-model", config.Model);
         Assert.Equal("high", config.ReasoningEffort);
         Assert.Equal("example-agent", config.Agent);
+        Assert.Equal(
+            "example-agent",
+            Assert.Single(config.CustomAgents!).Name);
         Assert.True(config.Streaming);
         Assert.Equal(["example(tool)", "shell"], config.AvailableTools);
         Assert.Equal(["example-mcp"], config.DisabledMcpServers);
@@ -54,12 +67,25 @@ public sealed class SdkSessionProfileMapperTests
             reasoningEffort: "low",
             agent: "example-agent");
 
-        var config = SdkSessionProfileMapper.Resume(profile, "C:\\work");
+        var config = SdkSessionProfileMapper.Resume(
+            profile,
+            "C:\\work",
+            [
+                new CustomAgentConfig
+                {
+                    Name = "example-agent",
+                    Description = "Example",
+                    Prompt = "Act as an example.",
+                },
+            ]);
 
         Assert.Equal("C:\\work", config.WorkingDirectory);
         Assert.Equal("example-model", config.Model);
         Assert.Equal("low", config.ReasoningEffort);
         Assert.Equal("example-agent", config.Agent);
+        Assert.Equal(
+            "example-agent",
+            Assert.Single(config.CustomAgents!).Name);
     }
 
     [Fact]

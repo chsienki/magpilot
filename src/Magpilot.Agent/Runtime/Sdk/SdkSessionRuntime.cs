@@ -126,9 +126,14 @@ internal sealed class SdkSessionRuntime(
     {
         ValidateProfile(profile);
         var sessionId = Guid.NewGuid().ToString();
+        var customAgents = SdkCustomAgentLoader.Load(profile, cwd);
         var host = await clients.AcquireAsync(profile, ct);
         var lifetime = new CancellationTokenSource();
-        var config = SdkSessionProfileMapper.Create(profile, cwd, sessionId);
+        var config = SdkSessionProfileMapper.Create(
+            profile,
+            cwd,
+            sessionId,
+            customAgents);
         config.OnPermissionRequest =
             permissions.CreateHandler(sessionId, Publish, lifetime.Token);
 
@@ -179,9 +184,13 @@ internal sealed class SdkSessionRuntime(
                 $"Session {sessionId} is already attached to an SDK runtime.");
         }
 
+        var customAgents = SdkCustomAgentLoader.Load(profile, cwd);
         var host = await clients.AcquireAsync(profile, ct);
         var lifetime = new CancellationTokenSource();
-        var config = SdkSessionProfileMapper.Resume(profile, cwd);
+        var config = SdkSessionProfileMapper.Resume(
+            profile,
+            cwd,
+            customAgents);
         config.OnPermissionRequest =
             permissions.CreateHandler(sessionId, Publish, lifetime.Token);
 

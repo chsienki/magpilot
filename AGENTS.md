@@ -250,6 +250,14 @@ already exist, its `session-state` entry must link to the Agent scanner's canoni
 `agents/` directory. Without that shared-state link, SDK sessions would be
 created outside `SessionScanner` and disappear from the HTTP API.
 
+The SDK does not discover a selected `.agent.md` merely because
+`SessionConfig.Agent` is set. `SdkCustomAgentLoader` resolves the selected
+definition from `<CopilotHome>/agents/` (or the default user/project agent
+locations), parses its frontmatter and prompt, and supplies it through
+`SessionConfig.CustomAgents` / `ResumeSessionConfig.CustomAgents`. The selected
+name must match that explicit configuration. Missing or malformed definitions
+fail before an SDK runtime session is created.
+
 SDK sessions will run with streaming enabled. `SdkTurnEventMapper` maps only
 the streaming message/reasoning deltas and ignores the SDK's final duplicate
 message events. `session.idle` is the authoritative successful turn boundary.

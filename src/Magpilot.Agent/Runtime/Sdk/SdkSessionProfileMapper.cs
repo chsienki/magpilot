@@ -7,7 +7,8 @@ internal static class SdkSessionProfileMapper
     public static SessionConfig Create(
         SessionRuntimeProfile profile,
         string workingDirectory,
-        string? sessionId = null)
+        string? sessionId = null,
+        IList<CustomAgentConfig>? customAgents = null)
     {
         return new SessionConfig
         {
@@ -16,6 +17,7 @@ internal static class SdkSessionProfileMapper
             Model = profile.Model,
             ReasoningEffort = profile.ReasoningEffort,
             Agent = profile.Agent,
+            CustomAgents = customAgents,
             Streaming = true,
             AvailableTools = OptionalList(profile.AvailableTools),
             DisabledMcpServers = OptionalList(profile.DisabledMcpServers),
@@ -25,7 +27,8 @@ internal static class SdkSessionProfileMapper
 
     public static ResumeSessionConfig Resume(
         SessionRuntimeProfile profile,
-        string workingDirectory)
+        string workingDirectory,
+        IList<CustomAgentConfig>? customAgents = null)
     {
         return new ResumeSessionConfig
         {
@@ -33,6 +36,7 @@ internal static class SdkSessionProfileMapper
             Model = profile.Model,
             ReasoningEffort = profile.ReasoningEffort,
             Agent = profile.Agent,
+            CustomAgents = customAgents,
             Streaming = true,
             AvailableTools = OptionalList(profile.AvailableTools),
             DisabledMcpServers = OptionalList(profile.DisabledMcpServers),

@@ -137,6 +137,13 @@ Custom Copilot homes use a validated layout: the directory must exist and its
 Magpilot. This preserves one durable session catalog even when tools, agents,
 and configuration are isolated.
 
+Selected custom agents are explicit SDK configuration, not an ambient CLI
+side effect. `SdkCustomAgentLoader` resolves `<name>.agent.md` from the selected
+Copilot home's `agents/` directory, or from the default user/project locations,
+then maps its description, prompt, tools, model, reasoning, and inference
+settings into `SessionConfig.CustomAgents`. `SessionConfig.Agent` names that
+entry. Missing or malformed definitions fail before session creation.
+
 The typed profile maps explicit disabled server names to
 `SessionConfig.DisabledMcpServers`. Restricted consumers disable the built-in
 GitHub MCP by naming its SDK runtime identifier, `github-mcp-server`; tool
