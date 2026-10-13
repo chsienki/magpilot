@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace Magpilot.Host;
 
 /// <summary>
@@ -41,6 +43,7 @@ internal static class PostSpawnDetector
 {
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
+    private const int ResumeEventTailBytes = 256 * 1024;
 
     private static string SessionStateRoot => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -142,6 +145,7 @@ internal static class PostSpawnDetector
         string? rootOverride = null)
     {
         var root = rootOverride ?? SessionStateRoot;
+        var startedAt = DateTime.UtcNow;
         var baseline = SnapshotSwitchCandidates(root, copilotPid);
         var alreadySwitched = FindNewerSession(
             baseline,
@@ -160,8 +164,16 @@ internal static class PostSpawnDetector
                             signal.SessionId,
                             currentSessionId,
                             StringComparison.Ordinal) &&
-                        (!baseline.TryGetValue(signal.SessionId, out var prior) ||
-                         signal.LastActivityUtc > prior.LastActivityUtc))
+                        (baseline.TryGetValue(signal.SessionId, out var prior)
+                            ? signal.LastActivityUtc > prior.LastActivityUtc ||
+                              (signal.ResumeEventId is not null &&
+                               !string.Equals(
+                                   signal.ResumeEventId,
+                                   prior.ResumeEventId,
+                                   StringComparison.Ordinal))
+                            : signal.CopilotLockWriteUtc is not null ||
+                              (signal.ResumeEventId is not null &&
+                               signal.LastActivityUtc >= startedAt)))
                     .OrderByDescending(signal => signal.LastActivityUtc)
                     .FirstOrDefault();
                 if (switched is not null)
@@ -194,6 +206,7 @@ internal static class PostSpawnDetector
                     signal.SessionId,
                     currentSessionId,
                     StringComparison.Ordinal) &&
+                signal.CopilotLockWriteUtc is not null &&
                 signal.LastActivityUtc > currentActivity)
             .OrderByDescending(signal => signal.LastActivityUtc)
             .Select(signal => signal.SessionId)
@@ -251,23 +264,33 @@ internal static class PostSpawnDetector
                 sessionDir,
                 $"inuse.{copilotPid}.lock");
             var hasCopilotLock = File.Exists(lockPath);
-            if (!hasCopilotLock &&
-                HasLiveLockOtherThan(sessionDir, copilotPid))
+            var hasOtherLiveLock =
+                !hasCopilotLock &&
+                HasLiveLockOtherThan(sessionDir, copilotPid);
+            ResumeSignal? resume = null;
+            if (hasOtherLiveLock)
             {
-                continue;
+                var eventsPath = Path.Combine(sessionDir, "events.jsonl");
+                resume = TryReadLatestConcurrentResume(eventsPath);
+                if (resume is null)
+                    continue;
             }
 
-            var lastActivity = hasCopilotLock
-                ? File.GetLastWriteTimeUtc(lockPath)
-                : DateTime.MinValue;
-            foreach (var artifact in new[] { "events.jsonl", "workspace.yaml" })
+            var lastActivity = resume?.TimestampUtc ??
+                (hasCopilotLock
+                    ? File.GetLastWriteTimeUtc(lockPath)
+                    : DateTime.MinValue);
+            if (!hasOtherLiveLock)
             {
-                var path = Path.Combine(sessionDir, artifact);
-                if (!File.Exists(path))
-                    continue;
-                var writeTime = File.GetLastWriteTimeUtc(path);
-                if (writeTime > lastActivity)
-                    lastActivity = writeTime;
+                foreach (var artifact in new[] { "events.jsonl", "workspace.yaml" })
+                {
+                    var path = Path.Combine(sessionDir, artifact);
+                    if (!File.Exists(path))
+                        continue;
+                    var writeTime = File.GetLastWriteTimeUtc(path);
+                    if (writeTime > lastActivity)
+                        lastActivity = writeTime;
+                }
             }
 
             if (lastActivity == DateTime.MinValue)
@@ -277,10 +300,75 @@ internal static class PostSpawnDetector
                 lastActivity,
                 hasCopilotLock
                     ? File.GetLastWriteTimeUtc(lockPath)
-                    : null);
+                    : null,
+                resume?.Id);
         }
 
         return result;
+    }
+
+    private static ResumeSignal? TryReadLatestConcurrentResume(
+        string eventsPath)
+    {
+        if (!File.Exists(eventsPath))
+            return null;
+
+        try
+        {
+            using var stream = new FileStream(
+                eventsPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            var start = Math.Max(0, stream.Length - ResumeEventTailBytes);
+            stream.Seek(start, SeekOrigin.Begin);
+            using var reader = new StreamReader(stream);
+            if (start > 0)
+                reader.ReadLine();
+
+            ResumeSignal? latest = null;
+            while (reader.ReadLine() is { } line)
+            {
+                if (!line.Contains("\"session.resume\"", StringComparison.Ordinal))
+                    continue;
+
+                try
+                {
+                    using var document = JsonDocument.Parse(line);
+                    var root = document.RootElement;
+                    if (!root.TryGetProperty("type", out var type) ||
+                        type.GetString() != "session.resume" ||
+                        !root.TryGetProperty("id", out var id) ||
+                        id.GetString() is not { Length: > 0 } eventId ||
+                        !root.TryGetProperty("timestamp", out var timestamp) ||
+                        !timestamp.TryGetDateTimeOffset(out var eventTime) ||
+                        !root.TryGetProperty("data", out var data) ||
+                        !data.TryGetProperty("alreadyInUse", out var alreadyInUse) ||
+                        alreadyInUse.ValueKind != JsonValueKind.True)
+                    {
+                        continue;
+                    }
+
+                    latest = new ResumeSignal(
+                        eventId,
+                        eventTime.UtcDateTime);
+                }
+                catch (JsonException)
+                {
+                    // A writer may still be appending the final line.
+                }
+            }
+
+            return latest;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     private static bool HasLiveLockOtherThan(
@@ -314,7 +402,12 @@ internal static class PostSpawnDetector
     private sealed record SessionSignal(
         string SessionId,
         DateTime LastActivityUtc,
-        DateTime? CopilotLockWriteUtc);
+        DateTime? CopilotLockWriteUtc,
+        string? ResumeEventId);
+
+    private sealed record ResumeSignal(
+        string Id,
+        DateTime TimestampUtc);
 
     /// <summary>
     /// True iff <paramref name="sessionDir"/> has at least one

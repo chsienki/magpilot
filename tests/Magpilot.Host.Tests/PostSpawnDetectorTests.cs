@@ -112,12 +112,7 @@ public sealed class PostSpawnDetectorTests : IDisposable
     {
         WriteSession("current", withLock: true);
         WriteSession("other", withLock: false);
-        File.WriteAllText(
-            Path.Combine(
-                _root,
-                "other",
-                $"inuse.{Environment.ProcessId}.lock"),
-            "");
+        WriteOtherLiveLock("other");
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1));
         var watch = PostSpawnDetector.WaitForSessionSwitchAsync(
             CopilotPid,
@@ -131,6 +126,64 @@ public sealed class PostSpawnDetectorTests : IDisposable
             DateTime.UtcNow);
 
         Assert.Null(await watch);
+    }
+
+    [Fact]
+    public async Task Watch_detects_concurrent_resume_without_copilot_lock()
+    {
+        WriteSession("current", withLock: true);
+        WriteSession("next", withLock: false);
+        WriteOtherLiveLock("next");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var watch = PostSpawnDetector.WaitForSessionSwitchAsync(
+            CopilotPid,
+            "current",
+            timeout.Token,
+            _root);
+
+        await Task.Delay(500, timeout.Token);
+        AppendResumeEvent("next", alreadyInUse: true);
+
+        Assert.Equal("next", await watch);
+    }
+
+    [Fact]
+    public async Task Watch_ignores_noncontended_resume_from_another_live_process()
+    {
+        WriteSession("current", withLock: true);
+        WriteSession("other", withLock: false);
+        WriteOtherLiveLock("other");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+        var watch = PostSpawnDetector.WaitForSessionSwitchAsync(
+            CopilotPid,
+            "current",
+            timeout.Token,
+            _root);
+
+        await Task.Delay(500);
+        AppendResumeEvent("other", alreadyInUse: false);
+
+        Assert.Null(await watch);
+    }
+
+    [Fact]
+    public async Task Watch_ignores_historical_concurrent_resume()
+    {
+        WriteSession("current", withLock: true);
+        var baseline = DateTime.UtcNow.AddMinutes(-1);
+        SetSessionTimes("current", baseline);
+        WriteSession("next", withLock: false);
+        WriteOtherLiveLock("next");
+        AppendResumeEvent("next", alreadyInUse: true);
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+        var switched = await PostSpawnDetector.WaitForSessionSwitchAsync(
+            CopilotPid,
+            "current",
+            timeout.Token,
+            _root);
+
+        Assert.Null(switched);
     }
 
     [Fact]
@@ -199,6 +252,24 @@ public sealed class PostSpawnDetectorTests : IDisposable
                 sessionId,
                 $"inuse.{CopilotPid}.lock"),
             "");
+
+    private void WriteOtherLiveLock(string sessionId) =>
+        File.WriteAllText(
+            Path.Combine(
+                _root,
+                sessionId,
+                $"inuse.{Environment.ProcessId}.lock"),
+            "");
+
+    private void AppendResumeEvent(string sessionId, bool alreadyInUse)
+    {
+        var line =
+            $"{{\"type\":\"session.resume\",\"data\":{{\"alreadyInUse\":{alreadyInUse.ToString().ToLowerInvariant()}}}," +
+            $"\"id\":\"{Guid.NewGuid():D}\",\"timestamp\":\"{DateTimeOffset.UtcNow:O}\",\"parentId\":\"{Guid.NewGuid():D}\"}}";
+        File.AppendAllText(
+            Path.Combine(_root, sessionId, "events.jsonl"),
+            line + Environment.NewLine);
+    }
 
     private void SetSessionTimes(string sessionId, DateTime timestamp)
     {

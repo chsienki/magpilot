@@ -829,12 +829,16 @@ one re-reads the file before writing).
 If the user runs Copilot's interactive `/resume`, the Copilot process stays
 alive while its active session changes. The launcher watches the session-state
 artifacts for its child PID (with an artifact-activity fallback when Copilot
-does not create a fresh lock), acquires the newly selected session, removes
-that PID's stale lock from the prior session, releases the prior lease, and
-moves its SSE subscription to the new session. Old-session cleanup is
-serialized so a quick switch back cannot race a background task that deletes
-the active lock. Failed handbacks retain their leases and are retried before
-launcher exit; re-acquiring a session cancels its pending cleanup.
+does not create a fresh lock). A target already held by the SDK is a special
+case: Copilot may append `session.resume` with `alreadyInUse=true` without
+creating its own lock. That explicit event proves the interactive switch;
+ordinary artifact activity under another live holder is never enough. The
+launcher then acquires the newly selected session, removes that PID's stale
+lock from the prior session, releases the prior lease, and moves its SSE
+subscription to the new session. Old-session cleanup is serialized so a quick
+switch back cannot race a background task that deletes the active lock. Failed
+handbacks retain their leases and are retried before launcher exit;
+re-acquiring a session cancels its pending cleanup.
 
 **SPA-side reactivity** (the inverse direction -- something else
 takes the session, the SPA notices): the SPA's `Apply()` reacts to

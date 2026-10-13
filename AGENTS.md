@@ -2007,6 +2007,13 @@ same child PID, triggers a transfer. As with startup detection, artifact
 activity on a session with no other live holder is the fallback for Copilot's
 empty-session case where it does not create a fresh lock:
 
+When `/resume` targets a session already held by the SDK, current Copilot can
+append `session.resume` with `data.alreadyInUse=true` without creating the
+terminal child's lock. The switch detector treats that explicit event as the
+ownership signal even though another live holder exists. Generic artifact
+activity under another live holder remains ignored; otherwise one CLI could
+release its real session when an unrelated web or terminal session writes.
+
 1. Politely notify and acquire the new session for the same launcher PID.
 2. Start treating the new lease/session as authoritative.
 3. Delete only the child's exact stale lock from the old session.
