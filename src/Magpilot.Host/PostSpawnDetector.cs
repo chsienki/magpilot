@@ -160,10 +160,9 @@ internal static class PostSpawnDetector
                             signal.SessionId,
                             currentSessionId,
                             StringComparison.Ordinal) &&
-                        (baseline.TryGetValue(signal.SessionId, out var prior)
-                            ? signal.LastActivityUtc > prior.LastActivityUtc
-                            : signal.CopilotLockWriteUtc is not null))
-                    .OrderByDescending(signal => signal.LastActivityUtc)
+                        (!baseline.TryGetValue(signal.SessionId, out var prior) ||
+                         signal.LockWriteUtc > prior.LockWriteUtc))
+                    .OrderByDescending(signal => signal.LockWriteUtc)
                     .FirstOrDefault();
                 if (switched is not null)
                     return switched.SessionId;
@@ -184,10 +183,10 @@ internal static class PostSpawnDetector
         IReadOnlyDictionary<string, SessionSignal> signals,
         string currentSessionId)
     {
-        var currentActivity = signals.TryGetValue(
+        var currentLockWrite = signals.TryGetValue(
             currentSessionId,
             out var current)
-            ? current.LastActivityUtc
+            ? current.LockWriteUtc
             : DateTime.MinValue;
         return signals.Values
             .Where(signal =>
@@ -195,9 +194,8 @@ internal static class PostSpawnDetector
                     signal.SessionId,
                     currentSessionId,
                     StringComparison.Ordinal) &&
-                signal.CopilotLockWriteUtc is not null &&
-                signal.LastActivityUtc > currentActivity)
-            .OrderByDescending(signal => signal.LastActivityUtc)
+                signal.LockWriteUtc > currentLockWrite)
+            .OrderByDescending(signal => signal.LockWriteUtc)
             .Select(signal => signal.SessionId)
             .FirstOrDefault();
     }
@@ -232,8 +230,7 @@ internal static class PostSpawnDetector
                 rootOverride ?? SessionStateRoot,
                 copilotPid)
             .Values
-            .Where(signal => signal.CopilotLockWriteUtc is not null)
-            .OrderByDescending(signal => signal.CopilotLockWriteUtc)
+            .OrderByDescending(signal => signal.LockWriteUtc)
             .Select(signal => signal.SessionId)
             .FirstOrDefault();
 
@@ -252,69 +249,22 @@ internal static class PostSpawnDetector
             var lockPath = Path.Combine(
                 sessionDir,
                 $"inuse.{copilotPid}.lock");
-            var hasCopilotLock = File.Exists(lockPath);
-            if (!hasCopilotLock &&
-                HasLiveLockOtherThan(sessionDir, copilotPid))
+            // Session artifacts can change under another terminal even when
+            // that terminal has no lock file.
+            if (!File.Exists(lockPath))
                 continue;
 
-            var lastActivity = hasCopilotLock
-                ? File.GetLastWriteTimeUtc(lockPath)
-                : DateTime.MinValue;
-            foreach (var artifact in new[] { "events.jsonl", "workspace.yaml" })
-            {
-                var path = Path.Combine(sessionDir, artifact);
-                if (!File.Exists(path))
-                    continue;
-                var writeTime = File.GetLastWriteTimeUtc(path);
-                if (writeTime > lastActivity)
-                    lastActivity = writeTime;
-            }
-
-            if (lastActivity == DateTime.MinValue)
-                continue;
             result[sessionId] = new SessionSignal(
                 sessionId,
-                lastActivity,
-                hasCopilotLock
-                    ? File.GetLastWriteTimeUtc(lockPath)
-                    : null);
+                File.GetLastWriteTimeUtc(lockPath));
         }
 
         return result;
     }
 
-    private static bool HasLiveLockOtherThan(
-        string sessionDir,
-        int copilotPid)
-    {
-        foreach (var lockPath in SafeEnumerateFiles(
-                     sessionDir,
-                     "inuse.*.lock"))
-        {
-            if (!TryParseLockPid(lockPath, out var pid) ||
-                pid == copilotPid)
-            {
-                continue;
-            }
-            try
-            {
-                using var process =
-                    System.Diagnostics.Process.GetProcessById(pid);
-                if (!process.HasExited)
-                    return true;
-            }
-            catch
-            {
-                // Dead holders do not exclude the fallback candidate.
-            }
-        }
-        return false;
-    }
-
     private sealed record SessionSignal(
         string SessionId,
-        DateTime LastActivityUtc,
-        DateTime? CopilotLockWriteUtc);
+        DateTime LockWriteUtc);
 
     /// <summary>
     /// True iff <paramref name="sessionDir"/> has at least one
@@ -322,17 +272,6 @@ internal static class PostSpawnDetector
     /// that is no longer alive. A directory with no locks at all
     /// returns false -- "dormant" is a different state from "stranded".
     /// </summary>
-    /// <summary>
-    /// Parse the PID out of an <c>inuse.&lt;pid&gt;.lock</c> path. Returns false
-    /// for any name that doesn't fit the <c>inuse.&lt;int&gt;.lock</c> shape.
-    /// </summary>
-    private static bool TryParseLockPid(string lockPath, out int pid)
-    {
-        pid = 0;
-        var parts = Path.GetFileName(lockPath).Split('.');
-        return parts.Length >= 3 && int.TryParse(parts[1], out pid);
-    }
-
     private static bool HasOnlyDeadLocks(string sessionDir)
     {
         var any = false;

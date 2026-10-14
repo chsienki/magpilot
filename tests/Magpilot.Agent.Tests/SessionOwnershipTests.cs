@@ -113,6 +113,25 @@ public sealed class SessionOwnershipTests : IDisposable
     }
 
     [Fact]
+    public async Task Host_lease_rejects_another_launcher_even_without_a_lock_file()
+    {
+        const string sessionId = "host-owned-without-lock";
+        WriteSession(sessionId);
+        var registry = CreateRegistry(new StubRuntime());
+        var ownerPid = Environment.ProcessId;
+        var first = await registry.AcquireForHostAsync(
+            sessionId, ownerPid, force: false, CancellationToken.None);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            registry.AcquireForHostAsync(
+                sessionId, ownerPid + 1, force: false, CancellationToken.None));
+
+        Assert.Contains($"host PID {ownerPid}", error.Message);
+        Assert.Equal(first.HostLeaseId, registry.GetState(sessionId)!.HostLeaseId);
+        Assert.Equal(ownerPid, registry.GetState(sessionId)!.HostPid);
+    }
+
+    [Fact]
     public async Task Force_adopt_evicts_the_complete_foreign_set()
     {
         const string sessionId = "force-adopt";

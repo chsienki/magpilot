@@ -1994,39 +1994,33 @@ When you add a new caller of `/messages` (or anything that drives
 the runtime), wrap it with the same retry-on-409 pattern. Don't re-implement
 ad hoc.
 
-**Pre-acquire release-request** (launcher side, `Magpilot.Host/Program.cs`):
-**every** `AcquireForHostAsync` call site fires
-`agent.FireReleaseRequestAsync` + a 500ms grace BEFORE acquiring. There
-are THREE: the two spawn paths -- known-sid (`--resume=<UUID>`) and
-post-spawn detection (no sid, picker, --continue) -- AND the
-resume-prompt take-back in `RunSessionLoopAsync` (the "Press enter to
-take it back" loop after a web hand-off). Without this courtesy the SPA
-only learns ownership flipped when its NEXT `/messages` POST returns 409
-(i.e. the user has to send before the UI updates) or on a manual refresh
-`/state` probe -- so a browser actively viewing the session shows no live
-"terminal took over" banner. The resume-loop site was missed originally
-and reintroduced exactly that symptom; keep the knock on ALL acquire
-sites. Failure of the broadcast is non-fatal; the existing 409 path still
-catches uncoordinated cases.
+**Handoff notification order depends on whether the target is known**
+(`Magpilot.Host/Program.cs`). An explicit, known session ID has a
+take-over prompt before its release-request; the resume-prompt
+take-back is also an explicit user action. Those paths notify
+subscribers before acquiring so the SPA can pause promptly. Automatic
+startup detection and interactive session-switch detection are guesses:
+they must call `AcquireForHostAsync` BEFORE broadcasting
+`release-request`. The atomic acquisition refuses another live host
+with 409, and a guessed target must never stop that other terminal
+first. `AutomaticHostAcquisition` enforces this order. A 409 after
+Copilot is already running stops that child to avoid concurrent writers;
+failure to notify after acquisition is reported but does not discard
+the acquired lease.
 
-**Interactive `/resume` transfers the terminal lease.** Copilot can switch the
-active session without replacing its process. Its old `inuse.<pid>.lock`
-remains, so a PID-only view makes both sessions look active. The launcher runs
-`PostSpawnDetector.WaitForSessionSwitchAsync` beside the SSE subscription. A
-new child lock, or activity advancing on another session already locked by the
-same child PID, triggers a transfer. As with startup detection, artifact
-activity on a session with no other live holder is the fallback for Copilot's
-empty-session case where it does not create a fresh lock:
+**Interactive `/resume` transfers the terminal lease when Copilot updates its
+child PID lock.** Copilot can switch the active session without replacing its
+process. Its old `inuse.<pid>.lock` can remain, so the watcher compares the
+child's lock timestamps. New or refreshed child locks trigger a transfer;
+artifact activity without a child lock is not proof of a switch.
 
-`session.resume` with `data.alreadyInUse=true` does not identify its writer.
-It is not proof that this launcher's child switched: another CLI can append it
-while this launcher watches. A switch into a session with another live holder
-needs a child PID lock; generic artifact activity and `session.resume` under
-that other live holder are ignored. The pre-launch `--resume` picker avoids
-this ambiguity for startup resumes; interactive `/resume` within the child
-may remain uncoordinated if Copilot does not create its lock.
+`session.resume` with `data.alreadyInUse=true` and `events.jsonl`/workspace
+mtime do not identify their writer. Even if a separate host's lock is absent,
+its activity is not evidence that this child switched. The pre-launch
+`--resume` picker avoids this ambiguity for startup resumes; interactive
+`/resume` may remain uncoordinated if Copilot does not create its lock.
 
-1. Politely notify and acquire the new session for the same launcher PID.
+1. Acquire the new session for the same launcher PID, then notify subscribers.
 2. Start treating the new lease/session as authoritative.
 3. Delete only the child's exact stale lock from the old session.
 4. Release the old lease so the Agent re-adopts it.

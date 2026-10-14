@@ -652,25 +652,11 @@ static async Task<(
 
             try
             {
-                try
-                {
-                    await agent.FireReleaseRequestAsync(
-                        nextSid,
-                        $"magpilot/{hostPid}",
-                        force: false);
-                    await Task.Delay(500);
-                }
-                catch (Exception ex)
-                {
-                    deferredErrors.Enqueue(
-                        "magpilot: release-request before session switch " +
-                        $"failed (non-fatal): {ex.Message}");
-                }
-
-                var acquired = await agent.AcquireForHostAsync(
-                    nextSid,
-                    hostPid,
-                    force: false);
+                var acquired = await AutomaticHostAcquisition.AcquireThenNotifyAsync(
+                    () => agent.AcquireForHostAsync(nextSid, hostPid, force: false),
+                    () => agent.FireReleaseRequestAsync(nextSid, $"magpilot/{hostPid}", force: false),
+                    ex => deferredErrors.Enqueue(
+                        $"magpilot: release-request after acquiring {nextSid} failed (non-fatal): {ex.Message}"));
                 var nextLease = acquired.HostLeaseId
                     ?? throw new InvalidOperationException(
                         "Agent acquired the switched session without " +
@@ -689,6 +675,26 @@ static async Task<(
                     deferredErrors,
                     childStopped: false,
                     activeSessionId: currentSid);
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Conflict)
+            {
+                await copilotHost.ShutdownGracefullyAsync(TimeSpan.FromSeconds(3));
+                deferredErrors.Enqueue(
+                    $"magpilot: session-switch {currentSid} -> {nextSid} was rejected ({ex.Message}); " +
+                    "stopping this terminal to avoid concurrent writers.");
+                pendingHandbacks[currentSid] = (leaseId, copilotHost.Pid);
+                await RetryPendingHandbacksAsync(
+                    agent, pendingHandbacks, deferredErrors,
+                    childStopped: true, activeSessionId: currentSid);
+                FlushDeferredErrors(deferredErrors);
+                return (5, currentSid, leaseId, Preempted: false,
+                    HandbackFailed: pendingHandbacks.Count > 0);
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                deferredErrors.Enqueue(
+                    $"magpilot: session-switch candidate {nextSid} disappeared ({ex.Message}); continuing on {currentSid}.");
+                pendingSwitch = null;
             }
             catch (Exception ex)
             {
@@ -913,28 +919,23 @@ static async Task<int> RunSessionLoopWithDetectionAsync(AgentClient agent, Wrapp
             return exit;
         }
 
-        try
-        {
-            await agent.FireReleaseRequestAsync(
-                detectedSid,
-                $"magpilot/{hostPid}",
-                force: false);
-            await Task.Delay(500);
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine(
-                "magpilot: release-request before acquire failed " +
-                $"(non-fatal): {ex.Message}");
-        }
-
         SessionStateInfo acquired;
         try
         {
-            acquired = await agent.AcquireForHostAsync(
-                detectedSid,
-                hostPid,
-                force: false);
+            acquired = await AutomaticHostAcquisition.AcquireThenNotifyAsync(
+                () => agent.AcquireForHostAsync(detectedSid, hostPid, force: false),
+                () => agent.FireReleaseRequestAsync(detectedSid, $"magpilot/{hostPid}", force: false),
+                ex => Console.Error.WriteLine(
+                    $"magpilot: release-request after acquiring {detectedSid} failed (non-fatal): {ex.Message}"));
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Conflict)
+        {
+            Console.Error.WriteLine(
+                $"magpilot: detected session {detectedSid} belongs to another driver ({ex.Message}); " +
+                "stopping this terminal to avoid concurrent writers.");
+            await copilotHost.ShutdownGracefullyAsync(TimeSpan.FromSeconds(3));
+            agent.Dispose();
+            return 5;
         }
         catch (Exception ex)
         {

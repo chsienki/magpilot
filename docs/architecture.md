@@ -263,11 +263,12 @@ binary stays as it is. The launcher:
    `POST /release { LeaseId }`, and either exits (with
    `--magpilot-exit-on-handoff`)
    or sits on a "Press <enter> to take it back" prompt.
-6. Before step 4's `acquire-for-host`, the launcher fires
-   `release-request` itself (with a 500ms grace) so any SPA tab
-   currently subscribed sees the SSE event and stops driving BEFORE
-   ownership flips. Without this courtesy the SPA only learns about
-   the takeover when its NEXT `/messages` POST returns 409.
+6. Known-ID takeovers and user-requested take-backs fire
+   `release-request` (with a 500ms grace) before `acquire-for-host`
+   so a SPA tab pauses before ownership flips. Automatically detected
+   startup sessions and interactive switches acquire FIRST, then notify.
+   A guessed session must not broadcast a release request to a different
+   terminal before the agent's atomic lease check rejects it.
 7. On PTY paths, applies the configured terminal palette to the outer
    terminal. The output pipeline consumes matching Copilot OSC 4/10/11 palette
    queries and answers them inside the PTY from that same configured theme.
@@ -833,17 +834,18 @@ one re-reads the file before writing).
 
 If the user runs Copilot's interactive `/resume`, the Copilot process stays
 alive while its active session changes. The launcher watches the session-state
-artifacts for its child PID (with an artifact-activity fallback when Copilot
-does not create a fresh lock and no other live holder exists). A
-`session.resume` event with `alreadyInUse=true` does not identify its writer,
-so it cannot justify releasing another launcher's session. A target with
-another live holder needs this child's PID lock before the launcher transfers
-ownership. The pre-launch picker resolves bare `--resume` to a UUID before
+artifacts for a new or refreshed lock belonging to its own child PID.
+`session.resume` events, `events.jsonl`, and workspace mtimes do not
+identify their writer, even if another terminal's lock is absent.
+None can authorize an automatic request to release that terminal.
+The pre-launch picker resolves bare `--resume` to a UUID before
 Copilot starts, avoiding the ambiguous case for startup resumes; an
-interactive `/resume` without a new lock can remain uncoordinated. On a
-confirmed switch, the launcher acquires the selected session, removes its stale
-lock from the prior session, releases the prior lease, and moves its SSE
-subscription to the new session. Old-session cleanup is serialized so a quick
+interactive `/resume` without a new child lock can remain uncoordinated.
+On a confirmed switch, the launcher acquires the selected session
+before notifying subscribers, removes its stale lock from the prior
+session, releases the prior lease, and moves its SSE subscription to
+the new session. A conflicting lease stops the child rather than
+allowing concurrent writers. Old-session cleanup is serialized so a quick
 switch back cannot race a background task that deletes the active lock. Failed
 handbacks retain their leases and are retried before launcher exit;
 re-acquiring a session cancels its pending cleanup.

@@ -57,7 +57,7 @@ public sealed class PostSpawnDetectorTests : IDisposable
     }
 
     [Fact]
-    public async Task Watch_returns_existing_locked_session_when_activity_advances()
+    public async Task Watch_ignores_activity_on_an_existing_child_lock()
     {
         WriteSession("current", withLock: true);
         WriteSession("next", withLock: true);
@@ -70,21 +70,21 @@ public sealed class PostSpawnDetectorTests : IDisposable
         File.SetLastWriteTimeUtc(
             Path.Combine(_root, "next", $"inuse.{CopilotPid}.lock"),
             baseline);
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1));
         var watch = PostSpawnDetector.WaitForSessionSwitchAsync(
             CopilotPid,
             "current",
             timeout.Token,
             _root);
 
-        await Task.Delay(500, timeout.Token);
+        await Task.Delay(500);
         File.SetLastWriteTimeUtc(eventsPath, DateTime.UtcNow);
 
-        Assert.Equal("next", await watch);
+        Assert.Null(await watch);
     }
 
     [Fact]
-    public async Task Watch_uses_activity_fallback_when_new_lock_is_missing()
+    public async Task Watch_ignores_activity_without_a_child_lock()
     {
         WriteSession("current", withLock: true);
         WriteSession("next", withLock: false);
@@ -94,6 +94,26 @@ public sealed class PostSpawnDetectorTests : IDisposable
         File.SetLastWriteTimeUtc(
             Path.Combine(_root, "next", "workspace.yaml"),
             baseline);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+        var watch = PostSpawnDetector.WaitForSessionSwitchAsync(
+            CopilotPid,
+            "current",
+            timeout.Token,
+            _root);
+
+        await Task.Delay(500);
+        File.SetLastWriteTimeUtc(eventsPath, DateTime.UtcNow);
+
+        Assert.Null(await watch);
+    }
+
+    [Fact]
+    public async Task Watch_detects_an_existing_child_lock_refreshed_by_a_switch()
+    {
+        WriteSession("current", withLock: true);
+        WriteSession("next", withLock: true);
+        var baseline = DateTime.UtcNow.AddMinutes(-1);
+        SetSessionTimes("next", baseline);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         var watch = PostSpawnDetector.WaitForSessionSwitchAsync(
             CopilotPid,
@@ -102,7 +122,9 @@ public sealed class PostSpawnDetectorTests : IDisposable
             _root);
 
         await Task.Delay(500, timeout.Token);
-        File.SetLastWriteTimeUtc(eventsPath, DateTime.UtcNow);
+        File.SetLastWriteTimeUtc(
+            Path.Combine(_root, "next", $"inuse.{CopilotPid}.lock"),
+            DateTime.UtcNow);
 
         Assert.Equal("next", await watch);
     }

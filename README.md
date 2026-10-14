@@ -90,8 +90,9 @@ ConPTY assets, supports granular opt-in/out controls for launcher-owned TUI
 changes, and includes repeatable capture/probe tools plus an offline theme
 editor. Bare `magpilot --resume` lists Copilot sessions before launching the CLI,
 so the selected session gets a terminal lease before Copilot loads it.
-Interactive Copilot `/resume` switches with a child-process lock transfer the
-terminal lease and web take-over subscription to the newly selected session.
+Interactive Copilot `/resume` switches with a new or refreshed child-process
+lock transfer the terminal lease and web take-over subscription to the
+newly selected session.
 The **Windows
 installer** + autoupdate path
 (`installer/magpilot.iss`, `magpilot --magpilot-update`, hub-mediated version
