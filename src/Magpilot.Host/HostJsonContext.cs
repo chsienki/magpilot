@@ -15,6 +15,7 @@ namespace Magpilot.Host;
 /// </summary>
 [JsonSourceGenerationOptions(System.Text.Json.JsonSerializerDefaults.Web)]
 [JsonSerializable(typeof(SessionStateInfo))]
+[JsonSerializable(typeof(List<SessionInfo>))]
 [JsonSerializable(typeof(AcquireForHostBody))]
 [JsonSerializable(typeof(ReleaseFromHostBody))]
 [JsonSerializable(typeof(ReleaseRequestBody))]

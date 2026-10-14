@@ -59,6 +59,14 @@ public sealed class AgentClient : IDisposable
         resp.EnsureSuccessStatusCode();
     }
 
+    public async Task<IReadOnlyList<SessionInfo>> ListSessionsAsync(CancellationToken ct = default)
+    {
+        using var resp = await _http.GetAsync("api/sessions", ct);
+        resp.EnsureSuccessStatusCode();
+        return await resp.Content.ReadFromJsonAsync(HostWebJsonContext.Default.ListSessionInfo, ct)
+            ?? throw new InvalidOperationException("Agent returned an empty sessions response.");
+    }
+
     public async Task<SessionStateInfo?> GetStateAsync(string sessionId, CancellationToken ct = default)
     {
         using var resp = await _http.GetAsync($"api/sessions/{sessionId}/state", ct);
@@ -74,7 +82,12 @@ public sealed class AgentClient : IDisposable
             new AcquireForHostBody(hostPid, force),
             HostWebJsonContext.Default.AcquireForHostBody,
             ct);
-        resp.EnsureSuccessStatusCode();
+        if (!resp.IsSuccessStatusCode)
+            throw new HttpRequestException(
+                $"Agent refused host acquisition for {sessionId} ({(int)resp.StatusCode}): " +
+                await resp.Content.ReadAsStringAsync(ct),
+                null,
+                resp.StatusCode);
         return (await resp.Content.ReadFromJsonAsync(HostWebJsonContext.Default.SessionStateInfo, ct))!;
     }
 

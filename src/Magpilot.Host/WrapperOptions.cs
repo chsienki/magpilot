@@ -116,10 +116,10 @@ public sealed record WrapperOptions(
     }
 
     /// <summary>
-    /// Inspect the forward-args for a <c>--resume[=&lt;sid&gt;]</c> token and
+    /// Inspect the forward-args for a <c>--resume[=&lt;sid&gt;]</c> or <c>-r</c> token and
     /// extract the session id if one was specified. Returns null if no
-    /// resume flag, or empty string if <c>--resume</c> with no value (which
-    /// the wrapper treats as "list sessions for this cwd").
+    /// resume flag, or empty string if the flag has no value (which
+    /// opens the pre-launch session picker).
     /// </summary>
     public string? ExtractResumeSessionId()
     {
@@ -128,7 +128,7 @@ public sealed record WrapperOptions(
             var a = ForwardArgs[i];
             if (a.StartsWith("--resume=", StringComparison.Ordinal))
                 return a["--resume=".Length..];
-            if (a == "--resume")
+            if (a is "--resume" or "-r")
                 return i + 1 < ForwardArgs.Count && !ForwardArgs[i + 1].StartsWith("-")
                     ? ForwardArgs[i + 1]
                     : "";
@@ -205,6 +205,11 @@ public sealed record WrapperOptions(
                                        as host-owned in the agent (no spawn). The agent's PID-liveness
                                        sweep handles cleanup when the copilot child eventually exits.
           --magpilot-help              print this help and exit
+
+        Copilot --resume (or -r) without a value opens Magpilot's session picker before
+        Copilot starts. Search by name, directory, or ID; select a numbered
+        result, use n/p to page, / to clear the filter, or q to cancel.
+        A supplied --resume=<value> remains a Copilot argument.
 
         Env:
           MAGPILOT_AGENT_URL           default http://127.0.0.1:5099

@@ -129,22 +129,22 @@ public sealed class PostSpawnDetectorTests : IDisposable
     }
 
     [Fact]
-    public async Task Watch_detects_concurrent_resume_without_copilot_lock()
+    public async Task Watch_ignores_concurrent_resume_from_another_live_process()
     {
         WriteSession("current", withLock: true);
         WriteSession("next", withLock: false);
         WriteOtherLiveLock("next");
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1));
         var watch = PostSpawnDetector.WaitForSessionSwitchAsync(
             CopilotPid,
             "current",
             timeout.Token,
             _root);
 
-        await Task.Delay(500, timeout.Token);
+        await Task.Delay(500);
         AppendResumeEvent("next", alreadyInUse: true);
 
-        Assert.Equal("next", await watch);
+        Assert.Null(await watch);
     }
 
     [Fact]

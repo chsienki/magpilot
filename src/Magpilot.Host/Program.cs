@@ -118,18 +118,52 @@ if (opts.Status)
     return 0;
 }
 
-// Resolve the session id from forward args. We only know it up front
-// for explicit --resume=<UUID> or --session-id=<UUID> -- everything else
-// (--resume="some name", --resume=<id-prefix>, --continue, no args +
-// interactive picker, new session) needs the post-spawn detection path
-// so we can still register HostOwnership with the agent and the SPA
-// shows it as Host-owned instead of Locked.
-var sid = opts.ExtractKnownSessionId();
-
 // PTY+detection only works when we own the terminal. Redirected stdio
 // (e.g. `echo /help | magpilot`) skips it and falls back to the
 // transparent passthrough -- the launcher can't see the bytes anyway.
 var canPty = !Console.IsInputRedirected && !Console.IsOutputRedirected;
+var pickedSession = false;
+
+if (opts.ExtractResumeSessionId() == "")
+{
+    if (!canPty)
+    {
+        Console.Error.WriteLine("magpilot: --resume needs an interactive terminal to select a session. Pass --resume=<UUID> instead.");
+        agent.Dispose();
+        return 2;
+    }
+
+    IReadOnlyList<SessionInfo> sessions;
+    try { sessions = await agent.ListSessionsAsync(); }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"magpilot: could not list sessions for --resume ({ex.GetType().Name}: {ex.Message}).");
+        agent.Dispose();
+        return 4;
+    }
+
+    var selected = ResumeSessionPicker.Choose(sessions, Environment.CurrentDirectory, Console.In, Console.Out);
+    if (selected is null)
+    {
+        agent.Dispose();
+        return 0;
+    }
+    try
+    {
+        opts = opts with { ForwardArgs = ResumeSessionPicker.WithSelectedSession(opts.ForwardArgs, selected.Id) };
+        pickedSession = true;
+    }
+    catch (ArgumentException ex)
+    {
+        Console.Error.WriteLine($"magpilot: {ex.Message}");
+        agent.Dispose();
+        return 2;
+    }
+}
+
+// Explicit UUIDs and picker selections can acquire the terminal lease
+// before Copilot starts. Other launch shapes still need post-spawn detection.
+var sid = opts.ExtractKnownSessionId();
 
 if (string.IsNullOrEmpty(sid))
 {
@@ -142,7 +176,7 @@ if (string.IsNullOrEmpty(sid))
     }
     // No specific session known up front. Spawn copilot in a PTY and
     // post-spawn-detect whichever session it ends up holding (fresh,
-    // picker-selected, --continue, etc.). Detection times out gracefully
+    // named resume, --continue, etc.). Detection times out gracefully
     // if copilot exits before taking a lock (e.g. `magpilot --version`).
     return await RunSessionLoopWithDetectionAsync(agent, opts);
 }
@@ -152,13 +186,21 @@ SessionStateInfo? state;
 try { state = await agent.GetStateAsync(sid); }
 catch (Exception ex)
 {
-    Console.Error.WriteLine($"magpilot: GET /state failed ({ex.GetType().Name}: {ex.Message}). Falling through.");
+    Console.Error.WriteLine($"magpilot: GET /state failed ({ex.GetType().Name}: {ex.Message}).");
     agent.Dispose();
+    if (pickedSession)
+        return 4;
     return await ExecRealCopilotAsync(opts.ForwardArgs, agentClient: null, opts.TuiOptions);
 }
 
 if (state is null)
 {
+    if (pickedSession)
+    {
+        Console.Error.WriteLine($"magpilot: selected session {sid} is no longer available. Retry --resume.");
+        agent.Dispose();
+        return 4;
+    }
     // Session unknown to the agent (scanner hasn't picked it up yet, or
     // a fresh sid the user pre-allocated via --session-id=<uuid>). We
     // have a UUID from ExtractKnownSessionId so we know which session
@@ -651,7 +693,7 @@ static async Task<(
             catch (Exception ex)
             {
                 deferredErrors.Enqueue(
-                    $"magpilot: session-switch lease transfer failed: {ex.Message}; retrying...");
+                    $"magpilot: session-switch {currentSid} -> {nextSid} lease transfer failed: {ex.Message}; retrying...");
                 pendingSwitch = nextSid;
                 await Task.Delay(TimeSpan.FromSeconds(2));
             }
@@ -661,7 +703,9 @@ static async Task<(
         var rrEvt = await preempted.Task;
         await copilotHost.ShutdownGracefullyAsync(
             TimeSpan.FromSeconds(rrEvt.Force ? 1 : 3));
-        Console.Out.Write("\r\n--- web took over this session ---\r\n");
+        Console.Out.Write(rrEvt.Requester == "spa"
+            ? "\r\n--- web took over this session ---\r\n"
+            : "\r\n--- another client requested this session ---\r\n");
         Console.Out.Write(
             $"   requester: {rrEvt.Requester}" +
             $"{(rrEvt.Force ? " (force)" : "")}\r\n");
@@ -720,6 +764,12 @@ static async Task RetryPendingHandbacksAsync(
                 sessionId,
                 handback.LeaseId);
             pending.TryRemove(sessionId, out _);
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            pending.TryRemove(sessionId, out _);
+            deferredErrors.Enqueue(
+                $"magpilot: cannot hand back {sessionId}: session no longer exists on disk.");
         }
         catch (Exception ex)
         {

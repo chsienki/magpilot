@@ -678,12 +678,23 @@ installer.
 | `magpilot --magpilot-version` | Print local + agent-reported version info |
 | `magpilot --magpilot-update` | Download + run the latest installer silently (validates SHA256 against the GitHub release asset) |
 | `magpilot --magpilot-pair=<bundle>` | Pair the agent with a hub. `<bundle>` is copied from the hub's `/admin/enroll` page; the launcher decodes it, upserts the three keys into `magpilot.env`, and bounces the installed scheduled task. |
+| `magpilot --resume` / `magpilot -r` | When the agent is reachable, list its Copilot session store in a searchable paged terminal picker, choose a UUID before launching Copilot, and use the known-session lease path. Supplied resume values are forwarded unchanged. |
 | `magpilot --magpilot-no-tui-changes` | Disable every launcher-owned TUI mutation: no background probe, no default `TERM`/`COLORTERM`, no setting or overriding `COLORFGBG`/`COPILOT_GITHUB_THEME`, no palette OSC, no output colour rewrite, and no injected banner. Inherited variables remain untouched, matching raw Copilot. Agent-coordinated sessions still require the PTY for ownership detection and graceful handoff; agentless passthrough direct-execs for raw-Copilot parity. |
 | `magpilot --magpilot-tui-options=<list>` | Positive allowlist of launcher-owned TUI mutations: `term`, `truecolor`, `background`, `github-theme`, `palette`, `thinking`, `input-band`, `legacy-colors`, `banner`; `rewrite` is a group alias for all three rewrite stages. Also accepts `all` (default) and `none`. `--magpilot-no-tui-changes` is an alias for `none`; specifying both is an error. |
 | `magpilot --magpilot-help` | Wrapper-only flag help |
 
 The banner check fires on **every** non-help, non-skip-check invocation
 with a 500ms timeout. Failures are silent. See `Magpilot.Host/UpdateBanner.cs`.
+
+The pre-launch picker consumes the agent's authenticated `GET /api/sessions`
+list; `SessionScanner` remains the single parser of Copilot's session store.
+Only UUID entries are selectable. A choice replaces bare `--resume` or `-r`
+with `--resume=<UUID>`, preserving other Copilot flags, so the launcher takes
+ownership before the child starts. Cancel or an empty list spawns nothing.
+Without an interactive terminal, bare `--resume` fails with a direct hint to
+provide a UUID. If the agent is unavailable, the existing explicit
+uncoordinated passthrough remains; `--magpilot-skip-check` still bypasses the
+picker. Interactive `/resume` inside a running Copilot is a separate path.
 
 ### Terminal theming (local client)
 
@@ -2007,12 +2018,13 @@ same child PID, triggers a transfer. As with startup detection, artifact
 activity on a session with no other live holder is the fallback for Copilot's
 empty-session case where it does not create a fresh lock:
 
-When `/resume` targets a session already held by the SDK, current Copilot can
-append `session.resume` with `data.alreadyInUse=true` without creating the
-terminal child's lock. The switch detector treats that explicit event as the
-ownership signal even though another live holder exists. Generic artifact
-activity under another live holder remains ignored; otherwise one CLI could
-release its real session when an unrelated web or terminal session writes.
+`session.resume` with `data.alreadyInUse=true` does not identify its writer.
+It is not proof that this launcher's child switched: another CLI can append it
+while this launcher watches. A switch into a session with another live holder
+needs a child PID lock; generic artifact activity and `session.resume` under
+that other live holder are ignored. The pre-launch `--resume` picker avoids
+this ambiguity for startup resumes; interactive `/resume` within the child
+may remain uncoordinated if Copilot does not create its lock.
 
 1. Politely notify and acquire the new session for the same launcher PID.
 2. Start treating the new lease/session as authoritative.

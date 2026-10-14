@@ -236,13 +236,18 @@ binary stays as it is. The launcher:
    status, help) and strips them before forwarding.
 2. Pings the agent. If unreachable, emits one warning and exec's the
    real `copilot` binary as a transparent passthrough.
-3. Resolves the target session id from argv: a UUID inside
-   `--resume=<UUID>` or `--session-id=<UUID>` is treated as known up
+3. Resolves the target session id from argv: bare `--resume` (or `-r`) queries the
+   agent's existing `GET /api/sessions` list and opens a searchable, paged
+   terminal picker before Copilot starts. The selected UUID replaces bare
+   `--resume` without changing other arguments. A UUID inside
+   `--resume=<UUID>` or `--session-id=<UUID>` is also known up
    front. For known sids, the launcher calls `GET /sessions/{id}/state`
    and prints an interactive Y/n/f take-over prompt when the session
    is currently agent-owned (auto-answered by `--magpilot-*` flags or
-   refused on non-TTY). For everything else (`--resume="some name"`,
-   `--resume=<id-prefix>`, `--continue`, picker mode, no args), the
+   refused on non-TTY). Canceling the picker spawns nothing; bare
+   `--resume` requires an interactive terminal while the agent is reachable.
+   For everything else (`--resume="some name"`,
+   `--resume=<id-prefix>`, `--continue`, no args), the
    launcher takes the post-spawn detection path: spawn copilot in a
    PTY, then watch the on-disk session-state directory until it can
    identify which session copilot ended up holding, and only then
@@ -829,11 +834,14 @@ one re-reads the file before writing).
 If the user runs Copilot's interactive `/resume`, the Copilot process stays
 alive while its active session changes. The launcher watches the session-state
 artifacts for its child PID (with an artifact-activity fallback when Copilot
-does not create a fresh lock). A target already held by the SDK is a special
-case: Copilot may append `session.resume` with `alreadyInUse=true` without
-creating its own lock. That explicit event proves the interactive switch;
-ordinary artifact activity under another live holder is never enough. The
-launcher then acquires the newly selected session, removes that PID's stale
+does not create a fresh lock and no other live holder exists). A
+`session.resume` event with `alreadyInUse=true` does not identify its writer,
+so it cannot justify releasing another launcher's session. A target with
+another live holder needs this child's PID lock before the launcher transfers
+ownership. The pre-launch picker resolves bare `--resume` to a UUID before
+Copilot starts, avoiding the ambiguous case for startup resumes; an
+interactive `/resume` without a new lock can remain uncoordinated. On a
+confirmed switch, the launcher acquires the selected session, removes its stale
 lock from the prior session, releases the prior lease, and moves its SSE
 subscription to the new session. Old-session cleanup is serialized so a quick
 switch back cannot race a background task that deletes the active lock. Failed

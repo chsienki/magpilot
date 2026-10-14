@@ -101,6 +101,24 @@ public class HostJsonContractTests
         Assert.True(state.RuntimeStatus.CanEditModel);
     }
 
+    [Fact]
+    public void Session_list_parses_with_source_generated_metadata()
+    {
+        const string wire = """
+        [{"id":"11111111-1111-4111-8111-111111111111","state":2,
+          "cwd":"D:\\work","repository":null,"branch":null,
+          "summary":"Helix Caching","ownerPid":null,"createdAt":null,
+          "updatedAt":"2026-10-13T19:00:00Z","yolo":false}]
+        """;
+
+        var sessions = JsonSerializer.Deserialize(wire, HostWebJsonContext.Default.ListSessionInfo);
+
+        var session = Assert.Single(sessions!);
+        Assert.Equal("Helix Caching", session.Summary);
+        Assert.Equal(SessionState.Dormant, session.State);
+        Assert.Equal("D:\\work", session.Cwd);
+    }
+
     // UDP discovery replies are parsed with the General context; the property
     // names are pinned by explicit [JsonPropertyName] tags.
     [Fact]
