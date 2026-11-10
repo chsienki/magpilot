@@ -1,176 +1,222 @@
-# Magpilot Windows installer
+# Windows agent and launcher
 
-This directory holds the [Inno Setup](https://jrsoftware.org/isinfo.php)
-installer for the Windows-side magpilot components (agent + launcher).
+The Windows x64 installer adds a per-host Magpilot agent and the `magpilot`
+terminal command. The agent runs as an interactive user so it can access that
+user's Copilot authentication, projects, and session store.
 
-## What it produces
+You need a reachable [hub](../deploy/README.md), GitHub Copilot access, and an
+installed, authenticated [Copilot CLI](https://github.com/github/copilot-cli)
+for terminal use. The agent's SDK runtime is bundled separately.
 
-`installer\installer-output\magpilot-setup-<version>.exe` -- a per-machine installer
-that:
+## Install
 
-- Lays down `%ProgramFiles%\Magpilot\agent\` (self-contained .NET 9 publish
-  of `Magpilot.Agent`) and `%ProgramFiles%\Magpilot\bin\magpilot.exe` (the
-  launcher).
-- Optionally adds `%ProgramFiles%\Magpilot\bin` to system PATH.
-- Optionally registers `MagpilotAgent` as a Scheduled Task at user logon
-  (runs as the interactive user, NOT `SYSTEM`, so `~/.copilot/` is
-  reachable).
-- Optionally opens Windows Firewall for `TCP 5099` + `UDP 47823` (LAN +
-  WireGuard CIDRs).
-- Writes a placeholder `%ProgramFiles%\Magpilot\config\magpilot.env`
-  with a randomly-generated `MAGPILOT_AGENT_TOKEN` and commented-out
-  `MAGPILOT_HUB_URL`. The real values get filled in post-install by
-  pairing (see below) -- the wizard collects no secrets, no hub URL,
-  no agent token.
-- Kicks off interactive pairing (`magpilot --magpilot-pair`) in a
-  visible console as the final install step. The launcher
-  UDP-broadcasts to find a hub, submits a pairing claim, opens the
-  user's browser to the hub's `/admin/agents?pending=<id>` page,
-  and long-polls for an admin to click **Adopt**. On approval the
-  hub mints a fresh per-agent token, the launcher upserts it into
-  `magpilot.env`, and bounces the scheduled task.
+Run in PowerShell:
 
-The launcher's own `magpilot --magpilot-update` subcommand downloads the
-latest installer and runs it with `/SILENT`. Existing `magpilot.env`
-keys (hub URL + agent token) survive the silent re-install untouched,
-so an upgrade does NOT require re-pairing.
-
-### Partial upgrade detection
-
-The agent and launcher are separate installed binaries and must be checked
-independently. Long-running `magpilot` sessions can keep the Native AOT
-launcher image mapped while the installer successfully replaces the agent,
-leaving a newer agent beside an older launcher:
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:5099/api/version
-(Get-Item 'C:\Program Files\Magpilot\bin\magpilot.exe').VersionInfo.ProductVersion
+```pwsh
+irm https://raw.githubusercontent.com/chsienki/magpilot/main/scripts/install.ps1 | iex
 ```
 
-Agents from v0.1.34 onward cache release metadata and recompute
-`updateAvailable` from the launcher's `/api/version/latest?from=<version>`
-query, so this split keeps offering the installer instead of falsely reporting
-"up to date." Close the remaining launcher sessions and rerun the update, or
-repair without interrupting them by renaming the installed executable to a
-timestamped backup and copying the new `magpilot.exe` into its original path;
-running processes continue from the mapped backup while new sessions load the
-replacement.
+Or download `magpilot-setup-<version>.exe` from
+[Releases](https://github.com/chsienki/magpilot/releases).
+The script downloads the installer and matching `.sha256` asset, verifies the
+checksum, then requests UAC elevation. The installer is **unsigned**;
+checksum verification is not an Authenticode signature, and Windows may show
+a SmartScreen warning.
 
-Agents from v0.1.36 also expose composite version status and an authenticated
-immediate-refresh endpoint. The hub's `/admin/agents` page uses it to bypass
-the 15-minute poll without installing remotely; older agents remain visible
-through the two legacy read endpoints and show "Scheduled checks only."
+Select the agent and launcher components and the desired PATH, scheduled-task,
+and firewall options. The wizard asks for no hub URL or tokens.
 
-## Building locally
+With the agent's logon task selected, setup:
 
-You need Inno Setup 6 installed (e.g. `winget install JRSoftware.InnoSetup`).
+1. Preserves an existing `magpilot.env`, or creates a disconnected one with a
+   cryptographically random agent bearer.
+2. Registers `MagpilotAgent` at user logon, running as that user rather than
+   `SYSTEM`, and starts the agent executable directly.
+3. Starts interactive pairing. Cancellation or pairing failure leaves the
+   installed files and existing settings intact.
 
-```powershell
-# From the repo root.
-$ver = (Get-Content VERSION).Trim()
+Open a new terminal for the updated `PATH`.
 
-dotnet publish src\Magpilot.Agent -c Release -r win-x64 --self-contained `
-    -p:PublishSingleFile=false -o publish\agent
-dotnet publish src\Magpilot.Host\Magpilot.Host.csproj -c Release -r win-x64 `
-    -o publish\bin
+### Installed layout
 
-& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
-    /DAppVersion=$ver /DPublishDir="$PWD\publish" installer\magpilot.iss
-
-# Resulting installer:
-ls installer\installer-output\magpilot-setup-$ver.exe
-```
-
-`Magpilot.Host` has `PublishAot=true`, so its publish produces one native
-`magpilot.exe`; Porta.Pty supplies `conpty.dll` plus matching
-`x64\OpenConsole.exe` and `arm64\OpenConsole.exe` hosts. The executable embeds
-the launcher code: a local hotpatch must replace `magpilot.exe`. Copying a
-managed `magpilot.dll` beside the installed executable has no effect.
-
-## Files
-
-| File | Purpose |
-|---|---|
-| `magpilot.iss` | Inno Setup script. Defines components, tasks, PATH/scheduled-task wire-up, and the post-install `--magpilot-pair` hand-off. No wizard pairing fields -- pairing happens post-install. |
-| `install-task.ps1` | Registers the `MagpilotAgent` scheduled task at user logon. Loads `magpilot.env` before exec'ing the agent. |
-| `uninstall-task.ps1` | Stops + unregisters the scheduled task. Idempotent. |
-| `firewall.ps1` | Adds/removes the two inbound firewall rules. |
-
-## What's NOT signed
-
-The installer is currently unsigned. Users will see a SmartScreen warning
-on first run; "More info" -> "Run anyway". This is a personal-use tool;
-EV/OV code-signing is not worth the cost.
-
-## Layout produced
-
-```
+```text
 %ProgramFiles%\Magpilot\
-  agent\
-    Magpilot.Agent.exe       (self-contained .NET 9)
-    *.dll, runtime, etc.
-    start.ps1                (auto-generated by install-task.ps1)
-  bin\
-    magpilot.exe             (the launcher)
-    conpty.dll               (current app-local ConPTY)
-    x64\OpenConsole.exe
-    arm64\OpenConsole.exe
-  config\
-    magpilot.env             (hub URL + per-agent token, written by
-                              `magpilot --magpilot-pair` post-install)
+  agent\Magpilot.Agent.exe       Self-contained .NET 9 service
+  agent\...                     Bundled SDK runtime and dependencies
+  bin\magpilot.exe              Native AOT .NET 10 launcher
+  bin\conpty.dll                App-local PTY support
+  bin\x64\OpenConsole.exe
+  bin\arm64\OpenConsole.exe
+  config\magpilot.env            Pairing and local settings
   install-task.ps1
   uninstall-task.ps1
   firewall.ps1
 ```
 
-## Headless / SSH-driven install
+The scheduled task launches `Magpilot.Agent.exe` directly; there is no
+generated `start.ps1` wrapper. The installer does not replace `copilot` on
+`PATH`. Copilot sessions remain under the user's `.copilot/session-state`,
+not under Program Files.
 
-The wizard expects a UAC-elevated console session. If you want to
-install without one (e.g. via `ssh` + a one-shot scheduled task
-running as SYSTEM, or any other automation that bypasses a console
-user), you have to tell `install-task.ps1` which user the agent
-should run as -- the installer can't figure it out from a SYSTEM
-context (Win32_ComputerSystem.UserName is null, the env-var fallback
-resolves to the machine account `MACHINE$` which Windows refuses as
-a task principal).
+## Pairing
 
-Two ways to handle this:
+### Interactive discovery
 
-1. **Pass the user via the installer's env.** Before invoking the
-   installer, set `USERNAME` and `USERDOMAIN` to a real user
-   (e.g. inside the SSH session, the user shell already has these
-   set correctly). The `.iss` `GetCallerUser()` helper reads
-   `GetEnv("USERNAME") / GetEnv("USERDOMAIN")` and passes them to
-   `install-task.ps1` as `-User`.
-2. **Re-run `install-task.ps1` manually after the installer.**
-   Invoke `install-task.ps1 -InstallDir 'C:\Program Files\Magpilot' -User 'DOMAIN\name'`
-   from an elevated context (e.g. SSH + a SYSTEM-context scheduled
-   task that runs the script with the explicit `-User`). This is
-   the reliable path; see `installer/` history for the
-   `hand-register-task.ps1` pattern.
+Setup starts this flow; repeat it with:
 
-When `install-task.ps1` can't determine a user, it exits with code
-2 and prints a clear error telling you to pass `-User`. The
-installer's main log (`/LOG=<path>`) captures all `RunPwsh` exit
-codes so silent failures are diagnosable.
-
-### Pairing in a headless install
-
-V3 interactive pairing (`magpilot --magpilot-pair`) expects an
-interactive console and an open browser to click **Adopt**.
-Neither exists in an SSH/SYSTEM context, so `install-task.ps1`
-will log a `Write-Warning` and leave the agent in the
-"disconnected" state (placeholder `magpilot.env` with no
-`MAGPILOT_HUB_URL` set).
-
-To finish pairing headlessly, mint an enrollment bundle on the
-hub's `/admin/enroll` page and run the non-interactive V2a path
-from the target user's session (not SYSTEM):
-
-```powershell
-magpilot --magpilot-pair=<magpilot2+...>
+```pwsh
+magpilot --magpilot-pair
 ```
 
-The launcher decodes the bundle, POSTs to `/api/enroll/redeem`,
-writes the env, and bounces the scheduled task -- no UDP, no
-browser, no console picker.
+The launcher broadcasts on UDP 47824, chooses the only responding hub or asks
+you to select one, and opens its **Agents** page. Compare the six-character
+fingerprint in the console with the pending request before clicking **Adopt**.
+Claims expire after five minutes.
+
+Approval writes `MAGPILOT_HUB_URL` and a minted `MAGPILOT_AGENT_TOKEN` into
+`config\magpilot.env`, preserving unrelated settings, then restarts the
+installed task. This flow **does not receive a hub bearer**. Session access
+works without one, but agent log forwarding and release polling need
+`MAGPILOT_HUB_BEARER`; provision it separately or use the bundle flow below.
+
+Only allow mutually trusted hub users. Pending claims are visible to all
+authenticated users and are not restricted to the administrator or an intended
+owner. See the [authentication model](../docs/architecture.md#trust-boundaries).
+
+### Enrollment bundle
+
+Use `/admin/enroll` on the hub to create a bundle. It expires after 15 minutes
+and its voucher is single-use:
+
+```pwsh
+magpilot "--magpilot-pair=<bundle>"
+```
+
+This bypasses UDP discovery and the local browser. Redemption writes the hub
+URL, fresh agent token, and the bundle's hub bearer. The signed-in user who
+issued the voucher becomes the agent owner. Keep the bundle secret: its
+infrastructure bearer can reach every agent through the hub.
+
+Pairing does not itself solve hub-to-agent routing. A host whose address cannot
+be discovered still needs a reachable URL in the hub registry; see
+[cross-network discovery](../deploy/README.md#discovery-across-networks).
+
+### Custom settings files and provisioning
+
+`MAGPILOT_ENV_FILE` overrides the native agent's settings load path and the
+launcher's **pairing output** path. When it is set, pairing writes that file
+without restarting the installed task, so development and provisioning cannot
+bounce an unrelated agent.
+
+Normal launcher connection/theme lookup still uses process environment
+variables or the settings file relative to its executable; it does not read
+the pairing-output override. Export the appropriate `MAGPILOT_AGENT_URL` and
+`MAGPILOT_AGENT_TOKEN` when using a launcher against a custom source agent.
+
+Pairing defaults to the current hostname; `MAGPILOT_AGENT_NAME` can choose the
+name being enrolled. It does not rename an agent's discovery identity. For
+containers, enroll the actual container hostname.
+
+Settings-file writes preserve comments and unrelated keys. Restart a running
+agent after changing settings. Native agent environment variables already set
+in its process override values loaded from the file.
+
+## Updates and revocation
+
+```pwsh
+magpilot --magpilot-version
+magpilot --magpilot-update
+```
+
+The updater uses release metadata cached by the local agent, downloads the
+matching installer and checksum, then runs setup with `/SILENT`. The hub's
+**Check for agent updates** action refreshes metadata; it never installs on
+remote machines. See [update discovery](../deploy/README.md#windows-update-discovery).
+
+Existing configuration survives setup. The task helper also attempts
+interactive pairing during an upgrade; cancelling that attempt does not erase
+the preserved configuration. Close other terminal sessions before updating
+when possible: mapped executables can leave a partial upgrade.
+
+The agent and launcher are separate binaries. Check both when an update looks
+incomplete:
+
+```pwsh
+Invoke-RestMethod http://127.0.0.1:5099/api/version
+(Get-Item 'C:\Program Files\Magpilot\bin\magpilot.exe').VersionInfo.ProductVersion
+```
+
+Release availability is compared with the launcher's version, not just the
+agent's, so an older launcher can still offer an update beside a newer agent.
+Close remaining launcher sessions and rerun setup if necessary; copying a
+managed `magpilot.dll` beside the Native AOT executable does not update it.
+
+To revoke a host, use **Revoke** on the hub's **Agents** page. Subsequent
+proxied requests return `410 Gone`. Re-pairing with fresh credentials restores
+access.
+
+## Service and firewall operations
+
+```pwsh
+Get-ScheduledTaskInfo -TaskName MagpilotAgent
+Stop-ScheduledTask -TaskName MagpilotAgent
+Start-ScheduledTask -TaskName MagpilotAgent
+```
+
+The default inbound firewall rules allow TCP 5099 and UDP 47823 from RFC1918
+private ranges. Other VPN source ranges require an explicit policy:
+
+```pwsh
+& 'C:\Program Files\Magpilot\firewall.ps1' -Action Add `
+    -RemoteAddress '192.168.0.0/16','10.0.0.0/8','172.16.0.0/12'
+```
+
+Do not expose the plaintext agent API to the public internet.
+
+## Scripted and headless installation
+
+Bootstrap parameters are `-Repo`, `-Version`, `-Silent`, and `-DryRun`:
+
+```pwsh
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/chsienki/magpilot/main/scripts/install.ps1))) -Silent
+```
+
+`-DryRun` downloads and verifies without executing. `-Version` selects a
+published semver; `-Repo` selects a fork or mirror. Anonymous downloads require
+a public repository and published release assets, not a draft.
+
+`-Silent` suppresses the installer wizard; it does not eliminate UAC or make
+interactive pairing headless. Finish unattended provisioning with the bundle
+flow in the target user's context.
+
+If setup runs from SSH or `SYSTEM`, explicitly register the intended logon
+user rather than a machine account:
+
+```pwsh
+& 'C:\Program Files\Magpilot\install-task.ps1' `
+    -InstallDir 'C:\Program Files\Magpilot' -User 'DOMAIN\user'
+```
+
+The helper tries its explicit user, console user, active `quser` session, then
+environment identity, rejecting machine accounts. It exits with code 2 if none
+resolves. Inspect an Inno Setup `/LOG=<path>` log for helper exit codes.
+
+## Build the installer
+
+From the repository root, use Windows x64, the .NET 10 SDK, the Native AOT
+C++/Windows SDK toolchain, and [Inno Setup 6](https://jrsoftware.org/isinfo.php).
+The release workflow also builds and tests the solution before packaging.
+
+```pwsh
+$version = (Get-Content VERSION).Trim()
+dotnet publish .\src\Magpilot.Agent -c Release -r win-x64 --self-contained `
+    -p:PublishSingleFile=false -o .\publish\agent
+dotnet publish .\src\Magpilot.Host -c Release -r win-x64 -o .\publish\bin
+& 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' `
+    "/DAppVersion=$version" "/DPublishDir=$PWD\publish" .\installer\magpilot.iss
+Get-Item ".\installer\installer-output\magpilot-setup-$version.exe"
+```
+
+Keep the launcher's app-local `conpty.dll` and architecture-specific
+`OpenConsole.exe` files beside the published executable. The presence of both
+OpenConsole architectures does not make the x64 launcher an ARM64 package.

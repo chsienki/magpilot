@@ -1,1031 +1,385 @@
-# Magpilot Architecture
+# Architecture and API
 
-> A guided tour of how Magpilot is put together: what each process does, how
-> they find each other, how a single user prompt flows through the system,
-> and how external sidecars (WhatsApp, cron, Preflight) plug in without the
-> hub or agents having to know about them.
+Magpilot connects browsers and local terminals to Copilot sessions on real
+hosts. The hub is the browser's front door; agents run Copilot and keep session
+state on their own machines. A terminal launcher coordinates exclusive
+ownership with the local agent.
 
-## At a glance
+For installation and networking, use the [deployment guide](../deploy/README.md).
+For implementation rules and the source-development loop, use
+[AGENTS.md](../AGENTS.md). [Design notes](plan.md) explain the trade-offs and
+remaining limits.
 
-```
-                        BROWSER / PHONE
-                              |
-                              | HTTPS (cookie auth)
-                              v
-                       +---------------+
-                       |  Magpilot Hub |     <-- the only thing exposed to NPM/the LAN
-                       |  (ASP.NET 9)  |
-                       +---------------+
-                          ^         ^
-                 hub<->agent       hub<->agent
-                  HTTP+SSE          HTTP+SSE
-        (agent bearer auth)     (agent bearer auth)
-                       |        |        |
-              +--------+        |        +-----------+
-              |                 |                    |
-    +-------------------+ +-------------------+ +-------------------+
-    | HENDRIK agent     | | SANDBOX agent     | | Magnus agent      |
-    | (Win, dev box)    | | (Win VM)          | | (LXC 102, Linux)  |
-    | spawns copilot.exe| | spawns copilot.exe| | spawns copilot    |
-    |                   | |                   | | (always-on        |
-    |                   | |                   | |  pinned session)  |
-    +-------------------+ +-------------------+ +-------------------+
-              ^                                          ^
-              |                                          |
-        UDP discovery                                    | direct HTTP
-        broadcast 47823                                  | (agent bearer)
-                                                         |
-                                            +------------+------------+
-                                            |                         |
-                                  +-------------------+   +-------------------+
-                                  | magpilot-cron     |   | magpilot-whatsapp |
-                                  | (host crond +     |   | (Node + Baileys   |
-                                  |  bash script)     |   |  + Fastify)       |
-                                  +-------------------+   +-------------------+
-                                                                  ^
-                                                                  | WA Web protocol
-                                                                  | (Signal-style E2EE)
-                                                                  v
-                                                              WHATSAPP
+## Components
+
+```text
+Browser -- HTTPS --> Hub -- HTTP + SSE --> Agent -- stdio --> Copilot runtime
+                                           ^
+                                           |
+Terminal --> magpilot --> installed Copilot CLI
+                   local ownership protocol
+
+External clients -------------------------> Agent HTTP API
 ```
 
-Key shapes to keep in mind:
-
-- **One Hub, many Agents.** The hub doesn't run Copilot — agents do. The hub
-  is the user-facing front door (browser SPA, REST/SSE, identity).
-- **Sidecars talk to the agent's HTTP API directly.** They don't reach into
-  the hub, and they aren't known to the hub. (Cron and WhatsApp both live on
-  LXC 102 next to Magnus, so "talk directly to :5099" means localhost.)
-- **The SPA is the only client that goes through the hub** for per-agent
-  data. Service callers (cron, WA) bypass the hub by talking to a specific
-  agent they were configured for.
-
-## The processes, in detail
-
-### Magpilot Hub (`Magpilot.Hub`)
-
-ASP.NET 9 Web app. Single container at `/srv/magpilot/`, host networking,
-port 7088 behind Nginx Proxy Manager (`magpilot.home.sienkiewi.cz`).
-
-Responsibilities:
-
-- Serves the **Blazor WebAssembly SPA** (the wwwroot is built into the hub
-  image at compile time -- no separate static-host needed).
-- Holds the **agent registry**: known per-host agents with their URL,
-  bearer token, enrollment lineage, and
-  last-heartbeat timestamp. SQLite-backed (`hub.db`) so it survives a
-  hub restart; the UDP discovery sweep refreshes URLs for
-  reachable LAN agents on each pass.
-- Performs **agent discovery** every N seconds: broadcasts a UDP probe on
-  port 47823. Online agents reply with `{name, url}`. A
-  WireGuard-only host (e.g. Sandbox on a `/32`) never receives the
-  broadcast, so its URL is seeded once in `hub.db` and
-  persist across restarts + re-pairs.
-- **Proxies** SPA-initiated calls to the right agent: browser hits
-  `https://magpilot.../api/agents/magnus/sessions`, hub looks up `magnus`
-  in the registry, forwards the call with the agent bearer token.
-- **Three named HttpClients per agent** (`agent`, `agent-action`,
-  `agent-stream`) registered in `Program.cs` and dispensed by
-  `AgentHttpClient.ClientFor(name, kind)`:
-
-  | Kind                       | Timeout       | Used for                                                                                        |
-  |----------------------------|---------------|-------------------------------------------------------------------------------------------------|
-  | `AgentClientKind.Read`     | 10s (default) | Control-plane GETs (registry, sessions list, host state). Fail-fast so a dead agent can't stall SPA aggregation. |
-  | `AgentClientKind.Action`   | 90s (default) | Runtime mutations: `POST /sessions`, `POST /sessions/{id}/adopt`, `/model`, `/take-over`. Session creation/load can spend ~5-30s loading plugins or replaying history; under 10s the hub returned 502 and marked the agent OFFLINE despite it being healthy. |
-  | `AgentClientKind.Stream`   | infinite      | SSE proxy + `quick-prompt` (long-poll service caller).                                          |
-
-  Tunable via `Hub:AgentHttpTimeoutSec` and `Hub:AgentActionTimeoutSec`.
-  **Regression rule:** any new mutating endpoint must request `Action`;
-  fire-and-forget routes like `/messages` (which return 202 immediately)
-  can stay on `Read`.
-- **OAuth** for browser users (GitHub OAuth, allowlisted username; or
-  `MAGPILOT_DEV_BYPASS_AUTH=true` for `/dev-login`). Cookie auth.
-
-The hub does **not** know about cron jobs, WhatsApp, or Preflight. Those
-are external clients of the agent API.
-
-### Magpilot Agent (`Magpilot.Agent`)
-
-ASP.NET 9 Web app, one per host (HENDRIK, SANDBOX, Magnus). Listens on
-TCP 5099 + UDP 47823.
-
-Responsibilities:
-
-- Owns the active **Copilot SDK session runtime** behind
-  `IAgentSessionRuntime`.
-- Maintains **sessions**: maps a Magpilot session id to a runtime session id
-  and a CWD. State persists in `~/.copilot/session-state/` (events.jsonl
-  per session). Adopts dormant sessions on demand when the SPA opens one.
-- Serves the **agent HTTP API** (see below). Bearer-auth protected
-  with `MAGPILOT_AGENT_TOKEN` (shared secret with the hub).
-- Replies to UDP discovery probes with name + URL.
-
-The HTTP endpoints, session registry, cooperative handoff, and turn watchdog
-depend only on `IAgentSessionRuntime`. This keeps lifecycle orchestration
-testable without leaking SDK types into the HTTP and ownership layers.
-`SessionRuntimeProfile` carries the complete configuration needed to create or
-restore a session.
-
-The Agent also owns a lazy `SdkClientPool`. It uses the public .NET Copilot SDK
-with `CopilotClientMode.CopilotCli` and the supported out-of-process stdio
-transport. Clients are keyed by `CopilotHome`/SDK `BaseDirectory`; session
-configuration is mapped separately. Merely starting Magpilot.Agent does not
-start an SDK runtime; the first SDK-backed session starts it.
-
-Custom Copilot homes use a validated layout: the directory must exist and its
-`session-state` entry must link to the canonical session store scanned by
-Magpilot. This preserves one durable session catalog even when tools, agents,
-and configuration are isolated.
-
-Selected custom agents are explicit SDK configuration, not an ambient CLI
-side effect. `SdkCustomAgentLoader` resolves `<name>.agent.md` from the selected
-Copilot home's `agents/` directory, or from the default user/project locations,
-then maps its description, prompt, tools, model, reasoning, and inference
-settings into `SessionConfig.CustomAgents`. `SessionConfig.Agent` names that
-entry. Missing or malformed definitions fail before session creation.
-
-The typed profile maps explicit disabled server names to
-`SessionConfig.DisabledMcpServers`. Restricted consumers disable the built-in
-GitHub MCP by naming its SDK runtime identifier, `github-mcp-server`; tool
-allowlists alone do not prevent that server from starting or authenticating.
-
-Agent startup does not eagerly start a Copilot runtime. `SdkClientPool` starts
-the bundled runtime on the first SDK session and keeps separate clients for
-distinct `CopilotHome` values.
-
-SDK sessions use streaming mode. `SdkTurnEventMapper` translates typed
-message/reasoning deltas and tool lifecycle events to the existing
-`StreamEvent` wire records. It treats `session.idle` as the successful turn
-boundary and emits one error plus one terminal boundary for a session error,
-so the later idle event cannot double-complete callers.
-
-`SdkPermissionBroker` connects the SDK permission callback to the current
-`ApprovalRequired` SSE event and `/approvals/{approvalId}` endpoint. Automatic
-approval is still controlled by the existing per-session yolo registry and
-`MAGPILOT_AUTO_APPROVE`; managed-policy requests bypass auto-approval and
-require a user. The SDK's .NET permission decision types are experimental, so
-the diagnostic opt-in is scoped to this broker rather than project-wide.
-
-The yolo toggle is dynamic. Enabling it releases ordinary permission requests
-that were already waiting, including a request that raced the toggle while
-parallel tools were starting. The broker re-checks policy after adding a
-pending request and subscribes to `YoloRegistry.Changed`; managed-required
-requests remain pending for a human.
-
-Each attached SDK session also owns a cached `SessionRuntimeStatus`.
-`SdkSessionStatusTracker` seeds it from the authoritative current-model and
-usage-metrics RPCs plus the latest persisted usage-info event. Live model,
-context, and usage events update the cache, and `session.idle` triggers one
-final model/usage reconciliation before Magpilot publishes `TurnComplete`.
-Consequently `GET /state` remains a cache-only control-plane call while still
-reporting:
-
-- active model id + display name;
-- reasoning effort;
-- current context tokens + model token limit;
-- session AI Credits (`TotalNanoAiu / 1,000,000,000`);
-- whether live model editing is supported.
-
-The SPA places this status in its own composer bar directly above the input:
-one `Model Name (reasoning)` button opens the shared model settings dialog,
-while context percentage and session AIC remain read-only. The existing Show
-thinking / YOLO / Release toolbar remains at the top of the chat pane and adds
-a persisted `Show session info` toggle for the bottom bar.
-
-`SdkSessionRuntime` preserves the single-writer invariant with the same
-registry and handoff protocol. It serializes turns per session, registers event
-handlers before sends, uses typed message provenance while retaining the
-existing `[via source]` prompt tag, disconnects without deleting disk state,
-and cold-resumes from the shared Copilot session store.
-
-The SDK does not expose its child process PID. On create/resume the runtime
-records the live `inuse.<pid>.lock` holders it created. Foreign-holder checks
-exclude only those recorded PIDs; a later holder remains foreign. This is
-required for terminal handback because otherwise the SDK's own lock looks like
-a terminal writer and prevents ownership from clearing.
-
-The bundled Copilot runtime authenticates with GitHub through the logged-in
-user or `COPILOT_GITHUB_TOKEN`. It runs conversations, calls tools,
-writes/reads files, and talks to MCP servers.
-
-### Sidecars (cron, WhatsApp, Preflight)
-
-Each sidecar is a separate process/container. They speak only to the
-**agent HTTP API** (or, for Preflight, to the **hub HTTP API**). They are
-stateless in terms of agent state -- the agent is still the single source
-of truth for session state, cwd, and runtime ownership.
-
-A sidecar plugs in by knowing:
-
-1. The URL of the target agent (e.g. `http://127.0.0.1:5099` for things
-   on LXC 102 next to Magnus).
-2. The agent bearer token (`MAGPILOT_AGENT_TOKEN`).
-3. (Optionally) a pinned session id, so calls accumulate context across
-   invocations instead of starting a fresh conversation each time.
-
-### Magpilot Host (`Magpilot.Host`, the launcher)
-
-Console binary at `src/Magpilot.Host/`, assembly name `magpilot` (i.e.
-ships as `magpilot.exe`). Installed on developer machines as
-`magpilot` on PATH. **Does NOT shadow `copilot`** -- the user invokes
-the launcher explicitly with `magpilot [args]`; the real `copilot`
-binary stays as it is. The launcher:
-
-1. Parses `--magpilot-*` flags (take, force, no-take, skip-check,
-   no-tui-changes, the granular `tui-options` allowlist, exit-on-handoff,
-   status, help) and strips them before forwarding.
-2. Pings the agent. If unreachable, emits one warning and exec's the
-   real `copilot` binary as a transparent passthrough.
-3. Resolves the target session id from argv: bare `--resume` (or `-r`) queries the
-   agent's existing `GET /api/sessions` list and opens a searchable, paged
-   terminal picker before Copilot starts. The selected UUID replaces bare
-   `--resume` without changing other arguments. A UUID inside
-   `--resume=<UUID>` or `--session-id=<UUID>` is also known up
-   front. For known sids, the launcher calls `GET /sessions/{id}/state`
-   and prints an interactive Y/n/f take-over prompt when the session
-   is currently agent-owned (auto-answered by `--magpilot-*` flags or
-   refused on non-TTY). Canceling the picker spawns nothing; bare
-   `--resume` requires an interactive terminal while the agent is reachable.
-   For everything else (`--resume="some name"`,
-   `--resume=<id-prefix>`, `--continue`, no args), the
-   launcher takes the post-spawn detection path: spawn copilot in a
-   PTY, then watch the on-disk session-state directory until it can
-   identify which session copilot ended up holding, and only then
-   register host ownership.
-4. On accept (known-sid take-over path): `POST /acquire-for-host`,
-   retain the returned terminal lease, then spawn the real
-   `copilot --resume=<sid>` inside a real PTY
-   (via `Porta.Pty`). Bidirectional byte pump between the user's
-   terminal (in raw mode) and the PTY master; window-resize watcher.
-5. Subscribes to the session's SSE stream. On `release_requested`:
-   writes `/exit\r` to the PTY master so copilot shuts down cleanly
-   (3s grace, 1s on Force, then `PTY.Kill`), prints a banner, calls
-   `POST /release { LeaseId }`, and either exits (with
-   `--magpilot-exit-on-handoff`)
-   or sits on a "Press <enter> to take it back" prompt.
-6. Known-ID takeovers and user-requested take-backs fire
-   `release-request` (with a 500ms grace) before `acquire-for-host`
-   so a SPA tab pauses before ownership flips. Automatically detected
-   startup sessions and interactive switches acquire FIRST, then notify.
-   A guessed session must not broadcast a release request to a different
-   terminal before the agent's atomic lease check rejects it.
-7. On PTY paths, applies the configured terminal palette to the outer
-   terminal. The output pipeline consumes matching Copilot OSC 4/10/11 palette
-   queries and answers them inside the PTY from that same configured theme.
-   This removes the startup race where Copilot could query before the outer
-   terminal had applied the override and permanently bake a different
-   truecolor ramp into that session. Unconfigured palette entries continue to
-   query the outer terminal. The same pipeline rewrites fixed
-   composer-surface greys, faint reasoning text, and fallback Base-16-derived
-   truecolor tokens when the theme configures `inputBand`, `thinking`, or
-   `legacyDefaultColors`. Compatibility mode suppresses startup-banner
-   injection because copilot's animated welcome card cannot account for text
-   inserted after its layout pass.
-   `--magpilot-no-tui-changes` bypasses the background probe,
-   terminal-environment defaults and hints, palette changes, synthetic
-   palette replies, output rewrites, and banner injection. Coordinated
-   sessions retain the PTY because ownership detection and graceful handoff
-   depend on it; agentless passthrough direct-execs for parity with a raw
-   `copilot` launch.
-   `--magpilot-tui-options=<list>` independently gates `term`, `truecolor`,
-   `background`, `github-theme`, `palette`, `thinking`, `input-band`,
-   `legacy-colors`, and `banner`; `rewrite` enables the three rewrite stages
-   as a group. `all` is the default and `none` is the explicit no-mutation
-   state.
-
-The launcher can characterize these stages without relying on screenshots:
-`MAGPILOT_TERM_MANIFEST` records the resolved child hints and active stages,
-while `MAGPILOT_TERM_DUMP`/`MAGPILOT_TERM_DUMP_POST` record pre/post-rewrite
-ANSI. `MAGPILOT_TERM_DUMP_MS` ends capture after a fixed settling window while
-Copilot keeps running. The manifest also records MSYS/shell/terminal markers
-and .NET's stdin/stdout redirection view, because Git Bash and PowerShell are
-different terminal-hosting experiments. `scripts/capture-tui-matrix.ps1`
-generates the full hint matrix and isolated rendering cases;
-`tools/tui-matrix/render.mjs` feeds each capture through `@xterm/headless` at
-the recorded dimensions and writes normalized cell-style snapshots plus
-row-level diffs against `none`.
-`tools/tui-matrix` also contains an offline xterm.js theme lab. It replays
-captured raw ANSI, applies the same palette/thinking/input-band/legacy
-transformations as the launcher, maps clicked cells back to shared selectors,
-and exports theme JSON. It deliberately does not host a live PTY.
-The capture runner's `none` case is intentionally PTY-hosted so bytes can be
-observed; it is not equivalent to the agentless direct-exec
-`--magpilot-no-tui-changes` path. In Git Bash the direct path retains a richer
-composer bar that none of the tested environment hints restores inside
-ConPTY, identifying terminal hosting/capability negotiation as a separate
-dimension from Magpilot's explicit TUI transformations.
-`scripts/probe-terminal-paths.ps1` compares those hosting paths directly by
-running the same Node probe outside and inside `PtyHost`, recording Node's
-TTY/color-depth view, Win32 console modes after Node enters raw mode, and the
-raw replies to Copilot's terminal queries.
-Porta.Pty's app-local path matches direct Git Bash in the terminal probe: full
-OSC palette/foreground/background replies, device attributes, mode reports,
-TTY flags, dimensions, console modes, and code pages. Windows' in-box ConPTY
-is retained only as a reduced-capability diagnostic control. `sch.pty.net`
-must not return because its bundled January 2022 host predates
-microsoft/terminal#17729.
-
-`Magpilot.Host` moved to `net10.0` and `Porta.Pty` 2.2.2; the platform services
-remain on `net9.0`. Porta.Pty keeps the same PTY API shape, supports Native AOT,
-ships current out-of-band ConPTY assets, handles its startup DA1 handshake,
-and provides a runtime in-box/out-of-band selector.
-
-`MAGPILOT_CONPTY=app-local|system` maps to
-`PORTAPTY_CONPTY=oob|inbox` before the first PTY spawn, allowing the same
-launcher binary to compare app-local `OpenConsole.exe` with Windows'
-`kernel32!CreatePseudoConsole`. App-local is the default and matches the outer
-terminal; system remains a diagnostic fallback with reduced query behavior.
-
-On Windows `PtyHost` enables Porta.Pty's async I/O path and treats child exit
-and output completion as separate events. Disposal cancels input/resize work,
-waits for the child, then drains PTY output through EOF before closing the
-connection and restoring the parent terminal. This preserves Copilot's final
-terminal-mode reset sequences; closing at `ProcessExited` leaves the returned
-shell in application input mode.
-
-All launcher-side diagnostics that fire while copilot is rendering
-its TUI (SSE-subscribe failures, post-spawn detection timeouts,
-acquire-for-host errors, release errors) are queued onto a
-`ConcurrentQueue<string>` and flushed to stderr only after copilot
-exits, so the launcher never writes mid-screen and corrupts the UI.
-
-Single-owner invariant by construction: while the wrapper holds a
-session, the agent's `/messages`/`/interrupt`/`/approvals` endpoints
-return 409 to the SPA + WhatsApp + cron, so `events.jsonl` never forks.
-
-**Native AOT.** The launcher is published Native AOT
-(`<PublishAot>true</PublishAot>` in `Magpilot.Host.csproj`): a single
-native `magpilot.exe` (~7 MB, no `coreclr.dll`/`deps.json`) that
-cold-starts in roughly a third of the JIT time -- worthwhile because it
-runs on every `magpilot` invocation. Porta.Pty's `conpty.dll` and matching
-architecture-specific `OpenConsole.exe` hosts are copied physically beside
-the exe. The one
-constraint AOT imposes: **all launcher JSON goes through
-source-generated contexts**, never reflection. `HostWebJsonContext`
-(mirrors `JsonSerializerDefaults.Web`) covers the `System.Net.Http.Json`
-calls to the agent/hub; `HostGeneralJsonContext` (General defaults)
-covers the raw `StreamEvent` SSE reads and the UDP `DiscoveryReply`;
-`EnrollmentBundleJsonContext` (in `Magpilot.Shared`) covers the
-`magpilot2+` bundle codec. A reflection `JsonSerializer.Deserialize<T>`
-or a `System.Net.Http.Json` call without a `JsonTypeInfo<T>` compiles
-but throws `NotSupportedException` at runtime under AOT;
-`HostJsonContractTests` pins the wire shapes so a naming-policy slip is
-caught in CI rather than in the field.
-
-Because application code is embedded in the Native AOT executable, local
-launcher hotpatches must replace `magpilot.exe`; copying a managed
-`magpilot.dll` beside it has no effect.
-
-## Auth model
-
-There are two unrelated auth boundaries:
-
-```
-+-----------+   GitHub OAuth   +-----+   bearer token   +-------+
-| BROWSER   | ---------------> | HUB | ---------------> | AGENT |
-| (cookies) |                  +-----+                  +-------+
-+-----------+                                             ^
-                                                          |
-                                            +------------+
-                                            |
-                                      +-----------+   bearer token
-                                      | SIDECARS  | -----------------+
-                                      | (cron, WA)|                  |
-                                      +-----------+                  |
-                                                                     v
-                                                                    AGENT
-                                                                  (same one)
-```
-
-- **User -> Hub**: GitHub OAuth, username allowlist, cookie session.
-  (Or `dev-login` shortcut if `MAGPILOT_DEV_BYPASS_AUTH=true`.)
-- **Hub -> Agent**: shared bearer token `MAGPILOT_AGENT_TOKEN`.
-- **Sidecar -> Agent**: same shared bearer token. Sidecars don't have a
-  per-service token today; they get the same secret because they only run
-  on hosts I trust (LXC 102).
-
-Note: the Hub's `/api` endpoints **require browser cookie auth**. Service
-callers can't talk to the hub. That's by design -- it forces sidecars to
-declare which agent they target rather than punching through the hub.
-
-### Multi-user agent ownership
-
-The hub is multi-tenant across browser users. Every agent carries an
-`owner_user` (the GitHub login that enrolled or adopted it), and the
-hub scopes what each caller sees and can reach. Three caller shapes,
-implemented as pure predicates in `Magpilot.Hub.Auth.AgentVisibility`
-and enforced in one endpoint filter + the list handlers:
-
-- **Infrastructure bearer** (`auth_kind = phone_bearer` --  preflight,
-  sidecars, the MAUI app): a machine, not a person. Unscoped: sees and
-  can reach every agent. Preflight enumerating hosts relies on this.
-- **Admin browser user** (the first `OAUTH_ALLOWED_GITHUB_USERS` entry,
-  `HubAuthOptions.AdminUser`): a superuser. Their *main* agent list
-  (`GET /api/agents`) is still scoped to agents they own -- the
-  day-to-day UI isn't cluttered with everyone's hosts -- but they get a
-  dedicated cross-user view (`GET /api/admin/agents/all`) and can proxy
-  to / manage any agent.
-- **Regular browser user**: sees and can reach only the agents they own.
-
-A `null` owner (rows enrolled before ownership existed, or
-discovered-but-never-enrolled) is treated as the **admin's** in the
-scoped list, so a deployment's pre-existing agents stay visible to the
-primary user with no data migration -- and are unreachable by anyone
-else.
-
-Two distinct decisions:
-
-| Decision | Predicate | Rule |
+| Project | Responsibility | Target |
 |---|---|---|
-| Main-list membership | `ScopedToOwner(owner, login, isAdminLogin)` | owner matches, OR (owner is null AND caller is the admin login). The admin does NOT see foreign-owned agents here. |
-| Proxy / management access | `CanAccess(owner, login, isAdmin)` | admin (infra bearer or admin login) reaches anything; everyone else only their own. |
+| `Magpilot.Hub` | Agent registry, authentication, proxying, central logs, web hosting | ASP.NET Core 9 |
+| `Magpilot.Agent` | SDK sessions, history, permissions, ownership, discovery | ASP.NET Core 9 |
+| `Magpilot.Host` | The `magpilot` terminal launcher, pairing, Windows updates | .NET 10, Windows x64 release |
+| `Magpilot.Shared` | HTTP DTOs, SSE events, versioning | .NET 9 |
+| `Magpilot.UI` | Shared Razor components and browser API clients | .NET 9 |
+| `Magpilot.Web` | Blazor WebAssembly shell, published into the hub | .NET 9 |
 
-Enforcement points:
+The agent bundles the public .NET Copilot SDK's out-of-process runtime. The
+launcher uses a separately installed, authenticated `copilot` executable; it
+does not replace that executable on `PATH`.
 
-- `GET /api/agents` -- infra sees all; a browser user gets the
-  `ScopedToOwner` filter applied to `AgentRegistry.List()`.
-- `GET /api/admin/agents/all` -- admin-only (403 otherwise), returns
-  the full registry for the SPA's "Show all agents" toggle.
-- A single **endpoint filter on the `/api` group** gates every route
-  that carries an `{name}` agent segment (all the per-agent proxies,
-  the SSE stream, `revoke`, `DELETE /agents/{name}`) with `CanAccess`;
-  a non-accessible agent returns **404** (hides existence, not 403).
-  This means the `Proxy` wrapper itself stays ownership-agnostic -- the
-  gate lives in one place upstream of all ~17 call sites.
-- `GET /api/me` reports `{ identity, isAdmin }` so the SPA can show the
-  admin toggle.
-- `GET /api/agents/version-status` and `POST
-  /api/agents/check-updates` use the same scoped/all-agent rules.
-  `all=true` is admin-only; regular users can inspect and signal only their
-  own agents.
+**Satellites know about Magpilot; Magpilot does not know about satellites.**
+Product-specific routing, schedules, messaging integrations, and provisioning
+belong in external HTTP clients or deployment bootstrap hooks. Shared UI
+consumers may reference `Magpilot.UI`, but the platform must not reference them.
 
-**Central logs are admin-only.** `GET /api/log` + `/api/log/sources`
-(the viewer/query side) are gated to the admin -- they aggregate every
-user's session activity. Ingest (`POST /api/log[/batch]`) stays open to
-any authenticated producer (the SPA posts its own JS errors; agents
-post via bearer). The SPA hides the Logs AppBar link for non-admins and
-`/admin/logs` shows an "admin only" banner if reached directly.
+## Runtime and session configuration
 
-**SPA nav:** the AppBar has an **Agents** link (all users -- everyone
-needs `/admin/agents` to pair + manage their own hosts; the cross-user
-"Show all agents" toggle inside is admin-only) and a **Logs** link
-(admin only).
+`IAgentSessionRuntime` separates HTTP and ownership orchestration from SDK
+types. `SdkSessionRuntime` implements create/resume, serialized prompting,
+abort, detach, stream publication, and configuration verification.
 
-**UDP discovery is ownership-neutral.** Discovery is a hub-side,
-unauthenticated LAN broadcast; it only refreshes an agent's URL/online state
-and records a `null`-owner, `null`-token row
-for any agent that answers. It never assigns or changes an owner --
-ownership is set *exclusively* by the pairing flows (voucher redeem /
-claim approve), and `AgentRegistry.Upsert` preserves an existing
-`owner_user`. A discovered-but-unpaired agent is therefore admin-only
-visible and unreachable by anyone (no token) until someone pairs it.
-There is no per-user discovery.
+`SdkClientPool` starts no Copilot process at agent startup. It lazily creates
+SDK clients using `CopilotClientMode.CopilotCli` and stdio transport. Distinct
+`CopilotHome` values produce distinct clients; model, reasoning, working
+directory, selected agent, tools, and MCP restrictions are session options.
 
-> **Known multi-user seam (pairing claims are global).** Pending V3
-> pairing claims (`GET /api/admin/agents/claims`) are visible to every
-> authenticated user, and whoever clicks Adopt becomes the owner. A
-> claim has no owner until adopted (the launcher initiates without
-> knowing which hub user will claim it), so per-user claim scoping is a
-> larger change deferred for now. Mitigations today: 5-min TTL, the
-> fingerprint the launcher prints for visual verification, and re-pair
-> to correct a mis-adoption. Low-stakes under a trusted-accounts
-> allowlist.
+Session creation and adoption accept:
 
-Owner is stamped at enrollment: the voucher-redeem path uses the
-voucher's `created_by_user`; the claim-approve path uses the adopter's
-login (`decided_by_user`). A re-pair preserves an existing owner when
-the new enrollment carries none (`COALESCE(excluded.owner_user, ...)`).
+| Field | Meaning |
+|---|---|
+| `model`, `reasoningEffort` | Runtime model selection and supported reasoning level |
+| `agent` | A selected custom agent definition |
+| `availableTools` | Model-facing tool allowlist |
+| `disableMcpServers` | Explicit SDK server exclusions |
+| `noCustomInstructions` | Suppress ambient instructions |
+| `copilotHome` | Isolated configuration root |
 
+Creation also accepts `cwd`, `name`, and an optional `initialPrompt`. The exact
+request shapes are in [Requests.cs](../src/Magpilot.Shared/Models/Requests.cs).
 
+Custom homes must already exist and link their `session-state` entry to the
+agent's canonical Copilot session store. `SdkCustomAgentLoader` resolves a
+selected `<name>.agent.md` from that home's `agents` directory. Without a custom
+home, it searches the user's `.copilot/agents` before the working directory's
+`.github/agents`. It parses the definition into the SDK's explicit
+`CustomAgents` configuration; setting a name alone is insufficient.
 
-All routes are under `/api`, all protected by `Authorization: Bearer <MAGPILOT_AGENT_TOKEN>`
-**except** the three read-only version endpoints (`/version`,
-`/version/latest`, `/version/status`),
-which are deliberately unauthenticated so the launcher's banner check
-works without a configured token.
+Tool filtering does not prevent an MCP server from starting. Restricted
+profiles must also exclude unwanted servers explicitly, including
+`github-mcp-server` when the built-in GitHub server is inappropriate.
 
-| Method | Path                                       | What it does                                              |
+An attached session can change model and reasoning while idle. Changes to
+agent, tools, instruction scope, or configuration home require a fresh
+attachment. Configuration and prompting share a per-session gate: a session
+whose requested configuration cannot be applied and verified is quarantined,
+not advertised as ready to prompt.
+
+## Session state and ownership
+
+History is stored under the host user's `.copilot/session-state`. Detaching
+stops the runtime attachment; it does not delete the persisted conversation.
+
+The session list uses three numeric `SessionState` values:
+
+| Value | Name | Meaning |
 |---|---|---|
-| GET    | `/version`                                 | Agent's own `{version, protocolVersion}`. **No auth.** Used by `magpilot --magpilot-version` and external probes. |
-| GET    | `/version/latest?from=X.Y.Z`               | Hub-reported latest release metadata (cached locally by `UpdatePoller`). **No auth.** Recomputes `updateAvailable` against the requesting launcher's version, which may differ from the agent after a partial install. Drives the upgrade banner + `--magpilot-update`. |
-| GET    | `/version/status`                          | Composite running/latest version, protocol range, update state, `lastCheckedAt`, and immediate-refresh capability. **No auth.** |
-| POST   | `/version/refresh`                         | Authenticated hub signal: immediately poll `/api/agent-version`, update the local cache, and return the composite status. Does not install anything. |
-| GET    | `/info`                                    | Agent name, OS, and working directory                      |
-| GET    | `/sessions`                                | List sessions on disk (with state, cwd, last-touched)      |
-| POST   | `/sessions`                                | Create a new session. Body `NewSessionRequest { Cwd?, Name?, InitialPrompt?, Model?, ReasoningEffort?, DisableMcpServers?, Agent?, AvailableTools?, NoCustomInstructions?, CopilotHome? }`. `DisableMcpServers`, `AvailableTools`, `Agent`, and instruction controls map to typed SDK session configuration; `CopilotHome` selects an isolated SDK client/base directory. **400** on an unsafe token/path; **502** if the runtime cannot apply the requested configuration exactly. |
-| GET    | `/sessions/{id}`                           | Get session metadata                                       |
-| GET    | `/sessions/{id}/state`                     | Rich ownership + activity view (see "Cooperative single-owner handoff" below). Returns `SessionStateInfo`, including optional cached `RuntimeStatus { ModelId, ModelName, ReasoningEffort, CurrentTokens, TokenLimit, AiCreditsUsed, CanEditModel, UpdatedAt }`. |
-| GET    | `/sessions/{id}/model-options`             | Runtime-advertised model catalog for an attached, agent-owned session. Includes display names, supported reasoning efforts, and advertised defaults. **409** when not agent-owned. |
-| POST   | `/sessions/{id}/model`                     | Atomically change model + reasoning for an attached, agent-owned, idle SDK session. Body `SessionModelUpdateRequest { Model, ReasoningEffort? }`. Omitting reasoning preserves the current level when supported, otherwise uses the target model's advertised default. **409** while busy/host-owned; **422** for unavailable combinations; **502** for runtime failure. |
-| POST   | `/sessions/{id}/adopt`                     | Bring a dormant session live. Body accepts the same optional session/process fields as create; omitted process fields retain a recorded handoff profile. Dormant sessions load with the requested process scope and config. Already-Owned sessions apply/verify agent/model/reasoning in place; a requested process-scope change fails explicitly because it requires another runtime process. **502** if config cannot be applied exactly; **422** + `notLoadable` when the on-disk session has no `events.jsonl` and is not still resident in a live runtime. |
-| POST   | `/sessions/{id}/detach[?force=true]`       | Detach without deleting on-disk state. `force=true` aborts an in-flight turn before disposing the SDK session. |
-| POST   | `/sessions/{id}/messages`                  | Send a prompt; returns 202; SSE delivers the reply. **Returns 409** + `HostOwnedResponse` when a magpilot launcher holds the session (see handoff section), and **409** + `{ needsReadopt: true }` when runtime configuration could not be verified. Body `PromptRequest { Text, Source? }` -- an optional `Source` (e.g. `assistant`, `whatsapp`) tags an out-of-band injection: the agent prefixes the prompt with `[via <source>]` for the brain and echoes a `UserDelta { Text, Source }` to subscribers so watchers see the question, not just the answer. |
-| GET    | `/sessions/{id}/stream`                    | SSE stream of session events (deltas, tool calls, etc.)    |
-| POST   | `/sessions/{id}/interrupt`                 | Cancel the in-flight turn. **Returns 409** when host-owned. |
-| POST   | `/sessions/{id}/approvals/{approvalId}`    | Resolve an approval prompt. **Returns 409** when host-owned. |
-| POST   | `/sessions/{id}/release-request`           | Broadcast `release_requested` SSE event to subscribers (e.g. a magpilot launcher) so they can begin graceful shutdown. **NEW (shim Phase 1).** |
-| POST   | `/sessions/{id}/acquire-for-host`          | Local launcher operation. Drains prompt admission, waits for a clean turn boundary (or aborts/recycles in-flight if `force=true`), detaches the runtime, records the complete runtime profile, and returns a generated terminal lease. Refuses to overwrite another live terminal owner. |
-| POST   | `/sessions/{id}/release`                   | Local launcher operation. Body `{ LeaseId }`. The agent verifies the exact lease, refuses to attach while a foreign holder remains, reloads the recorded runtime profile, and clears the lease only after verification succeeds. Wrong/stale lease is 409; reload/config failure is 502. |
-| POST   | `/sessions/{id}/take-over`                 | Agent-driving operation used by the SPA. With `force=true`, evicts every foreign live holder, verifies none remain, restores the recorded runtime profile, and clears the terminal lease. |
-| POST   | `/sessions/{id}/yolo`                      | Flip the per-session yolo (auto-approve) bit. Body `YoloRequest { Enabled }`. Returns refreshed `SessionStateInfo` (the new bit is on `Info.Yolo`). **Returns 403** with `{ hostDisabled: true }` if the agent has `MAGPILOT_YOLO_DISABLED=true`. |
-| POST   | `/quick-prompt`                            | Synchronous "ask + answer" -- handles SSE internally. Body also accepts an optional `Source` (same provenance semantics as `/messages`). |
+| `0` | `Owned` | Attached to this agent |
+| `1` | `Locked` | A live holder exists outside this agent's ownership |
+| `2` | `Dormant` | No live holder |
 
-### `quick-prompt` -- the convenience door for non-SPA clients
+Use `GET /state` for the richer ownership decision:
 
-```
-                     POST /api/quick-prompt
-                     { prompt, [sessionId], [timeoutSeconds] }
-   sidecar  ------------------------------------------------>  agent
-                                                                  |
-                                                              if sessionId:
-                                                                adopt + use it
-                                                              else:
-                                                                create ephemeral
-                                                                  |
-                                                              subscribe to runtime
-                                                                  |
-                                                              send prompt
-                                                                  |
-                                                              accumulate deltas
-                                                              until TurnComplete
-                                                                  |
-                                                              if ephemeral:
-                                                                detach
-   sidecar  <------------------------------------------------  agent
-                  { responseText, stopReason, sessionId }
-```
+| `owner` | Meaning |
+|---|---|
+| `None` | No current driver |
+| `Agent` | This agent's runtime is driving |
+| `Host` | A launcher holds a terminal lease |
+| `External` | A live process is not coordinated by this agent |
+| `Contended` | Independently controlled live holders can write the same session |
 
-This is the API the WhatsApp sidecar and cron runner use. One HTTP call
-in, the assistant's full reply text out. No SSE consumer code needed.
+The response includes `info`, `hostPid`, `hostLeaseId`, `activity`, `inFlight`,
+`lastEvent`, `runtimeStatus`, and `foreignHolderPids`. Ownership and activity
+are string enums. Runtime status is nullable and contains cached model,
+reasoning, context usage, and session AI Credits; unavailable values are not
+zero. `/state` does not make SDK RPCs.
 
-The optional `sessionId` field is the difference between "every WA
-message is its own little fresh chat" (no sessionId) and "every WA
-message goes into Magnus's pinned long-running conversation" (sessionId
-pinned to Magnus's well-known session id).
+Copilot's `inuse.<pid>.lock` files are advisory, not a mutex. The agent tracks
+its SDK-created holders separately from foreign processes and persists terminal
+leases in `.copilot/magpilot/hostownership.json`. PID start times guard against
+PID reuse. Startup reconciliation can recover launcher ownership from process
+ancestry, but must not reclassify resident SDK sessions as terminal-owned.
 
-## Sessions: ephemeral vs pinned
+### Terminal handoff
 
-```
-                 +------------+           +------------+
-   create ----->|  CREATED   |---adopt-->|   ACTIVE   |---detach--+
-                +------------+           +------------+           |
-                                              ^   |               |
-                                              |   | (copilot      |
-                                          adopt   |  process      |
-                                              |   v  exits/kills) |
-                                          +------------+          |
-                                          |  DORMANT   |<---------+
-                                          | (events.   |
-                                          |  jsonl on  |
-                                          |  disk)     |
-                                          +------------+
-```
+1. A launcher with an explicit target requests release, then calls
+   `/acquire-for-host`. A polite acquisition waits for the current agent turn;
+   an explicit force request aborts it and requires a clean boundary.
+2. The agent blocks new prompts, detaches the runtime, records the effective
+   session profile, and returns a terminal lease.
+3. The launcher runs Copilot. When another client requests release, it stops
+   that child before submitting `/release` with the exact lease ID.
+4. The agent reloads disk state and restores the profile. It clears terminal
+   ownership only after configuration succeeds and no foreign writer remains.
 
-- **Ephemeral session**: created by `quick-prompt` without a `sessionId`,
-  used for one turn, then detached. The `events.jsonl` stays on disk
-  forever (you can later replay it in the SPA), but no live runtime attachment
-  exists.
-- **Pinned session**: a long-lived session you `/sessions/{id}/adopt` once
-  and then keep using. This is what the SPA does for any session you
-  explicitly open. Magnus has exactly one of these, created by his
-  bootstrap script and recorded at `/home/magnus/.magnus/.session-id` so
-  the bootstrap is idempotent across container restarts.
+A stale lease cannot release a newer acquisition. Normal release never kills
+foreign holders; explicit `/take-over` is the agent-side force transition.
+Failed restoration retains recovery information rather than pretending the
+session is agent-owned.
 
-Magpilot's adopt-on-demand logic re-activates a dormant pinned session
-lazily, but **only** through the endpoints that call `AdoptAsync`:
-`POST /quick-prompt` (with a pinned `sessionId`), `POST /sessions/{id}/adopt`,
-and `GET /stream?load=true`. **`POST /messages` and a plain `GET /stream`
-do NOT adopt** -- they assume the SDK session is already attached. A client
-that pins a session must make sure it is loaded first -- open it in the SPA,
-hit `/adopt`, or have the deployment's bootstrap adopt it on every restart.
+Automatic startup and interactive session-switch detection are different from
+explicit user-selected targets: **acquire first, notify second**. A guessed
+target must not preempt another launcher before atomic acquisition succeeds.
+`AutomaticHostAcquisition` enforces this ordering.
 
-## End-to-end: what happens when you...
+Bare `magpilot --resume` selects a session before Copilot starts. Interactive
+CLI `/resume` can transfer the lease when a new or refreshed child-PID lock
+identifies the target. An artifact timestamp or `alreadyInUse` event alone
+cannot identify its writer; a CLI switch without a child lock may remain
+uncoordinated. The watcher removes only that child's stale old-session lock,
+serializes handback, and reconnects its subscription to the selected session.
 
-### ...open Magnus's session in the SPA
+### Browser handoff and concurrent clients
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant B as Browser SPA
-    participant H as Hub
-    participant A as Magnus agent
-    participant C as Copilot SDK runtime
+The browser checks ownership before streaming and during stream-health,
+visibility, and refresh reconciliation. Host or contended ownership pauses the
+composer. **Take back** requests a graceful release first; failure exposes a
+separate **Force take over** action instead of silently killing the terminal.
 
-    B->>H: GET /api/agents (cookie)
-    H-->>B: [magnus, hendrik, sandbox]
-    B->>H: GET /api/agents/magnus/sessions
-    H->>A: GET /api/sessions (bearer)
-    A-->>H: [{id: cbec..., name: Magnus, state: dormant}]
-    H-->>B: same list
+A prompt rejected with `409` and `needsRelease` requires release negotiation:
+request release, poll `/state` until ownership is available, then retry. A
+`409` with `needsReadopt` requires adoption/configuration recovery instead.
+Do not treat every conflict as permission to force a takeover.
 
-    B->>H: GET /api/agents/magnus/sessions/cbec.../stream?load=true
-    H->>A: GET /api/sessions/cbec.../stream?load=true (bearer)
-    A->>C: resume session
-    A-->>H: SSE: heartbeat, HistoryDone
-    H-->>B: forwarded SSE
+## Agent HTTP API
 
-    B->>H: POST /api/agents/magnus/sessions/cbec.../messages {text: "what's on my plate today?"}
-    H->>A: POST /api/sessions/cbec.../messages
-    A->>C: SDK send
-    A-->>H: 202 Accepted
-    C-->>A: assistant deltas, tool calls, etc.
-    A-->>H: SSE: AssistantDelta, ToolCall, ...TurnComplete
-    H-->>B: forwarded SSE
-```
+Routes below are relative to `/api` on the agent, normally TCP 5099.
+They require `Authorization: Bearer <agent-token>` except the three version
+GETs. `/healthz` is also unauthenticated.
 
-### ...send a WhatsApp message
+| Method | Route | Purpose |
+|---|---|---|
+| GET | `/version` | Running version and protocol |
+| GET | `/version/latest?from=<version>` | Cached latest release, compared with the caller |
+| GET | `/version/status` | Running/latest composite status |
+| POST | `/version/refresh` | Refresh release metadata from the configured hub |
+| GET | `/info` | Host identity, OS, and working directory |
+| GET | `/sessions` | Sessions, newest activity first |
+| GET | `/sessions/{id}` | Session metadata |
+| GET | `/sessions/{id}/history` | Persisted, paged history without attaching |
+| POST | `/sessions` | Create a configured session |
+| POST | `/sessions/{id}/adopt` | Attach/resume and configure |
+| POST | `/sessions/{id}/detach` | Detach; `?force=true` permits runtime recovery |
+| POST | `/sessions/{id}/messages` | Admit a prompt; returns `202` |
+| POST | `/sessions/{id}/interrupt` | Abort an agent turn |
+| POST | `/sessions/{id}/approvals/{approvalId}` | Resolve permission with `optionId` |
+| GET | `/sessions/{id}/stream` | SSE subscription; optional `load` and `force` |
+| GET | `/sessions/{id}/state` | Authoritative ownership and cached runtime status |
+| GET | `/sessions/{id}/model-options` | Runtime-advertised model/reasoning choices |
+| POST | `/sessions/{id}/model` | Apply model and reasoning while agent-owned and idle |
+| POST | `/sessions/{id}/yolo` | Set per-session automatic approval |
+| POST | `/sessions/{id}/release-request` | Broadcast a cooperative release request |
+| POST | `/sessions/{id}/acquire-for-host` | Local launcher acquisition |
+| POST | `/sessions/{id}/release` | Local launcher handback by lease |
+| POST | `/sessions/{id}/take-over` | Acquire for the agent, optionally with explicit force |
+| POST | `/quick-prompt` | Wait for a complete response as one JSON result |
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant U as User's phone (WA)
-    participant W as magpilot-whatsapp sidecar
-    participant A as Magnus agent
-    participant C as Copilot SDK runtime
+There is no session-delete endpoint or interactive slash-command endpoint.
+The source of truth is
+[AgentEndpoints.cs](../src/Magpilot.Agent/Api/AgentEndpoints.cs).
 
-    U->>W: WA Web message {fromMe:true, remoteJid: <own LID>, text}
-    Note over W: isSelfChat? compare<br/>to sock.user.lid<br/>(yes) -- process
-    W->>A: POST /api/quick-prompt<br/>{ prompt, sessionId: pinned }
-    A->>C: SDK send (on Magnus's pinned session)
-    C-->>A: AssistantDelta, ...TurnComplete
-    A-->>W: { responseText, sessionId }
-    Note over W: rememberSent(replyMsgId)<br/>so the echo doesn't loop
-    W->>U: WA sendMessage(remoteJid, replyText)
+### Prompts, history, and long-lived sessions
+
+Subscribe before sending `/messages`. Its `202` response confirms admission,
+not completion; wait for `turn_complete` before clearing busy state. A source
+label such as `"source": "external-client"` prefixes the model prompt with
+`[via external-client]` and emits a `user_delta` for other watchers. Ordinary
+browser sends omit the source and use local echo.
+
+`/messages` requires an already attached, non-quarantined session. For an
+external client's stable conversation, create a named session, retain its ID,
+and adopt it after agent restart before using `/messages`.
+
+`/quick-prompt` takes `prompt`, optional `cwd`, `timeoutSeconds` (default 60),
+`keepSession`, `sessionId`, and `source`. It returns `responseText`,
+`stopReason`, and `sessionId`. Without an ID it creates an ephemeral session
+and detaches after the turn unless `keepSession` is true. With an ID it adopts
+on demand and leaves that session attached. Detachment never removes history.
+This convenience route does not accept the full session-profile options; use
+creation/adoption to establish a specialized profile first.
+
+History returns `{ entries, oldestCursor, hasMore }`. Use `?tail=50` for the
+initial page and `?before=<cursor>&limit=50` for older entries. `?all=true`
+requests the full history and should be used sparingly. The hub preserves
+these query parameters; clients reject non-advancing cursors.
+
+### Streaming and permissions
+
+SSE frames contain one JSON object per `data:` record. The discriminator is
+lowercase `type`, while event payload properties retain their C# casing:
+
+```text
+data: {"type":"assistant_delta","Text":"Hello"}
+
+data: {"type":"turn_complete","StopReason":"end_turn"}
 ```
 
-The crucial bit: with `sessionId` pinned, the WA conversation accumulates
-in the same session you see in the SPA. Switch to the SPA, you see the
-WA exchange. Reply in the SPA, the next WA message has that context.
+HTTP request/response DTOs use ASP.NET's web JSON defaults; do not assume those
+defaults also apply to SSE. Event definitions are in
+[StreamEvent.cs](../src/Magpilot.Shared/Models/StreamEvent.cs).
 
-### ...a cron job fires
+| Events | Meaning |
+|---|---|
+| `assistant_delta`, `thought_delta`, `user_delta` | Incremental conversation content |
+| `tool_call_start`, `tool_call_progress`, `tool_call_end` | Tool lifecycle, keyed by tool-call ID |
+| `approval_required` | Permission request with selectable options |
+| `turn_complete`, `error` | Turn boundary and error information |
+| `load_started`, `history_done`, `load_failed` | Optional load-on-connect lifecycle |
+| `release_requested` | Cooperative ownership notification |
+| `heartbeat` | Connection keepalive, every 15 seconds |
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant K as crond (LXC host)
-    participant R as run.sh
-    participant A as Magnus agent
-    participant C as Copilot SDK runtime
+The SDK mapper publishes streaming deltas, not duplicate final messages.
+`session.idle` is the successful turn boundary. Errors publish one error and
+one terminal event; later idle events must not double-complete the turn.
+The stall watchdog aborts silent turns after its configured threshold, but
+exempts open tool calls.
 
-    K->>R: 0 10 * * * run.sh github-daily-report
-    Note over R: parse jobs.yaml<br/>find prompt template
-    R->>A: POST /api/quick-prompt {prompt, timeoutSeconds: 240}
-    A->>C: SDK send (ephemeral session)
-    C->>C: shell tool: bin/github-daily-report.sh
-    C-->>A: AssistantDelta (the markdown report) + TurnComplete
-    A-->>R: { responseText }
-    R->>R: append to /var/log/magpilot-cron/github-daily-report.log
-    Note over R: (later) POST to magpilot-whatsapp /outbound for delivery
-```
+The browser renders permissions inline with **Allow once** and **Deny**
+buttons. Per-session YOLO and agent-wide automatic approval apply only to
+ordinary requests; managed-policy approvals always require a user. Pending
+requests fail closed on cancellation or after five minutes. Enabling YOLO
+also releases ordinary requests already waiting.
 
-For now, cron jobs use ephemeral sessions so they don't pollute Magnus's
-long-running conversation with morning report noise. Migrating to a
-dedicated "cron context" session is a future option.
+## Hub API and authentication
 
-## Why this layout?
+The browser reaches agent routes through
+`/api/agents/{name}/sessions/...` and `/api/agents/{name}/quick-prompt`.
+Terminal `/acquire-for-host` and `/release` remain local agent operations, not
+hub proxies. The hub does not proxy `/info` or every agent version route.
 
-- **Sidecars don't know about each other.** WA, cron, Preflight are
-  unaware. Magpilot has one public contract (the agent HTTP API) and
-  every external integrator hits it the same way.
-- **Hub stays small.** It's basically a registry + HTTP proxy + auth +
-  the SPA host. All conversation/state logic is in agents.
-- **Agents stay portable.** Same .NET binary runs on Windows (HENDRIK,
-  SANDBOX) and Linux (Magnus). Process-scoped Copilot configuration is
-  selected per deployment/session.
-- **Sessions are durable on disk.** Restart any process; conversations
-  resume. The agent's adopt-on-demand logic means clients can ask for an
-  old session at any time and it'll be brought back online.
-- **No coupling to a particular client.** The SPA is one client. WA is
-  another. Cron is another. A new client (e.g. a Discord bot, a slash
-  command, a Slack relay) is just another process that POSTs to
-  `/api/quick-prompt`.
+Additional hub routes:
 
-## Multi-client coordination: SPA, WhatsApp, and the magpilot launcher
+| Method | Route | Purpose |
+|---|---|---|
+| GET | `/api/me` | Signed-in identity and administrator flag |
+| GET | `/api/agents` | Caller-scoped agent list |
+| GET | `/api/admin/agents/all` | Administrator's cross-user agent list |
+| DELETE | `/api/agents/{name}` | Remove a registry entry |
+| POST | `/api/agents/discover` | Trigger a discovery sweep |
+| POST | `/api/admin/agents/{name}/revoke` | Revoke agent credentials |
+| GET | `/api/agent-version` | Hub's cached latest release |
+| GET | `/api/agents/version-status` | Aggregate running/latest versions |
+| POST | `/api/agents/check-updates` | Refresh release metadata and signal agents |
+| POST | `/api/admin/enroll/voucher` | Issue an enrollment bundle |
+| POST | `/api/enroll/redeem` | Redeem a single-use voucher without an existing login |
+| POST | `/api/enroll/claim` | Submit an interactive pairing claim |
+| GET | `/api/enroll/claim-status` | Long-poll using the claim secret |
+| GET | `/api/admin/agents/claims` | Pairing requests |
+| POST | `/api/admin/agents/claims/{id}/approve` | Adopt a pending request |
+| POST | `/api/admin/agents/claims/{id}/reject` | Reject a pending request |
+| POST | `/api/log`, `/api/log/batch` | Central log ingestion |
+| GET | `/api/log`, `/api/log/sources` | Administrator-only log queries |
+| POST | `/api/devices` | Accepted stub only; no subscription persistence or push delivery |
 
-The session-state design originally assumed one Owner client at a time
-(the SPA). Adding the WhatsApp sidecar as a second client of the same
-pinned session, and later a magpilot launcher as a *terminal-side*
-driver of the same pinned session, exposed three real edges. All three
-are fixed; all three are worth understanding before you change either
-end of the contract.
+`GET /login` starts GitHub OAuth, `GET /oauth/callback` completes it, and
+`POST /logout` clears the cookie. Static SPA assets and `/healthz` are public;
+the API, not the static files, enforces access control.
 
-### Edge 1: history empty in SPA when WA loaded the session first
+### Trust boundaries
 
-- The SPA (when state == Owned) skips `load=true` and relies on the in-tab
-  cache for history.
-- A fresh tab with no cache + an Owned session = empty UI, even though
-  `events.jsonl` on disk has full history.
+- **Browser users** authenticate with GitHub and an HttpOnly, SameSite=Lax
+  cookie. `OAUTH_ALLOWED_GITHUB_USERS` is the allowlist; its first entry is the
+  administrator. Normal agent lists are owner-scoped even for that admin.
+  The admin can use the separate all-agents view and manage any agent.
+- **Infrastructure callers** use `MAGPILOT_HUB_BEARER`. This credential is
+  unscoped and can reach every agent; it is not a per-user or read-only token.
+- **Agent API callers** use that agent's `MAGPILOT_AGENT_TOKEN`. The hub stores
+  each token in its registry. A shared agent-token environment variable on the
+  hub is not used.
 
-**Fix in place**: the agent exposes `GET /api/sessions/{id}/history`
-(`HistoryReader.cs`) which reads the session's `events.jsonl` directly
-and projects it into a flat `List<{Role,Text,ToolCallId}>`. The SPA
-falls back to that endpoint when state==Owned and there's no in-tab
-cache, then connects to `/stream` without `load=true` for live updates.
-The events file is the durable source of truth.
+Agent ownership is stamped by voucher redemption or claim approval. Null-owner
+rows belong to the administrator's normal view. A single endpoint filter gates
+hub routes containing `{name}` and returns `404` to callers without access.
+Revoked proxy calls return `410`; transport and agent-token failures surface
+as `502` rather than sending the browser through a hub-login loop.
 
-### Edge 2: WA-side prompts not visible in SPA stream
+Pending interactive claims are **not owner-scoped**: their list and
+approve/reject routes require authentication, not administrator status. Any
+allowlisted user can adopt a pending claim. Restrict deployments to mutually
+trusted users, verify fingerprints, and use identity-bound enrollment bundles
+for predictable ownership. This is not a hostile multi-tenant boundary.
 
-- Runtime events do not echo the caller's live prompt text.
-- The SPA renders the user's typed prompt locally before submitting;
-  nothing echoes it on the server side.
-- A WA prompt sent via `/api/quick-prompt` with a pinned `sessionId`
-  would cause Magnus to reply (visible in SPA via AssistantDelta), but
-  the user's question never reached the SPA's stream.
+### Pairing and discovery
 
-**Fix in place**: agent's `quick-prompt` handler, when `sessionId` is
-pinned, publishes a synthesized `UserDelta(req.Prompt)` into the
-session's broadcast channel before dispatching to the SDK. All other
-subscribers (the SPA) see "the user said X" before the assistant
-deltas arrive. `IAgentSessionRuntime.PublishToSubscribers` keeps this behavior
-behind the runtime abstraction.
+Agents answer discovery on UDP 47823; the hub probes about every 60 seconds.
+The separate hub pairing responder listens on UDP 47824. Discovery updates
+location and online state, not credentials or ownership. Broadcasts stay within
+their network segment and may be filtered by access points or container
+networking.
 
-**Provenance generalization**: the same synthesized-`UserDelta` mechanism
-carries an optional **`source`** on `/messages` (and `/quick-prompt`). When a
-caller sets it -- e.g. the phone assistant relaying a question into the main
-session with `source="assistant"` -- `PromptAsync` prefixes the model prompt
-with `[via <source>]` (so the brain can disambiguate + tailor tone) AND publishes
-a `UserDelta { Text, Source }`, so a persistent watcher (WhatsApp's coherent
-stream) or the SPA sees the out-of-band question tagged, not just the answer.
-Sourceless sends (the SPA's own) skip the synthesis so they don't double-render
-against the SPA's local echo.
+Interactive pairing uses a five-minute claim and a six-character fingerprint.
+The launcher polls until approved, then writes the hub URL and minted agent
+token. It does **not** receive a hub bearer from this flow.
 
-### Edge 3: phone or SPA wants to drive a session a terminal owns
+Enrollment bundles use `magpilot2+<base64url(JSON)>` with `hubUrl`, `voucher`,
+and `hubBearer`. The voucher is single-use and expires after 15 minutes.
+Redemption mints the agent token; that token is not embedded in the bundle.
+The bundle is sensitive because it contains the infrastructure bearer.
+See the [installer guide](../installer/README.md#pairing).
 
-The earlier "edges" both assumed the agent was always the driver. The
-shim project (`copilot-context/ideas/projects/magpilot-shim.md`)
-introduces a third class of client: a `magpilot` wrapper running
-in the user's terminal. When the user runs `magpilot --resume=<sid>`,
-the wrapper takes ownership of the
-session for an interactive terminal turn. While it's holding the
-session, the agent must NOT silently drive the same session from the
-SPA or WhatsApp, because that would fork `events.jsonl` (we proved it
-empirically -- both VS Code's "connect" feature and concurrent
-`copilot --resume` instances will fork the parentId chain because no
-one re-reads the file before writing).
+## Persistence, logging, and transport
 
-**Fix in place** (the cooperative single-owner handoff):
+The hub's data directory holds `hub.db` (registry and enrollment state) and
+`logs.db` (central logs with FTS5 search). The log store is capped at 50,000
+rows and trims every five minutes. Agent Warning-and-higher logs are forwarded
+only when both hub URL and bearer are configured; browser logging also feeds
+the hub. Bounded producer queues drop oldest entries instead of growing
+without limit.
 
-1. Agent's `Sessions/HostOwnership.cs` keeps an in-memory
-   authoritative map of `sessionId -> terminal lease` (lease ID, coordinator
-   PID/start time, and recorded runtime profile), mirrored to
-   `~/.copilot/magpilot/hostownership.json` and reloaded (with a
-   live-holder + start-time revalidation) on startup so an agent
-   restart doesn't orphan the sessions a launcher is still driving.
-   `Sessions/HostOwnershipReconciler.cs` additionally rebuilds the
-   map from live process ancestry (`ProcessAncestry`, a Toolhelp
-   snapshot): any live foreign lock whose holder is a descendant of
-   a `magpilot` launcher is re-marked Host-owned, recovering sessions
-   the persisted map never recorded. The reconciler first excludes
-   sessions resident in the active Agent runtime; this prevents a
-   development Agent launched from a Magpilot terminal from
-   reclassifying its own SDK runtime as Host-owned. The launcher's own
-   `release_requested` subscription reconnects with backoff across
-   agent restarts (`SubscribeWithReconnectAsync`, over a dedicated
-   infinite-timeout `AgentClient._streamHttp` so the reconnect's header
-   fetch survives Kestrel's ~45s cold start) so the handoff stays
-   cooperative rather than degrading to a force kill. Regardless,
-   agent-side eviction in `ReleaseFromHostAsync` is the hard guarantee
-   if that subscription is ever missing (old launcher) or wedged.
-   The on-disk `inuse.<PID>.lock` files are advisory only -- two
-   PIDs can claim the same session simultaneously and the file
-   system does nothing to prevent it. (Verified empirically
-   2026-05-13.)
-2. `POST /api/sessions/{id}/acquire-for-host { HostPid, Force }`
-   atomically waits for any in-flight SDK turn to reach a clean
-   boundary. With `force=true` it aborts the turn and refuses the handoff
-   if the runtime does not reach a boundary.
-   Only after the old writer is gone does it drop the agent's ownership
-   and creates a generated terminal lease. Returns `SessionStateInfo` with
-   `HostLeaseId`; the launcher retains it for the complete ownership cycle.
-3. While host-owned, **`POST /messages`, `POST /interrupt`, and
-   `POST /approvals/{id}` return `409 Conflict`** with body
-   `HostOwnedResponse { Error, NeedsRelease=true, HostPid }`.
-   Callers (SPA's `HubClient.SendPromptAsync` and the WhatsApp
-   sidecar's `postPromptWithReleaseKnock`) react to 409 by:
-   - POSTing `/release-request { Requester, Force }` so the agent
-     broadcasts a `release_requested` SSE event the wrapper is
-     subscribed to.
-   - Polling `GET /state` every 500ms until `owner != "Host"` or
-     60s elapses.
-   - Retrying the original POST.
-4. The wrapper, on receiving `release_requested`, writes `/exit\r`
-   to the PTY master so copilot's TUI exits cleanly (3s grace, 1s
-   on Force, then `PTY.Kill`), prints a "─── web took over ───"
-   banner, and POSTs `/release { LeaseId }` so the agent re-adopts
-   the session.
-5. The wrapper either exits (with `--magpilot-exit-on-handoff`) or
-   sits on a "Press <enter> to take it back" prompt with a 10-min
-   timeout. Pressing enter fires `release-request` (500ms grace)
-   BEFORE re-acquiring, exactly like the initial spawn paths, so a
-   SPA tab that took the session over sees the live "terminal took
-   over" banner instead of only finding out on its next 409 / refresh.
-6. `acquire-for-host` snapshots the effective SDK profile --
-   process/tool/config-home scope plus agent, model, and reasoning -- into the
-   persisted host-ownership entry while holding the same per-session gate that
-   excludes concurrent configuration.
-7. `release` verifies the exact lease and re-attaches with that recorded
-   profile rather than the default. The SDK session was disposed before the
-   terminal acquired ownership, so cold resume reads what the terminal wrote.
-   The session is only marked agent-owned, and host ownership only
-   cleared, once load plus full configuration verification succeeds. A failure
-   after load retains a quarantined route and the recorded handback profile so a
-   later release/adopt can retry configuration in place without another
-   `session/load`. A wrong or stale lease cannot affect the current owner.
+Hub-to-agent HTTP clients have distinct budgets:
 
-If the user runs Copilot's interactive `/resume`, the Copilot process stays
-alive while its active session changes. The launcher watches the session-state
-artifacts for a new or refreshed lock belonging to its own child PID.
-`session.resume` events, `events.jsonl`, and workspace mtimes do not
-identify their writer, even if another terminal's lock is absent.
-None can authorize an automatic request to release that terminal.
-The pre-launch picker resolves bare `--resume` to a UUID before
-Copilot starts, avoiding the ambiguous case for startup resumes; an
-interactive `/resume` without a new child lock can remain uncoordinated.
-On a confirmed switch, the launcher acquires the selected session
-before notifying subscribers, removes its stale lock from the prior
-session, releases the prior lease, and moves its SSE subscription to
-the new session. A conflicting lease stops the child rather than
-allowing concurrent writers. Old-session cleanup is serialized so a quick
-switch back cannot race a background task that deletes the active lock. Failed
-handbacks retain their leases and are retried before launcher exit;
-re-acquiring a session cancels its pending cleanup.
+| Kind | Default | Use |
+|---|---|---|
+| `Read` | 10 seconds | Fast control-plane calls and prompt admission |
+| `Action` | 90 seconds | Create, adopt, detach, model operations, takeover |
+| `Stream` | Infinite | SSE and synchronous quick prompts |
 
-**SPA-side reactivity** (the inverse direction -- something else
-takes the session, the SPA notices): the SPA's `Apply()` reacts to
-`release_requested` by stopping its stream + raising a "host took
-over" MudAlert with a "Take back" button. Even before any takeover,
-`OnParametersSetAsync` calls `GetStateAsync` after the session-list
-fetch and skips streaming entirely if `Owner=Host`. If the SSE event is
-missed while the socket remains healthy, manual/visibility refreshes and every
-stream-health tick reconcile `/state`; Host/Contended state still stops the
-stream and locks the composer. This reconciliation only enters takeover state,
-so it cannot auto-unlock during the launcher's pre-acquire grace window. The
-"Take back" flow is **graceful-first**: `release-request(force=false)` then poll
-`GetStateAsync` (up to ~30s, early-exit) waiting for the launcher to
-hand off ON ITS OWN -- tear down its copilot (leaving the terminal on
-its "resume here" prompt) and call `release` itself. The SPA does NOT
-force-evict here. Only if that window elapses with the terminal still
-holding the session does the SPA offer a **"Force take over"** button,
-which runs the destructive dance: `release-request(force=true)` + 1s
-grace + `take-over(force=true)`. `take-over` rides the hub's `Action`
-(90s) client because restoring a large session can exceed the read timeout.
-Terminal `release` never kills; forceful eviction exists only on the explicit
-agent take-over transition. The agent evicts every genuinely foreign holder,
-never its own runtime, and never marks the session Agent-owned while a foreign
-holder remains. **SPA guard**: the poll treats
-`Host`/`External`/`Contended` as "not free" and
-re-raises the takeover choice ("Try again" / "Force take over") instead
-of streaming into the duplication. Close-then-reopen resumes without
-loss since sessions persist to disk. (Force-evicting kills the terminal
-copilot as an external exit, so the launcher exits WITHOUT its resume
-prompt -- acceptable on an explicit force, which is why it is no longer
-the default take-back behaviour.)
+The launcher similarly separates 15-second control calls, 90-second ownership
+actions, and unlimited SSE. A timeout is not equivalent to a caller-cancelled
+subscription.
 
-**End-to-end timing**: a measured-typical 409 -> release-request ->
-SSE -> wrapper exit -> retry -> 202 dance completes in ~3.4s.
+Hub-to-agent traffic is HTTP with bearer authentication. HTTPS termination,
+trusted forwarding proxies, firewalls, VPN routing, persistent storage, and
+backups are deployment responsibilities. Reverse proxies must disable SSE
+buffering and allow long reads; see [deployment](../deploy/README.md).
 
-**SPA UX on 60s timeout**: `HubClient.SendPromptAsync` throws
-`HostStillOwnedException`. `Home.razor`'s `HandleSend` catches it and
-surfaces a `MudAlert` with a "Take over from terminal" button that calls
-`take-over` with `force=true` and retries the prompt.
+## Browser UI and host reuse
 
-**WhatsApp UX on 60s timeout**: a permanent WA chat message
-"❌ Terminal session (PID N) did not release within 60s. Your message
-was not delivered." (Force-take from WA isn't supported -- the user
-must come to the SPA for that.)
+`Magpilot.Web` hosts the MudBlazor-based `Magpilot.UI` Razor library. Its drawer
+switches between a host picker and that host's sessions. Chat renders Markdown,
+optional reasoning, tool-call chips, inline approvals, a draft composer, and a
+per-session message queue. Drafts and queues survive navigation and refresh
+through local storage. Older history is demand-loaded.
 
-> **If you add a new caller of `/messages` (or anything that drives
-> the runtime), wrap it with the same retry-on-409 pattern.** Don't
-> re-implement ad hoc.
+The composer status row shows model/reasoning, context percentage, and session
+AI Credits. Model choices come from the runtime, not a hard-coded catalog.
+Editing requires an online, agent-owned, idle session. The toolbar's
+**Show session info** setting controls the row's visibility.
 
-## How to add a new sidecar
+`Home.razor` owns connection orchestration and per-session caches. It cancels
+stale stream generations and reconnects after transient mobile-tab network
+drops. An attached session without an in-tab cache loads persisted history
+before joining the live stream.
 
-1. Pick the agent you want it to talk to (probably Magnus, since he's
-   always-on with persistent memory).
-2. Get the agent token (`/srv/magpilot/.env` on LXC 102).
-3. Optionally pin to Magnus's session id (`/srv/magpilot-agent/home/.magnus/.session-id`)
-   if your sidecar should accumulate context across invocations.
-4. POST your prompts at `http://127.0.0.1:5099/api/quick-prompt` (if
-   on LXC) or the agent's LAN IP otherwise.
-5. Run as a separate container in `/srv/<your-sidecar>/` with its own
-   compose stack.
-
-You don't need to register with the hub, modify hub code, or coordinate
-with other sidecars. Magpilot doesn't need to know you exist.
-
-## File / directory map (LXC 102 specifically)
-
-```
-/srv/
-  magpilot/                <- the hub
-    docker-compose.yml
-    .env                   <- MAGPILOT_AGENT_TOKEN, MAGPILOT_HUB_TRUSTED_PROXIES
-    data/                  <- hub state (small)
-  magpilot-agent/          <- Magnus
-    docker-compose.yml
-    .env                   <- MAGPILOT_AGENT_TOKEN, COPILOT_GITHUB_TOKEN
-    home/                  <- bind-mounted to /home/magnus inside container
-      .copilot/            <- skills, mcp-config.json, copilot-instructions.md
-      .magnus/.session-id  <- the well-known pinned session id
-      magnus/              <- MEMORY/SOUL/IDENTITY + ported scripts (todo.py etc)
-      bin/                 <- gh, github-daily-report.sh
-      copilot-context/     <- task-context contents
-  magpilot-whatsapp/       <- WA sidecar (now in chsienki/magstronaut)
-    docker-compose.yml
-    .env                   <- MAGPILOT_AGENT_TOKEN, WA_ALLOWLIST, OUTBOUND_TOKEN
-    auth/                  <- Baileys persistent auth state (don't lose this)
-  magpilot-cron/           <- cron sidecar (now in chsienki/magstronaut)
-    run.sh
-    jobs.yaml
-  openclaw/                <- the legacy assistant, still running in parallel
-    docker-compose.yml
-    .env
-    home/                  <- /home/node mount, contains everything OpenClaw needs
-
-/etc/cron.d/
-  magpilot-cron            <- crontab snippet calling /srv/magpilot-cron/run.sh
-```
-
-The Linux agent container comes from the generic public package
-`ghcr.io/chsienki/magpilot-agent`. Magpilot owns publishing that platform
-image; the outer deployment owns the selected tag, credentials, bootstrap
-hooks, and bind-mounted home. Main builds publish only `:main` and
-`:main-<short-sha>`; version tags publish the version tags and advance
-`:latest`. This keeps untagged platform work from automatically restarting a
-production agent.
-
-> **Note** -- the `magpilot-whatsapp/` and `magpilot-cron/` directories on
-> the LXC are deployed from
-> [chsienki/magstronaut](https://github.com/chsienki/magstronaut), not from
-> magpilot itself. Magpilot is a generic platform; site-specific sidecars
-> live in the outer-ring repo. See magstronaut's `docs/ecosystem.md`.
-
-## Glossary
-
-- **Pinned session** -- a long-lived session that survives many
-  conversations and many restarts. Created once, adopted on each restart.
-- **Adopt** -- bring a dormant session back online by resuming it through the
-  SDK runtime.
-- **MEMORY.md / SOUL.md / IDENTITY.md** -- convention from OpenClaw,
-  carried into Magnus. Knowledge files in `~/magnus/` that the model reads
-  at session start and updates before /compact.
-
-## UI / SPA
-
-The Magpilot SPA is a Blazor WebAssembly app served by the hub. As of
-2026-05-07 it uses **MudBlazor 9.4** as its design-system foundation.
-
-- **Theme**: `Magpilot.UI/MagpilotTheme.cs` defines a single `MudTheme`
-  with light + dark `Palette` variants. Brand colours: deep midnight blue
-  primary (matching the magpie's plumage), iridescent teal/violet accents
-  for success/secondary highlights. Inter is the typography stack.
-- **Mode**: defaults to light. The AppBar carries a sun/moon
-  `MudIconButton` toggle; the user's choice is persisted to
-  `localStorage["magpilot.darkMode"]`. Toggle propagates from the AppBar
-  (in `Home.razor`) to `MainLayout` via a cascading `ThemeState` record
-  (`Magpilot.UI/ThemeState.cs`) -- this avoids a circular reference
-  between `Magpilot.UI` (RCL) and `Magpilot.Web` (the WASM project).
-- **Layout**: `MudLayout` with `MudAppBar` (selected host chip + dark
-  toggle + cloud-status icon -- the AppBar is intentionally text-first;
-  the magpie used to live here but was moved out during the brand
-  sweep) and a `MudDrawer` that becomes off-canvas at viewports below
-  `Breakpoint.Md`. Drawer holds a **two-pane** affair: the host picker
-  (`MudList` with online dot) OR the grouped session list for the
-  picked host (`MudListSubheader` per state, `MudChip` for state,
-  "Show N more" button), with a back-arrow header to flip between
-  them. The two panes are mutually exclusive within the drawer (not
-  stacked sections).
-- **Chat surface** (`Magpilot.UI/Components/ChatView.razor`): per-message
-  `MudPaper` bubbles with role-aware avatars + alignment. User on the
-  right with primary fill; assistant on the left outlined; thoughts in a
-  dimmed italic card; tool calls as compact monospace `MudChip`. Approval
-  prompts are a `MudAlert` Severity.Warning with action buttons. Magnus's
-  thinking state is a 3-dot pulse animation. Composer is a real
-  `<textarea>` (so the Enter/Shift+Enter shim in
-  `Magpilot.Web/wwwroot/js/composer.js` still applies) paired with a
-  `MudIconButton` paper-plane send.
-- **Brand mark + MagpieMark component**: the magpie SVG lives in the
-  shared RCL at `Magpilot.UI/wwwroot/favicon-mark.svg` (served via
-  `_content/Magpilot.UI/favicon-mark.svg` to satellite SPAs). Inside
-  C# components, render it via `Magpilot.UI/Components/MagpieMark.razor`
-  -- a single source of truth with `Size` / `Glow` / `Class` parameters.
-  Used on the agents-list bullets, the Hosts header, the no-agents
-  empty state, and the loading-screen splash. Don't ship a local copy
-  of the SVG to a consumer; the RCL one is canonical.
-- **Brand-themed loader**: both SPAs (`Magpilot.Web/wwwroot/index.html`
-  + `Magnus.Web/wwwroot/index.html` in the magstronaut repo) replace
-  the default Blazor circle with a custom screen: the magpie mark
-  centered behind a teal arc driven by `--blazor-load-percentage`.
-  CSS lives in each app's `wwwroot/css/app.css`. Don't re-introduce
-  the default Blazor circle SVG.
-- **Take-over UX**: when `HubClient.SendPromptAsync` throws
-  `HostStillOwnedException` (the agent returned 409 because a
-  magpilot launcher holds the session and the polite knock didn't
-  release within 60s), `Home.razor` surfaces a `MudAlert` above
-  ChatView with a "Take over from terminal" button that calls the explicit
-  agent `take-over(force=true)` transition and retries the prompt. See
-  "Multi-client coordination" above.
-- **Static JS**: lives in `Magpilot.Web/wwwroot/js/` (e.g. `composer.js`,
-  `error-capture.js`) rather than collocated as `*.razor.js` next to
-  components -- the hub's multi-stage Dockerfile trips BLAZOR106 on
-  `_content/...` collocated assets at the second publish step.
+Hosts reusing `ChatView` must provide its app-root JavaScript modules
+(`js/composer.js` and `js/history-scroll.js`) and the required UI services.
+Use its generic `OverlayContent` and `ComposerLeadingContent` slots for
+host-specific controls. Theme state and the `MagpieMark` component remain
+shared; the platform must not know which product embeds them.

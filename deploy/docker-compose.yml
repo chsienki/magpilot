@@ -1,42 +1,11 @@
-# Magpilot Hub stack for /srv/magpilot on the docker LXC (102).
+# Example hub deployment for a Linux Docker host.
+# Host networking allows LAN discovery on UDP 47823 and pairing on UDP 47824.
+# Put HTTPS in front of TCP 7088 and configure the real trusted proxy peers.
+# See README.md for the sibling .env, OAuth, pairing, and backup requirements.
 #
-# host networking is required so the hub can:
-#  - send/receive UDP broadcast on 47823 for agent discovery on the LAN
-#  - bind a stable port (7088) that NPM forwards magpilot.home.sienkiewi.cz to
-#
-# Bring up:
-#   cd /srv/magpilot && docker compose up -d
-#
-# Image source:
-#   ghcr.io/chsienki/magpilot-hub -- a public GitHub Container Registry
-#   package built by .github/workflows/hub-image.yml on every main push
-#   and on tag push. The :latest tag is what the watchtower service
-#   below polls for. Rolling back to a prior release: edit the `image:`
-#   line to ghcr.io/chsienki/magpilot-hub:<version> (e.g. :0.1.10) and
-#   `docker compose up -d hub`. Watchtower respects the explicit tag.
-#
-# Required env (in /srv/magpilot/.env):
-#   MAGPILOT_AGENT_TOKEN=<shared secret matching the agents>
-#   MAGPILOT_HUB_BEARER=<secret used by agents+sidecars to POST /api/log>
-#
-# Optional env:
-#   MAGPILOT_HUB_PUBLIC_URL=https://magpilot.example -- externally-reachable
-#     hub URL embedded in enrollment bundles so paired agents call back on
-#     the NPM/TLS address (reachable over WireGuard on 443) instead of the
-#     raw http://<lan-ip>:7088 fallback, which a WireGuard-only agent can't
-#     reach outbound. Recommended for any NPM-fronted deployment.
-#   MAGPILOT_HUB_COOKIE_DOMAIN=<e.g. .your-domain.example> -- widens the
-#     auth cookie's Domain attribute to share sign-in across satellite SPAs
-#     on sibling subdomains. Leave unset for plain single-host setups.
-#   OAUTH_CLIENT_ID + OAUTH_CLIENT_SECRET + OAUTH_ALLOWED_GITHUB_USERS --
-#     enable real GitHub OAuth login. Without these the hub serves
-#     /login -> 'OAUTH_CLIENT_ID not configured' (or, if
-#     MAGPILOT_DEV_BYPASS_AUTH=true, a dev backdoor that signs the
-#     visitor in as the first allowed user with no challenge -- DEV
-#     ONLY). Don't combine the two: dev-bypass takes precedence over
-#     OAuth even when both are set.
-#   MAGPILOT_DEV_BYPASS_AUTH=true -- DEV ONLY backdoor; never enable
-#     in any deployment that's reachable from outside trusted hands.
+# Start the hub: docker compose up -d hub
+# Optional automatic updates: docker compose up -d watchtower
+# Pin the image tag or digest for controlled rollout and rollback.
 
 services:
   hub:
@@ -44,17 +13,12 @@ services:
     container_name: magpilot-hub
     restart: unless-stopped
     network_mode: host
-    # Watchtower (below) only auto-updates services it sees this label
-    # on. Opt-in design: a future sibling service we add to this
-    # compose file (e.g. a metrics exporter) won't be auto-updated
-    # unless it explicitly opts in too.
     labels:
       - com.centurylinklabs.watchtower.enable=true
     environment:
       ASPNETCORE_URLS: http://0.0.0.0:7088
       ASPNETCORE_ENVIRONMENT: Production
       MAGPILOT_HUB_DATA: /data
-      MAGPILOT_AGENT_TOKEN: ${MAGPILOT_AGENT_TOKEN:?set MAGPILOT_AGENT_TOKEN in .env}
       MAGPILOT_HUB_BEARER: ${MAGPILOT_HUB_BEARER:?set MAGPILOT_HUB_BEARER in .env}
       MAGPILOT_HUB_COOKIE_DOMAIN: ${MAGPILOT_HUB_COOKIE_DOMAIN:-}
       MAGPILOT_HUB_TRUSTED_PROXIES: ${MAGPILOT_HUB_TRUSTED_PROXIES:-127.0.0.1,::1}
@@ -66,15 +30,8 @@ services:
     volumes:
       - ./data:/data
 
-  # Periodically polls GHCR for a newer digest of the hub image and
-  # restarts the hub container in place when one's available. Scoped
-  # to label-enabled services only, so an accidental sibling service
-  # without the watchtower.enable=true label can't be auto-updated.
-  #
-  # The hub image is public on GHCR so no docker login is needed;
-  # watchtower can pull anonymously. If the package is ever flipped to
-  # private, mount /root/.docker/config.json into watchtower at
-  # /config.json:ro and create that file via `docker login ghcr.io`.
+  # Watches only labeled containers and updates the digest of their chosen tag.
+  # The Docker socket grants this helper broad control of the Docker host.
   watchtower:
     image: containrrr/watchtower:latest
     container_name: magpilot-watchtower
@@ -83,18 +40,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       WATCHTOWER_LABEL_ENABLE: "true"
-      WATCHTOWER_POLL_INTERVAL: "300"   # 5 minutes
-      WATCHTOWER_CLEANUP: "true"        # gc the previous image after a successful pull
+      WATCHTOWER_POLL_INTERVAL: "300"
+      WATCHTOWER_CLEANUP: "true"
       WATCHTOWER_INCLUDE_RESTARTING: "true"
-      # Pin the docker client API version watchtower advertises. The
-      # default in containrrr/watchtower:latest's bundled docker SDK
-      # is 1.25 (very old), but recent dockerd builds (e.g. the LXC's
-      # 1.54) have dropped support for clients below 1.40. Without
-      # this pin watchtower's polling loop logs "client version 1.25
-      # is too old" every ~2s and never actually checks for updates.
+      # Its bundled client's default API version is rejected by newer daemons.
       DOCKER_API_VERSION: "1.41"
-      # Restart-policy nicety: if the hub is mid-restart for an unrelated
-      # reason when we poll, treat it as if it were running -- otherwise
-      # we'd skip the update on this cycle and the user has to wait
-      # another 5 min.
       TZ: ${TZ:-UTC}

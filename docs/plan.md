@@ -1,371 +1,111 @@
-# magpilot -- Design Plan
+# Design notes and open work
 
-> A purpose-built **shared Blazor UI** that runs both inside a .NET MAUI
-> Android shell on the Pixel and as a WebAssembly SPA at
-> `https://magpilot.home.sienkiewi.cz`, plus a central hub on the docker
-> LXC and per-host agent daemons. Drives the native Copilot agent runtime
-> through the public GitHub Copilot SDK.
+These notes explain the choices behind the shipped system. The
+[architecture guide](architecture.md) is the current API reference;
+[deployment](../deploy/README.md) describes how to run it. This is not an
+implementation checklist or a promise that every idea below will ship.
 
----
+## The problem
 
-## Confirmed requirements
+A Copilot conversation belongs to a project on a real machine, but its user
+should not have to stay at that machine's terminal. Magpilot gives browsers
+and terminals access to the same persisted sessions without moving the
+repository, credentials, or tools to a hosted service.
 
-1. **Form factor (phone):** .NET MAUI Blazor Hybrid app, Android target
-   for v1.
-2. **Form factor (web):** Blazor WebAssembly SPA, served by the hub at
-   `https://magpilot.home.sienkiewi.cz`. **Full feature parity** with
-   the phone app — anything you can do on the phone, you can do in the
-   browser, and vice versa.
-3. **Capability:** Full Copilot CLI agent — tool calls, file edits,
-   shell, git, MCP servers.
-4. **Sessions:** Persistent, multi-day, resumable. Multiple concurrent
-   chats. Survives client and host restarts.
-5. **Notifications:** Push when (a) long task finishes, (b) agent asks
-   a question while client is backgrounded, (c) any approval prompt
-   fires. FCM for Android; **Web Push (VAPID)** for browsers.
-6. **Network:** All clients (phone or browser) talk to **one address** —
-   the hub on the docker LXC at `https://magpilot.home.sienkiewi.cz`
-   (NPM-fronted) or directly at `192.168.1.239:<port>` on LAN.
-7. **Auth:**
-   - **Phone:** bearer token in Android Keystore (paste once on
-     install).
-   - **Web:** **GitHub OAuth** ("Sign in with GitHub"), restricted to
-     a single allowlisted GitHub user (`chsienki`). Cookie session.
-8. **Multi-host:** Hub auto-discovers per-host agents on the LAN via
-   UDP broadcast. Manual add as fallback.
-9. **Session takeover:** When a Copilot session is already running on
-   a host (detected by `inuse.<PID>.lock`), the client can adopt it through
-   the cooperative launcher/agent ownership protocol.
-10. **Past sessions:** Clients list historical sessions per host
-    (those without an `inuse.*.lock`) so the user can resume any of
-    them or start fresh.
+The useful unit is a session on a host, not a browser tab. Losing a tab must
+not delete the conversation, and switching surfaces must not create concurrent
+writers with divergent context.
 
----
+## Why a hub and per-host agents?
 
-## What the Copilot SDK gives us
+The hub provides one browser address, authentication, an agent registry, and
+central observability. Agents keep filesystem access, runtime processes, and
+session ownership close to the work.
 
-- Typed create/resume/send/abort/session-dispose lifecycle APIs.
-- Structured message, reasoning, tool, usage, and model-change events.
-- Typed permission callbacks with managed-policy awareness.
-- Runtime-advertised model and reasoning capabilities.
-- Session-scoped tool/MCP/instruction configuration.
-- A bundled out-of-process runtime that does not depend on an npm-installed
-  Copilot CLI.
+This is deliberately not a scheduler, messaging gateway, or personal-assistant
+product. Those concerns can vary independently as external API consumers.
+Bootstrap hooks provision a deployment without teaching the platform its
+product names or secrets.
 
----
+The trade-off is operational: the hub must reach every agent, and LAN
+broadcast discovery cannot solve routing across a VPN or segmented network.
+Pairing establishes trust; discovery only finds addresses.
 
-## High-level architecture
+## Why the Copilot SDK?
 
-```
-   +----- Pixel 10 Pro -----+        +-------- Browser ---------+
-   |  CopilotChat (MAUI)    |        |  https://magpilot.home  |
-   |   - WebView host       |        |  Blazor WASM SPA         |
-   |   - FCM receiver       |        |  Web Push receiver       |
-   +-----+------------------+        +--------+-----------------+
-         |                                    |
-         |         shared Blazor UI lib       |
-         |   (chat screen, sessions tree,     |
-         |    approval modals, settings, ...) |
-         |                                    |
-         +-------------+----------------------+
-                       |
-                       | HTTPS + SSE (same API for both)
-                       v
-            +----- copilot-hub -------+   (docker LXC 102)
-            |  - aggregates agents    |
-            |  - LAN UDP discovery    |
-            |  - SSE proxy            |
-            |  - GitHub OAuth + cookie|
-            |  - FCM + Web Push       |
-            |  - serves Blazor WASM   |
-            +-----+-------------------+
-                  |
-                  | HTTPS + UDP discovery
-                  v
-       +----+ +----+ +-------------+
-       | HE | | Mac| | future host |
-       | ND | |    | |             |
-       | RIK| |    | |             |
-       +----+ +----+ +-------------+
-       copilot-agent (.NET 9)
-            |
-            | typed SDK RPC over stdio
-            v
-       +-----------------------+
-       | bundled Copilot       |
-       | runtime               |
-       +-----------------------+
+The public .NET SDK supplies typed session lifecycle, structured streaming,
+permission callbacks, model capabilities, and usage information. Its bundled
+out-of-process runtime avoids depending on an independently updated npm CLI
+for agent-hosted chats.
 
-                  FCM v1 / Web Push (VAPID)
-   +-------------------+  +-----------------+
-   | Pixel             |  | Browser         |
-   +-------------------+  +-----------------+
-            ^                    ^
-            +---- copilot-hub ---+
-```
+The terminal still uses the user's installed Copilot CLI. Sharing persisted
+state does not make its interactive TUI commands SDK operations: the browser
+needs explicit controls for supported actions.
 
----
+Configuration isolation is a runtime boundary, not just prompt wording.
+Separate Copilot homes, tool allowlists, MCP exclusions, custom agents, and
+instruction policy allow external products to create constrained profiles.
+Unverified configuration must fail closed instead of silently answering with
+the wrong model or tool access.
 
-## Component 1 — `copilot-agent` (per-host daemon)
+## Why Blazor WebAssembly and a shared UI library?
 
-Small .NET 9 daemon that owns lazy Copilot SDK clients, scans
-`~/.copilot/session-state/`, exposes the HTTP+SSE API, and coordinates
-single-writer ownership with terminal launchers.
+The hub can serve a static browser bundle without a server-side UI circuit
+per tab. A mobile browser can reconnect to HTTP/SSE after backgrounding while
+keeping client-side presentation state.
 
----
+`Magpilot.UI` separates reusable chat components from the web shell. Other
+hosts can embed those components without making the platform depend on them.
+This does not imply a native Magpilot phone app exists.
 
-## Component 2 — `copilot-hub` (central daemon, on docker LXC)
+Browser state is a convenience cache, not the session authority. Durable
+history stays on the agent host; drafts and queued messages are local to the
+browser.
 
-### 2.1 Responsibilities (additions for v5 in **bold**)
+## Why explicit terminal leases?
 
-1. Address book of agents; LAN UDP discovery; sqlite cache.
-2. Phone & web-facing HTTP/SSE API (single API, two clients).
-3. SSE proxy from agents to clients with fan-out (multiple clients
-   per session).
-4. **GitHub OAuth flow** for the web client: redirect to GitHub,
-   exchange code for token, verify the GitHub user is on the
-   allowlist (`["chsienki"]` for v1), issue a HttpOnly Secure cookie
-   session bound to that identity.
-5. **Static file serving** for the Blazor WASM bundle at `/`. Cookie
-   auth gates everything except `/login`, `/oauth/callback`, and
-   static assets.
-6. **Bearer auth path** for the phone (unchanged from v4): phone
-   POSTs `Authorization: Bearer <token>` and is treated as the same
-   logged-in identity. No OAuth dance on phone.
-7. **Web Push (VAPID)** sender: clients (browser tabs) register a
-   PushSubscription on first visit; hub stores it next to FCM tokens.
-   When notifying, hub fans out to BOTH the phone (via FCM) and any
-   active subscribed browser sessions (via Web Push), de-duplicating.
-8. SQLite caches: agent address book, session metadata mirror,
-   FCM/Web Push subscriptions, OAuth state nonces.
+Copilot's lock files describe process activity but do not prevent multiple
+writers. A launcher must coordinate ownership with the agent rather than
+simply launch a second process against the same history.
 
-### 2.2 Phone & web-facing API (unified)
+Lease IDs reject stale handbacks. Recording the effective runtime profile
+preserves model, agent, and isolation settings across a terminal round trip.
+Graceful handoff is preferred; killing another process requires an explicit
+force operation.
 
-Same JSON shapes, same endpoints, same SSE schema for both clients.
-Auth is either `Cookie` (web) or `Authorization: Bearer` (phone).
+Session detection remains constrained by the CLI's observable behavior.
+Pre-launch selection makes bare `--resume` deterministic. Interactive
+`/resume` can be coordinated only when a child-process lock identifies the new
+session; unrelated file activity is not sufficient evidence.
 
-```
-GET    /api/agents                                         address book + online status
-POST   /api/agents                                         manual add
-DELETE /api/agents/:name                                   remove
-POST   /api/agents/discover                                trigger LAN broadcast
-GET    /api/agents/:name/sessions                          proxied
-POST   /api/agents/:name/sessions                          new chat
-GET    /api/agents/:name/sessions/:id                      details
-GET    /api/agents/:name/sessions/:id/history              past events (no agent process spin-up)
-POST   /api/agents/:name/sessions/:id/attach               adopt or resume
-POST   /api/agents/:name/sessions/:id/detach               session/close, leave on disk
-DELETE /api/agents/:name/sessions/:id                      kill + delete
-POST   /api/agents/:name/sessions/:id/messages             prompt
-GET    /api/agents/:name/sessions/:id/stream               SSE
-POST   /api/agents/:name/sessions/:id/approvals/:aid       resolve permission request
-POST   /api/agents/:name/sessions/:id/interrupt            cancel
-POST   /api/devices                                        register FCM (phone) or PushSubscription (browser)
-GET    /login                                              kicks off GitHub OAuth flow (web only)
-GET    /oauth/callback                                     completes flow, sets cookie
-POST   /logout                                             clears cookie / revokes subscription
-```
+## Shipped capabilities and remaining limits
 
-### 2.3 Why static-served Blazor WASM (not Blazor Server)
-
-| | WASM | Server |
+| Area | Shipped | Remaining work or constraint |
 |---|---|---|
-| Offline tolerance | Some chat scrollback works offline | Useless without network |
-| Hub CPU cost | Almost zero | Holds a SignalR circuit per tab |
-| Cold-start latency | First load ~MB; cached after | Instant after first paint |
-| Mobile background reconnect | Survives sleep/wake easily | SignalR circuit drops, full re-init |
+| Clients | Responsive browser UI and Windows terminal launcher | No standalone Magpilot Android or iOS app |
+| Sessions | Persistent history, paging, named sessions, explicit ownership and handoff | Interactive resume detection depends on CLI lock updates |
+| Permissions | Inline approvals, per-session YOLO, managed-policy approval handling | No dedicated approval-modal experience |
+| Session controls | Model/reasoning changes and runtime usage status | Broader tool, MCP, instruction, and agent-profile editing is not exposed in the SPA |
+| Notifications | `/api/devices` accepts a request as a stub | No persistence or FCM/Web Push delivery |
+| Identity | GitHub allowlist and owner-scoped browser agent access | Pending pairing claims are shared among authenticated users; infrastructure bearer is unscoped |
+| Transport | HTTP/SSE and bearer authentication to agents | No built-in hub-to-agent TLS; use trusted networks or external transport protection |
+| Packaging | Windows x64 installer; Linux amd64 hub and agent images | No equivalent packaged macOS/Linux launcher installer |
+| Updates | Published release discovery and explicit Windows updater | No remote installation from the hub; no coordinated restart of all running terminal sessions |
+| Protocol | Shared HTTP/SSE contracts and version reporting | Protocol 0 requires components to update together |
+| UI maintenance | Shared components, history paging, reconnect handling | Session orchestration remains concentrated in a large `Home.razor` |
 
-Pick WASM. Cold-start hit is one-time and the hub has to do exactly
-the same proxying work either way.
+There is no context-clear API, session-delete API, or full session listing from
+`--magpilot-status`. Do not infer implemented behavior from a flag name, a stub,
+or an early proposal.
 
-### 2.4 Deployment on docker LXC 102
+## Evaluating future changes
 
-- Adds `copilot-hub` service to `/srv/openclaw/docker-compose.yml`:
-  ```yaml
-  copilot-hub:
-    image: ghcr.io/chsienki/copilot-hub:latest
-    container_name: copilot-hub
-    restart: unless-stopped
-    network_mode: host             # for UDP broadcast discovery
-    volumes:
-      - ./hub-data:/data
-    environment:
-      HUB_PORT: 8443
-      OAUTH_ALLOWED_GITHUB_USERS: chsienki
-      OAUTH_CLIENT_ID: <ask user>
-      OAUTH_CLIENT_SECRET: <ask user>
-      VAPID_PUBLIC_KEY: <ask user>
-      VAPID_PRIVATE_KEY: <ask user>
-      FCM_SA_FILE: /data/fcm-service-account.json
-  ```
-- NPM proxy host added: `magpilot.home.sienkiewi.cz` → `192.168.1.239:8443`
-  with the existing wildcard Let's Encrypt cert.
+Keep additions generic and put policy at the right boundary. API changes need
+matching agent, hub, shared-contract, and client changes. State transitions
+must preserve single-writer ownership and verified configuration, including
+failure and restart paths.
 
----
-
-## Component 3 — `Magpilot.UI` (shared Blazor library)
-
-**Stack:** Razor components, CommunityToolkit.Mvvm-style view models
-in plain C# (no Blazor-specific MVVM lib needed; `INotifyPropertyChanged`
-+ `StateHasChanged` is enough).
-
-### 3.1 Components (used by BOTH MAUI and web shells)
-
-- `<HostsList>` — discovered + manually-added agents, with online dot.
-- `<SessionsTree>` — per-host expandable list, three categories
-  (Live-Owned, Live-Orphan, Past); pull-to-refresh; "+ New chat".
-- `<ChatView>` — markdown messages, inline tool-call cards,
-  jump-to-bottom, copy-message.
-- `<ApprovalModal>` — full-screen on small viewports, dialog on wide;
-  haptic on phone, sound on both.
-- `<OrphanAdoptModal>` — confirms PID/cwd/cmdline before kill+take-over.
-- `<PastSessionView>` — read-only history rendered from
-  `events.jsonl`, with a "Resume" button.
-- `<SettingsPanel>` — server URL (web: locked to current origin;
-  phone: editable), notifications toggle, theme, debug log export.
-
-### 3.2 Layout
-
-- Single-pane on narrow (phone): hosts → sessions → chat as a stack.
-- Two-pane on tablet/desktop: sessions list left, chat right.
-- Three-pane on wide desktop (>1400px): hosts left, sessions middle,
-  chat right.
-
-### 3.3 Cross-shell abstractions
-
-The Blazor lib defines interfaces; shells implement them:
-
-| Interface | MAUI shell impl | Web shell impl |
-|---|---|---|
-| `IAuthProvider` | Reads bearer from secure storage | Reads cookie identity from `/api/me` |
-| `IPushProvider` | FCM token registration | Web Push subscribe via service worker |
-| `IClipboard` | MAUI Essentials | `navigator.clipboard` |
-| `IHapticFeedback` | MAUI Vibration | `navigator.vibrate` (no-op on desktop) |
-| `IFileSaver` | MAUI FilePicker | `<a download>` + Blob |
-
----
-
-## Component 4 — Phone shell (`CopilotChat.Maui`)
-
-A thin .NET MAUI Blazor Hybrid app:
-
-- One `BlazorWebView` hosting `Magpilot.UI` components.
-- Implements the cross-shell interfaces (FCM, Keystore, etc.).
-- App-launch flow: paste hub URL + bearer once → SecureStorage →
-  Blazor UI takes over.
-- Sideloaded APK via Obtainium from the GitHub Releases page.
-
----
-
-## Component 5 — Web shell (`Magpilot.Web`)
-
-A Blazor WebAssembly project that:
-
-- References `Magpilot.UI` and renders the same components.
-- Implements the cross-shell interfaces using web APIs.
-- Service worker for offline scrollback + Web Push receive.
-- GitHub OAuth flow handled by hub; client just reads `/api/me`
-  and reacts to 401s with a redirect to `/login`.
-- Bundle is published into the hub's `wwwroot/` and served as
-  static files.
-
----
-
-## Component 6 — Push notifications
-
-```
-copilot-hub --(HTTPS to fcm.googleapis.com)--> Pixel
-copilot-hub --(HTTPS to mozilla/google push endpoints, VAPID-signed)--> Browser
-```
-
-Hub keeps a single `subscriptions` table:
-
-```sql
-CREATE TABLE subscriptions (
-   id           TEXT PRIMARY KEY,
-   identity     TEXT NOT NULL,        -- always 'chsienki' in v1
-   kind         TEXT NOT NULL,        -- 'fcm' | 'webpush'
-   endpoint     TEXT NOT NULL,
-   keys_json    TEXT,                 -- p256dh / auth for webpush; null for fcm
-   user_agent   TEXT,
-   last_seen    INTEGER
-);
-```
-
-Notification fan-out: query all subscriptions for the identity →
-deliver via the right channel → drop subscriptions on `410 Gone` /
-`unregistered` responses.
-
----
-
-## Component 7 — Networking & security
-
-- **Phone↔hub:** TLS via NPM cert, bearer auth.
-- **Web↔hub:** TLS via NPM cert, GitHub OAuth → HttpOnly Secure
-  SameSite=Lax cookie. CSRF token on all POSTs.
-- **Hub↔agents:** TLS + per-agent bearer; LAN only.
-- **Bundled runtime:** child process over private stdio.
-- **OAuth allowlist** enforced server-side; if a non-allowed GitHub
-  user logs in, hub returns 403 immediately. No way to set the
-  allowlist from the UI; lives in env / config file.
-
----
-
-## Component 8 — Operations & install
-
-| Component | Where | Install |
-|---|---|---|
-| `Magpilot.Hub` | docker LXC 102 | GHCR image + compose under `/srv/magpilot`; Watchtower tracks release `:latest`. |
-| `Magpilot.Agent` Windows | HENDRIK | Inno Setup installer registers the user-logon scheduled task. |
-| `Magpilot.Agent` Linux | Magnus | GHCR image consumed by the outer deployment with bind-mounted home and bootstrap hooks. |
-| `Magpilot.Web` SPA | inside hub container | Built into hub image; served at `/` |
-| Future MAUI shell | Pixel | GitHub Releases / sideload |
-
-NPM proxy host `magpilot.home.sienkiewi.cz` → `192.168.1.239:8443`,
-with the existing wildcard cert.
-
----
-
-## Open questions / decisions to revisit
-
-1. **MAUI Blazor Hybrid Android JS perf.** The Pixel's WebView is
-   fast, but verify chat scrollback with thousands of messages stays
-   smooth. Mitigation: virtualize the message list (already standard
-   in the Blazor lib).
-2. **GitHub OAuth callback URL behind NPM.** Register
-   `https://magpilot.home.sienkiewi.cz/oauth/callback` on a personal
-   GitHub OAuth App. NPM passes through the path; hub handles it.
-3. **Web Push from a self-hosted home service.** VAPID is straight-
-   forward but browser push endpoints (mozilla, google) need internet
-   reachable from the hub — which it has.
-4. **Cookie + Service Worker + scope.** The web app's service worker
-   must be scoped to `/` to receive push for `/api/...` traffic.
-   Standard.
-5. **MCP policy UX.** Session profiles support explicit tool and MCP controls,
-   but the SPA does not expose them.
-6. **Concurrent clients on the same session.** Hub fan-out supports multiple
-   watchers; the Agent serializes turns and terminal ownership remains exclusive.
-7. **MAUI iOS / Mac later.** Same MAUI Blazor Hybrid project, no
-   per-platform UI rewrite.
-
----
-
-## What we're NOT doing (vs. openclaw)
-
-- ❌ Plugin system
-- ❌ Cron / scheduled agent jobs
-- ❌ WhatsApp / multi-channel delivery
-- ❌ MCP server registry / web UI for config
-- ❌ Smart home control
-
----
-
-## Current roadmap
-
-1. Decompose the large SPA orchestration component and align UI controls with
-   the session-profile API.
-2. Build the MAUI Blazor Hybrid shell and real FCM/Web Push delivery.
-3. Add approval-modal UX for managed and risky tool requests.
-4. Add TLS between the hub and per-host agents.
-5. Expand packaging and deployment support beyond Windows and the Magnus
-   container.
+Runtime versions, package versions, and release automation belong to project
+files and workflows rather than a second version catalog in prose. Capture
+reproducible incidents and actionable follow-ups in public issues when they
+are ready for development.
