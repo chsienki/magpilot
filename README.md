@@ -1,252 +1,214 @@
-# MagPilot
+# Magpilot
 
 <p align="center">
-  <img src="assets/magpilot-logo.png" alt="MagPilot mascot: a magpie pilot perched on a vintage CRT terminal" width="300" />
+  <img src="assets/magpilot-logo.png" alt="Magpilot mascot: a magpie pilot perched on a vintage CRT terminal" width="300" />
 </p>
 
-> Bring the GitHub Copilot CLI experience to your phone.
+> Your Copilot sessions, from any browser.
 
-`magpilot` is a small system that lets you drive `copilot` (the GitHub
-Copilot CLI) from your phone, against any of your computers, over your
-home VPN.
+Magpilot is a self-hosted web client and terminal companion for
+[GitHub Copilot CLI](https://github.com/github/copilot-cli). Start work at
+your desk, continue from your phone, and take it back in the terminal.
+The conversation stays with the same project on the same machine.
 
-It is **not** another agent platform. It does not have plugins, cron
-jobs, web dashboards, or a smart-home integration. (For that, see
-[openclaw](https://github.com/openclaw/openclaw).) MagPilot's only
-goal is "I want a chat client on my phone that talks to Copilot CLI
-running on one of my real computers."
+Your computers do the work. Magpilot gives you one place to reach them.
 
----
+## What you can do
 
-## Why
+- **Work across machines.** Choose a host, start a chat in a project directory,
+  or find and resume an existing Copilot session.
+- **Move between terminal and browser.** The `magpilot` launcher coordinates
+  session ownership with the web client so they don't write to the same
+  conversation at once. Handoff is cooperative first, with an explicit
+  force-takeover option when needed.
+- **Follow the work live.** Stream responses, reasoning, and tool activity.
+  Review permission requests in the chat, interrupt a turn, or queue the
+  next message.
+- **See session usage.** View the current model, reasoning effort, context
+  usage, and session AI Credits. Change model and reasoning while the
+  agent-owned session is idle.
+- **Share a hub with trusted users.** GitHub sign-in and an allowlist control
+  access; browser users see their own agents, with cross-user management
+  available to the administrator.
+- **Run your own clients.** Use the HTTP API and server-sent events (SSE)
+  for integrations, including named long-lived sessions and one-shot prompts.
 
-Chris's setup:
+The web UI works on desktop and mobile browsers. No phone app is required.
 
-- A workstation (HENDRIK), a Mac, and a few other machines, each with
-  GitHub Copilot CLI installed and authenticated.
-- A WireGuard VPN that lets the phone reach the home LAN from anywhere.
-- A docker LXC at `192.168.1.239` that already runs always-on services.
+## How it works
 
-What he wants from his phone:
+```text
+Browser (desktop or phone)
+            |
+           Hub
+            |
+     +------+------+
+     |             |
+   Agent         Agent        One per host
+     |             |
+ Copilot SDK   Copilot SDK
+  runtime       runtime
 
-1. A chat UI that connects to a real `copilot` process on a chosen
-   host, with the **full agent capability** — tool calls, file edits,
-   shell commands, MCP servers.
-2. The ability to **see all sessions across all machines**, including
-   ones currently running in a terminal somewhere.
-3. The ability to **take over** an in-progress terminal session
-   (kill it, resume under our control) so a chat started at the desk
-   can be continued from the couch.
-4. Approval prompts (for risky tools) that show up as proper modals
-   on the phone, not blanket allow-all.
-5. Push notifications when an agent finishes a long-running task or
-   needs an answer while the app is backgrounded.
-
-## How (one paragraph)
-
-A small **per-host agent** daemon runs on each computer. It speaks
-the public GitHub Copilot SDK to the native Copilot runtime, which gives us
-first-class sessions, structured streaming, typed tool permissions, and
-resumable state. The agent exposes a tiny HTTP+SSE API to the LAN.
-
-A central **hub** daemon runs on the docker LXC. It auto-discovers
-agents via UDP broadcast, aggregates their sessions, proxies
-streams, and is the single endpoint clients talk to. This makes
-the WireGuard story simple: one address (`https://magpilot.home.sienkiewi.cz`)
-forever, hub deals with finding and routing to the actual hosts.
-
-Two clients consume the hub's API and share **a single Blazor UI
-codebase** (MAUI Blazor Hybrid):
-
-- A **.NET MAUI Android app** on the Pixel that hosts the Blazor UI
-  in a WebView. Bearer-token auth, FCM push.
-- A **Blazor WebAssembly SPA** at `https://magpilot.home.sienkiewi.cz`
-  for any browser. GitHub OAuth login (allowlisted to a single user),
-  Web Push notifications.
-
-## Components
-
-| Name              | What                                                     | Where it runs              |
-|-------------------|----------------------------------------------------------|----------------------------|
-| `Magpilot.Agent`  | Copilot SDK runtime host, one per machine                | HENDRIK, Linux container, etc. |
-| `Magpilot.Hub`    | Aggregator, discovery, OAuth, central log, serves the web SPA | docker LXC (CT 102)   |
-| `Magpilot.Host`   | Native launcher that coordinates terminal ownership      | User terminals        |
-| `Magpilot.UI`     | Shared Blazor UI library (chat, sessions, theme)         | Future MAUI WebView + browser |
-| `Magpilot.Web`    | Blazor WASM shell for browsers                           | Browser, served by hub     |
-| `Magpilot.Shared` | DTOs + SSE wire types (the contract between agent + UI)  | n/a (referenced)           |
-
-## Status
-
-**Live since 2026-04** at `https://magpilot.home.sienkiewi.cz`. The hub
-runs on a docker LXC (CT 102), agents on each host (HENDRIK + a Linux
-container called `magnus`). Day-to-day usage covers chatting from any
-browser, hopping between Owned / Locked / Dormant sessions, full SDK
-tool-call streaming, central log viewer at `/admin/logs`. As of
-2026-05-14, **GitHub OAuth** is wired (allowlisted username); the
-**`magpilot` launcher** ships a coordinated `copilot` shim that
-preempts cooperatively with the SPA + WhatsApp via a single-owner
-handoff (no events.jsonl forks). Its terminal layer uses current app-local
-ConPTY assets, supports granular opt-in/out controls for launcher-owned TUI
-changes, and includes repeatable capture/probe tools plus an offline theme
-editor. Bare `magpilot --resume` lists Copilot sessions before launching the CLI,
-so the selected session gets a terminal lease before Copilot loads it.
-Interactive Copilot `/resume` switches with a new or refreshed child-process
-lock transfer the terminal lease and web take-over subscription to the
-newly selected session.
-The **Windows
-installer** + autoupdate path
-(`installer/magpilot.iss`, `magpilot --magpilot-update`, hub-mediated version
-check) is in place; HENDRIK runs the agent as a scheduled task at user logon.
-The hub's Agents page reports each machine's running/update version and can
-force an immediate hub + agent update check without remotely installing
-anything. SDK-backed chats show the active model, context-window percentage, session AI
-Credits, and reasoning effort in the SPA; idle sessions can change model and
-reasoning from the same status row.
-
-What is **NOT yet wired**: the MAUI Android shell (the original phone
-target), real FCM/Web Push delivery, TLS for hub<->agents (still LAN +
-bearer), and approval-prompt modals for risky tool calls. See
-`docs/plan.md` for the full roadmap.
-
-## Repository layout
-
-```
-magpilot/
-   Magpilot.slnx
-   docs/plan.md              <- design doc (start here for the long version)
-   docs/architecture.md      <- topology + the agent HTTP contract
-   AGENTS.md  <- orientation for AI agents working on this repo
-   scripts/build-hub.ps1     <- builds web SPA + copies into hub wwwroot
-   scripts/test-shim-phase1.sh <- bash acceptance test for the shim endpoints
-   src/
-      Magpilot.Shared/      <- DTOs, SSE event types (incl. shim contract)
-      Magpilot.Agent/       <- per-host daemon (Copilot SDK + HTTP/SSE API
-                                + HostOwnership for the cooperative handoff)
-      Magpilot.Hub/         <- central daemon (proxy, OAuth, SPA host,
-                                central /api/log sink + viewer)
-      Magpilot.Host/        <- the `magpilot` launcher (assembly: magpilot.exe).
-                                Cooperative coord with the agent so a session
-                                is driven by exactly one process at a time.
-      Magpilot.UI/          <- shared Blazor components (chat, sessions,
-                                MagpilotTheme, MagpieMark, ChatView,
-                                SessionStatusBar, HubClient, HubLogClient,
-                                JsErrorBridge)
-      Magpilot.Web/         <- Blazor WASM shell for the browser
-   deploy/                   <- hub compose plus hub/agent GHCR publishing notes
+Terminal --> magpilot launcher --> Copilot CLI
+                       |
+                  Local agent  (session handoff)
 ```
 
-## Build & run locally
+The **hub** serves the Blazor WebAssembly UI, handles browser sign-in, and
+routes requests to the right host. Each **agent** runs Copilot through the
+public GitHub Copilot SDK, using its bundled runtime and the host's files,
+tools, and configuration. Session history lives in the host's Copilot
+session store.
 
-```pwsh
-# Build everything
-dotnet build
+The **launcher** runs your installed `copilot` in the terminal and coordinates
+handoff with the local agent. It is installed as `magpilot`; it does not
+replace or shadow `copilot`.
 
-# Run the agent (in one terminal)
-$env:MAGPILOT_AGENT_TOKEN = "dev-token"
-$env:ASPNETCORE_URLS       = "http://localhost:5099"
-dotnet run --project src/Magpilot.Agent
+The hub discovers agents over LAN UDP broadcast. Pairing authorizes a host;
+discovery alone does not grant access. Broadcast discovery does not cross
+VPNs or routed networks, so those setups need an explicitly reachable agent
+address. See the [architecture guide](docs/architecture.md) for the details.
 
-# Build the SPA + copy it into the hub's wwwroot
-./scripts/build-hub.ps1
+## Get started
 
-# Run the hub (in another terminal)
-$env:MAGPILOT_HUB_BEARER  = "dev-bearer"
-$env:MAGPILOT_DEV_BYPASS_AUTH = "true"
-$env:ASPNETCORE_URLS       = "http://localhost:7088"
-dotnet run --project src/Magpilot.Hub
+You need GitHub Copilot access, a hub reachable from your browser, and an
+agent on each machine you want to use. For terminal sessions, install and
+authenticate [Copilot CLI](https://github.com/github/copilot-cli) under the
+same user account that runs the agent. The agent's SDK runtime is bundled;
+the launcher uses the separately installed CLI.
 
-# Open http://localhost:7088/  (web SPA; OAuth bypassed in dev mode)
-# Or curl with bearer:
-#   curl -H "Authorization: Bearer dev-bearer" http://localhost:7088/api/agents
-```
+### 1. Set up a hub
 
-See `deploy/README.md` for the LXC docker recipe.
+The published Linux image is
+[`ghcr.io/chsienki/magpilot-hub`](https://github.com/chsienki/magpilot/pkgs/container/magpilot-hub).
+The [deployment guide](deploy/README.md) includes an example Docker Compose
+stack, persistent storage, reverse-proxy settings for streaming, and update
+instructions. Adapt its hostnames and paths to your environment.
 
-## Install (Windows agent + launcher)
+Configure a GitHub OAuth App with a callback at
+`https://<your-hub>/oauth/callback`, set `OAUTH_CLIENT_ID`,
+`OAUTH_CLIENT_SECRET`, and `OAUTH_ALLOWED_GITHUB_USERS`, and choose a strong
+`MAGPILOT_HUB_BEARER` for non-browser API callers. Set
+`MAGPILOT_HUB_PUBLIC_URL` to the URL your clients can reach.
 
-Two steps: install, then click Adopt in the hub. **No bundles, no
-copy/paste, no env vars.**
+**Keep the hub and agents on a trusted network or VPN.** Hub-to-agent traffic
+uses HTTP with per-agent bearer tokens, not built-in TLS. Put HTTPS in front
+of the browser-facing hub. Agents can edit files and run commands as their
+host user; they are not sandboxes. Never enable `MAGPILOT_DEV_BYPASS_AUTH`
+on a shared deployment.
 
-**1. Install** (admin not required upfront -- the installer asks for
-elevation when it needs it):
+### 2. Install and pair a Windows host
+
+Run in PowerShell:
 
 ```pwsh
 irm https://raw.githubusercontent.com/chsienki/magpilot/main/scripts/install.ps1 | iex
 ```
 
-That downloads the latest installer from
-[Releases](https://github.com/chsienki/magpilot/releases), verifies its
-SHA256 against the matching `.sha256` asset, and runs it. The wizard
-just collects target directory + scheduled-task settings -- no
-secrets, no hub URL. After the files copy and the scheduled task
-registers, the installer kicks off interactive pairing:
+The script downloads the latest installer from
+[Releases](https://github.com/chsienki/magpilot/releases), verifies its SHA256
+checksum, and requests elevation. You can also download the installer
+directly. The installer is unsigned, so Windows may show a SmartScreen warning.
 
-* The launcher (`magpilot --magpilot-pair`) broadcasts a UDP query
-  on the LAN. Any magpilot hub replies with its URL.
-* If one hub is found: auto-pick. Multiple hubs: a console picker.
-* The launcher submits a pairing claim to the chosen hub and opens
-  your browser to `https://<hub>/admin/agents?pending=<id>`.
-* It prints a 6-character fingerprint on the console and the same
-  fingerprint shows next to the pending request in the hub's SPA.
-  Visually compare them, then click **Adopt**.
-* The launcher's long-poll picks up the approval, the hub mints a
-  fresh per-agent token, the launcher writes `magpilot.env`, the
-  scheduled task is bounced. Done.
+The installer adds the agent and launcher, registers the agent to run at user
+logon, and starts pairing. It discovers your hub and opens its **Agents**
+page. Compare the fingerprint shown in the console with the pending request,
+then click **Adopt**. Pairing writes the connection settings and per-agent
+credentials for you.
 
-For unattended installs (no UDP discovery available, scripted
-deployment), pair from a shell with a bundle minted on the hub's
-`/admin/enroll` page:
+If discovery is unavailable, create an enrollment bundle on the hub's
+`/admin/enroll` page and run:
 
 ```pwsh
-magpilot --magpilot-pair=<bundle>
+magpilot "--magpilot-pair=<bundle>"
 ```
 
-For silent unattended install:
+The [installer guide](installer/README.md) covers silent installs, headless
+pairing, and troubleshooting.
+
+For an always-on Linux agent, use
+[`ghcr.io/chsienki/magpilot-agent`](https://github.com/chsienki/magpilot/pkgs/container/magpilot-agent)
+with your own credentials, persistent home directory, and optional bootstrap
+hooks. See the [Linux image deployment contract](deploy/README.md#generic-linux-agent-image).
+
+### 3. Start in the terminal, continue in the browser
+
+In your project directory:
 
 ```pwsh
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/chsienki/magpilot/main/scripts/install.ps1))) -Silent
+magpilot
 ```
 
-After install + pair, future upgrades go through `magpilot --magpilot-update`
-(same SHA256-verified path; preserves the existing config so re-pairing
-isn't needed). Re-run `magpilot --magpilot-pair` to re-point an existing
-agent at a different hub or rotate its credentials.
+Use `magpilot` rather than bare `copilot` for cooperative handoff. To resume
+an existing session, use the searchable picker:
 
-**Revoking a paired agent.** Open `https://<your-hub>/admin/agents`,
-find the agent, click **Revoke**. Hub-to-agent calls return 410 Gone
-with a "re-pair" hint. Reversible: re-run `magpilot --magpilot-pair`
-on the agent machine and it's back in service.
+```pwsh
+magpilot --resume
+```
 
-## Architectural law
+Open your hub in a browser, choose the host and conversation, and use
+**Take back** to move a terminal-owned session into the browser. The launcher
+hands it over and waits for you to press Enter to take it back at the terminal.
+If a graceful handoff cannot complete, the web client offers a separate
+**Force take over** action.
 
-> **Satellites know about magpilot. Magpilot does NOT know about satellites.**
+Useful launcher commands:
 
-If you want magpilot to do something for an external service, the right
-answer is almost always a deployment-time bootstrap hook (see
-`MAGPILOT_BOOTSTRAP_HOOK_DIR` in `src/Magpilot.Agent/bootstrap.sh`) or a
-new HTTP-API consumer, not a magpilot patch. Don't add agent-specific
-code paths or hostnames into magpilot itself.
+| Command | Purpose |
+|---|---|
+| `magpilot --magpilot-update` | Install the latest Windows release, preserving pairing settings |
+| `magpilot --magpilot-pair` | Repeat interactive pairing |
+| `magpilot --magpilot-version` | Show launcher and agent version information |
+| `magpilot --magpilot-no-tui-changes` | Keep handoff coordination without Magpilot's terminal styling |
+| `magpilot --magpilot-help` | Show launcher options |
 
-Hooks always receive `AGENT_URL`, `MAGPILOT_AGENT_TOKEN` and
-`MAGPILOT_AGENT_HOME`. To hand a hook the deployer's own settings
-without magpilot ever learning their names, list additional **variable
-names** in `MAGPILOT_BOOTSTRAP_HOOK_ENV_ALLOWLIST` (comma- and/or
-whitespace-separated). Entries must be shell variable names -- anything
-else is logged and skipped. Pathname expansion is disabled while parsing, so
-even `*` is validated and rejected literally rather than expanding to a file
-or directory name. The values are forwarded verbatim
-across the privilege drop by `su --whitelist-environment`, so they are
-never re-parsed as shell. Login-shell variables and shell/dynamic-loader
-startup controls (`BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, every
-`LD_*` name, `GLIBC_TUNABLES`, `GCONV_PATH`, `LOCPATH`) are refused
-rather than forwarded.
+## Current limits
 
-## Related context
+Magpilot is under active development. The packaged desktop install targets
+Windows x64; the hub and generic agent images target Linux amd64.
 
-- An example **outer-ring deployment** that consumes magpilot as a git
-  submodule + adds a personal-assistant product, a WhatsApp bridge, a
-  cron sidecar, and a context-loader on top:
-  [`chsienki/magstronaut`](https://github.com/chsienki/magstronaut)
-  (private; reach out if you'd like to see how it's wired).
-- The home-network and openclaw task-context docs for Chris's deployment
-  live in a separate repo at `chsienki/copilot-context`.
+- There is no standalone Magpilot Android app or push-notification delivery.
+  Phone access is through the browser.
+- The browser uses the Copilot SDK, not a remote terminal. Interactive CLI
+  slash commands are not available there; browser controls expose selected
+  operations such as model and reasoning changes.
+- Keep hub, agents, and launchers on matching releases. The wire protocol is
+  not yet frozen, and mixed-version deployments are not supported.
+
+## Build from source
+
+Use the **.NET 10 SDK**, with the **.NET 9 / ASP.NET Core 9 runtimes** available
+for the services and their tests. The launcher targets .NET 10; the other
+projects target .NET 9. Windows is the CI build and test environment.
+
+```pwsh
+git clone https://github.com/chsienki/magpilot.git
+cd magpilot
+dotnet build Magpilot.slnx
+dotnet test Magpilot.slnx
+```
+
+To publish the web UI into the hub's static content, run:
+
+```pwsh
+.\scripts\build-hub.ps1
+```
+
+The [local development guide](AGENTS.md#build-run-deploy) covers running the
+agent and hub, environment variables, and avoiding conflicts with an installed
+agent.
+
+## Documentation
+
+| Guide | Contents |
+|---|---|
+| [Architecture and API](docs/architecture.md) | Session lifecycle, HTTP/SSE contract, ownership, and client integration |
+| [Deployment](deploy/README.md) | Container images, storage, reverse proxy, and updates |
+| [Windows installer](installer/README.md) | Installation, pairing, upgrades, and headless setup |
+| [Contributor guide](AGENTS.md) | Development workflows, configuration, and implementation gotchas |
+| [Terminal theme tools](tools/tui-matrix/README.md) | Capture diagnostics and the offline theme editor |
+
+Integrations belong outside the platform: **satellites know about Magpilot;
+Magpilot does not know about satellites.** Build against the HTTP API or supply
+deployment-time bootstrap hooks rather than adding product-specific behavior
+to the hub or agent.
