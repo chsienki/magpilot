@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 
@@ -82,6 +83,41 @@ internal static class ProcessAncestry
             cur = parent;
         }
         return false;
+    }
+
+    /// <summary>
+    /// The SDK's bundled runtime is a direct child of the Agent. Its session
+    /// lock can appear after the initial attachment, so PID snapshots taken
+    /// during attach cannot be the only ownership evidence.
+    /// </summary>
+    public static bool IsDirectSdkRuntimeChild(int pid, int agentPid)
+    {
+        if (pid <= 0 || agentPid <= 0 || pid == agentPid)
+            return false;
+
+        try
+        {
+            using var process = Process.GetProcessById(pid);
+            var runtimeName = OperatingSystem.IsWindows()
+                ? "copilot"
+                : "copilot-runtime";
+            if (!string.Equals(
+                    process.ProcessName,
+                    runtimeName,
+                    StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (OperatingSystem.IsLinux())
+            return TryReadLinuxParent(pid, out var parent) && parent == agentPid;
+
+        return OperatingSystem.IsWindows()
+            && Snapshot().TryGetValue(pid, out var processNode)
+            && processNode.Parent == agentPid;
     }
 
     private static Dictionary<int, int>? ParentMap()

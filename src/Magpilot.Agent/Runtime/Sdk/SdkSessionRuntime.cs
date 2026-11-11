@@ -373,7 +373,7 @@ internal sealed class SdkSessionRuntime(
             : null;
         return SessionLocks.Live(
                 SessionLocks.Inspect(SessionDirectory(sessionId)))
-            .Where(holder => ours is null || !ours.ContainsKey(holder.Pid))
+            .Where(holder => !IsOurHolder(sessionId, holder.Pid, ours))
             .Select(holder => holder.Pid)
             .ToArray();
     }
@@ -385,7 +385,7 @@ internal sealed class SdkSessionRuntime(
             ? known
             : null;
         var live = SessionLocks.Live(SessionLocks.Inspect(directory))
-            .Where(holder => ours is null || !ours.ContainsKey(holder.Pid))
+            .Where(holder => !IsOurHolder(sessionId, holder.Pid, ours))
             .ToArray();
         foreach (var holder in live)
         {
@@ -861,6 +861,14 @@ internal sealed class SdkSessionRuntime(
     private string SessionDirectory(string sessionId) =>
         Path.Combine(_sessionStateRoot, sessionId);
 
+    private bool IsOurHolder(
+        string sessionId,
+        int pid,
+        ConcurrentDictionary<int, byte>? known) =>
+        known?.ContainsKey(pid) == true ||
+        (_sessions.ContainsKey(sessionId) &&
+         ProcessAncestry.IsDirectSdkRuntimeChild(pid, Environment.ProcessId));
+
     private async Task MarkOurRuntimeHoldersAsync(
         string sessionId,
         CancellationToken ct)
@@ -873,7 +881,10 @@ internal sealed class SdkSessionRuntime(
             var live = SessionLocks.Live(
                 SessionLocks.Inspect(SessionDirectory(sessionId)));
             foreach (var holder in live)
-                known.TryAdd(holder.Pid, 0);
+                if (ProcessAncestry.IsDirectSdkRuntimeChild(
+                        holder.Pid,
+                        Environment.ProcessId))
+                    known.TryAdd(holder.Pid, 0);
             if (live.Count > 0)
                 return;
             await Task.Delay(100, ct);

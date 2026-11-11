@@ -63,6 +63,23 @@ public sealed class ProcessAncestryTests
         Assert.False(ProcessAncestry.TryFindAncestorPidByName(2147483646, "magpilot", out _));
     }
 
+    [Fact]
+    public void Direct_child_with_an_unrelated_executable_is_not_an_sdk_runtime()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        using var child = SpawnSleeper();
+        try
+        {
+            Assert.False(
+                ProcessAncestry.IsDirectSdkRuntimeChild(child.Id, Environment.ProcessId));
+        }
+        finally
+        {
+            Kill(child);
+        }
+    }
+
     private static Process SpawnSleeper() =>
         Process.Start(new ProcessStartInfo("cmd.exe", "/c timeout /t 30 /nobreak >nul")
         {

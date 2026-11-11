@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Magpilot.Agent.Runtime;
 using Magpilot.Agent.Runtime.Sdk;
 using Magpilot.Agent.Sessions;
@@ -61,6 +62,24 @@ public sealed class SdkClientPoolIntegrationTests
             Assert.True(runtime.IsAttached(sessionId));
             Assert.False(runtime.HasForeignLiveHolder(sessionId));
 
+            var foreignLock = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".copilot",
+                "session-state",
+                sessionId,
+                $"inuse.{Environment.ProcessId}.lock");
+            try
+            {
+                File.WriteAllText(foreignLock, "");
+                Assert.Equal(
+                    [Environment.ProcessId],
+                    runtime.ForeignLiveHolderPids(sessionId));
+            }
+            finally
+            {
+                File.Delete(foreignLock);
+            }
+
             var detached = await runtime.CloseAsync(
                 sessionId,
                 CancellationToken.None);
@@ -94,6 +113,40 @@ public sealed class SdkClientPoolIntegrationTests
                     sessionId,
                     CancellationToken.None);
             }
+            await pool.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task Sdk_runtime_child_remains_recognizable_after_attachment()
+    {
+        var pool = new SdkClientPool(
+            NullLoggerFactory.Instance,
+            NullLogger<SdkClientPool>.Instance);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        try
+        {
+            await pool.AcquireAsync(SessionRuntimeProfile.Default, cts.Token);
+            var runtimeName = OperatingSystem.IsWindows()
+                ? "copilot"
+                : "copilot-runtime";
+            var children = Process.GetProcessesByName(runtimeName);
+            try
+            {
+                Assert.Contains(children, process =>
+                    ProcessAncestry.IsDirectSdkRuntimeChild(
+                        process.Id,
+                        Environment.ProcessId));
+            }
+            finally
+            {
+                foreach (var process in children)
+                    process.Dispose();
+            }
+        }
+        finally
+        {
             await pool.StopAsync(CancellationToken.None);
         }
     }

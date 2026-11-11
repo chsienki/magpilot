@@ -121,8 +121,11 @@ are string enums. Runtime status is nullable and contains cached model,
 reasoning, context usage, and session AI Credits; unavailable values are not
 zero. `/state` does not make SDK RPCs.
 
-Copilot's `inuse.<pid>.lock` files are advisory, not a mutex. The agent tracks
-its SDK-created holders separately from foreign processes and persists terminal
+Copilot's `inuse.<pid>.lock` files are advisory, not a mutex. An SDK session
+may acquire its runtime lock after attachment, so the agent recognizes its
+own direct-child SDK process (`copilot-runtime` on Linux, `copilot` on Windows)
+even when no lock existed during the initial scan. Other live holders remain
+foreign. The agent persists terminal
 leases in `.copilot/magpilot/hostownership.json`. PID start times guard against
 PID reuse. Startup reconciliation can recover launcher ownership from process
 ancestry, but must not reclassify resident SDK sessions as terminal-owned.
