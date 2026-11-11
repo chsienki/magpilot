@@ -16,6 +16,27 @@ public sealed class SessionRuntimeTests : IDisposable
     public SessionRuntimeTests() => Directory.CreateDirectory(_root);
 
     [Fact]
+    public async Task Registry_applies_fusion_without_inheriting_manual_model_reasoning()
+    {
+        var runtime = new RecordingRuntime
+        {
+            ModelOptions = [new SessionModelOption("auto", "Auto", [], null)],
+        };
+        var registry = CreateRegistry(runtime);
+        var session = await registry.CreateAsync(
+            _root, CancellationToken.None, model: "model-1", reasoningEffort: "high");
+
+        await registry.UpdateModelAsync(
+            session.Id,
+            new SessionModelUpdateRequest("auto", FusionTier: "high"),
+            CancellationToken.None);
+
+        Assert.Equal("auto", runtime.LastProfile!.Model);
+        Assert.Equal("high", runtime.LastProfile.FusionTier);
+        Assert.Null(runtime.LastProfile.ReasoningEffort);
+    }
+
+    [Fact]
     public async Task Registry_updates_idle_sdk_model_and_preserves_supported_reasoning()
     {
         var runtime = new RecordingRuntime

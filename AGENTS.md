@@ -171,7 +171,9 @@ local iteration.
   ends on `TurnComplete`, never on the HTTP response. It does not adopt a
   dormant session; `/quick-prompt` can adopt on demand.
 - `SdkTurnEventMapper` publishes streaming message/reasoning deltas and ignores
-  duplicate final messages. A successful turn ends on SDK `session.idle`;
+  duplicate final messages. Final-only canonical messages, including Fusion
+  commits, must be emitted once when no deltas exist for that message ID.
+  A successful turn ends on SDK `session.idle`;
   errors publish exactly one error and terminal boundary.
 - `SdkPermissionBroker` fails closed. Managed-required permissions always
   require a human. Ordinary pending requests must observe dynamic YOLO changes,
@@ -182,6 +184,11 @@ local iteration.
   is not proof of a stalled model.
 - The SDK's unused in-process FFI alias is excluded from build/publish output.
   Do not re-enable it without an implementation using in-process hosting.
+- Fusion uses `model=auto` plus `fusionTier` (`standard`, `high`, or `max`),
+  not a fabricated model ID or fixed reasoning effort. The stable SDK maps
+  these through its Auto-tier API. Verify authoritative Fusion/pending-tier
+  metadata before marking the session ready, and preserve the tier through
+  adoption, terminal leases, and status refreshes.
 
 ## Ownership and launcher invariants
 

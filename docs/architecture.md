@@ -56,6 +56,7 @@ Session creation and adoption accept:
 | Field | Meaning |
 |---|---|
 | `model`, `reasoningEffort` | Runtime model selection and supported reasoning level |
+| `fusionTier` | Fusion orchestration tier (`standard`, `high`, or `max`) with model `auto` |
 | `agent` | A selected custom agent definition |
 | `availableTools` | Model-facing tool allowlist |
 | `disableMcpServers` | Explicit SDK server exclusions |
@@ -64,6 +65,15 @@ Session creation and adoption accept:
 
 Creation also accepts `cwd`, `name`, and an optional `initialPrompt`. The exact
 request shapes are in [Requests.cs](../src/Magpilot.Shared/Models/Requests.cs).
+
+Copilot Fusion selects models and execution patterns itself. Configure it with
+`"model": "auto", "fusionTier": "high"`, without `reasoningEffort`.
+The stable SDK's Auto-tier routing API applies this preference on creation,
+resume, and idle model updates. Runtime status reports `fusionTier` separately
+from a backing model's reasoning, including a confirmed pending tier before
+its next turn. The effective profile and terminal lease retain that selection.
+The browser status row labels Fusion explicitly; tier selection is available
+through API/profile configuration rather than a dedicated browser picker.
 
 Custom homes must already exist and link their `session-state` entry to the
 agent's canonical Copilot session store. `SdkCustomAgentLoader` resolves a
@@ -245,7 +255,9 @@ defaults also apply to SSE. Event definitions are in
 | `release_requested` | Cooperative ownership notification |
 | `heartbeat` | Connection keepalive, every 15 seconds |
 
-The SDK mapper publishes streaming deltas, not duplicate final messages.
+The SDK mapper publishes streaming deltas without duplicate final messages.
+If a message arrives only as a completed canonical message, as Fusion can
+produce, it publishes that content once instead of dropping the response.
 `session.idle` is the successful turn boundary. Errors publish one error and
 one terminal event; later idle events must not double-complete the turn.
 The stall watchdog aborts silent turns after its configured threshold, but

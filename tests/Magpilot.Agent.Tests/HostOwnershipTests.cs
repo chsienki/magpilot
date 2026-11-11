@@ -45,18 +45,24 @@ public sealed class HostOwnershipTests : IDisposable
         }
     }
 
-    [Fact]
-    public async Task Session_profile_survives_a_restart()
+    [Theory]
+    [InlineData("example-model", "low", null)]
+    [InlineData("auto", null, "high")]
+    public async Task Session_profile_survives_a_restart(
+        string model,
+        string? reasoning,
+        string? fusionTier)
     {
         var sid = Guid.NewGuid().ToString();
         var profile = new HostSessionProfile(
-            Model: "example-model",
-            ReasoningEffort: "low",
+            Model: model,
+            ReasoningEffort: reasoning,
             DisabledMcpServers: ["example-server", "github-mcp-server"],
             Agent: "magnus-phone",
             AvailableTools: ["magnus-phone", "server(tool_name)"],
             NoCustomInstructions: true,
-            CopilotHome: Path.Combine(Path.GetTempPath(), "copilot-phone"));
+            CopilotHome: Path.Combine(Path.GetTempPath(), "copilot-phone"),
+            FusionTier: fusionTier);
         New().Set(sid, Environment.ProcessId, profile);
 
         var reloaded = New();
@@ -72,6 +78,7 @@ public sealed class HostOwnershipTests : IDisposable
             Assert.Equal(profile.AvailableTools, entry.Profile.AvailableTools);
             Assert.Equal(profile.NoCustomInstructions, entry.Profile.NoCustomInstructions);
             Assert.Equal(profile.CopilotHome, entry.Profile.CopilotHome);
+            Assert.Equal(profile.FusionTier, entry.Profile.FusionTier);
         }
         finally
         {

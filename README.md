@@ -26,7 +26,8 @@ Your computers do the work. Magpilot gives you one place to reach them.
   next message.
 - **See session usage.** View the current model, reasoning effort, context
   usage, and session AI Credits. Change model and reasoning while the
-  agent-owned session is idle.
+  agent-owned session is idle. Session profiles can also select Copilot
+  Fusion orchestration with a separate Standard, High, or Max tier.
 - **Share a hub with trusted users.** GitHub sign-in and an allowlist control
   access; browser users see their own agents, with cross-user management
   available to the administrator.

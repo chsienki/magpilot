@@ -12,6 +12,33 @@ namespace Magpilot.Agent.Tests;
 public sealed class SdkSessionStatusTrackerTests
 {
     [Fact]
+    public void Pending_fusion_tier_is_preserved_instead_of_the_previous_active_tier()
+    {
+        var tracker = new SdkSessionStatusTracker(SessionRuntimeProfile.Default);
+        tracker.Apply(new CurrentModel
+        {
+            ModelId = "auto",
+            FusionTier = "standard",
+            PendingAutoTier = new AutoTier("hydrafusion"),
+            ReasoningEffort = "low",
+        });
+
+        Assert.Equal("high", tracker.Snapshot.FusionTier);
+        Assert.Equal("high", tracker.Profile.FusionTier);
+        Assert.Null(tracker.Profile.ReasoningEffort);
+
+        tracker.Apply(new CurrentModel
+        {
+            ModelId = "model-1",
+            FusionTier = "high",
+            ReasoningEffort = "low",
+        });
+        Assert.Null(tracker.Snapshot.FusionTier);
+        Assert.Null(tracker.Profile.FusionTier);
+        Assert.Equal("low", tracker.Profile.ReasoningEffort);
+    }
+
+    [Fact]
     public void Tracker_combines_model_context_and_session_credits()
     {
         var tracker = new SdkSessionStatusTracker(
@@ -44,6 +71,20 @@ public sealed class SdkSessionStatusTrackerTests
         });
         tracker.Apply(new UsageGetMetricsResult
         {
+            CodeChanges = new()
+            {
+                FilesModified = [],
+                FilesModifiedCount = 0,
+                LinesAdded = 0,
+                LinesRemoved = 0,
+            },
+            LastCallInputTokens = 0,
+            LastCallOutputTokens = 0,
+            ModelMetrics = new Dictionary<string, UsageMetricsModelMetric>(),
+            SessionStartTime = DateTimeOffset.UtcNow,
+            TotalApiDuration = TimeSpan.Zero,
+            TotalPremiumRequestCost = 0,
+            TotalUserRequests = 0,
             TotalNanoAiu = 1_500_000_000,
         });
 

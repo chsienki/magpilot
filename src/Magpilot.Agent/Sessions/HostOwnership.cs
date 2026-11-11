@@ -288,7 +288,8 @@ public sealed record HostSessionProfile(
     string? Agent = null,
     string[]? AvailableTools = null,
     bool NoCustomInstructions = false,
-    string? CopilotHome = null);
+    string? CopilotHome = null,
+    string? FusionTier = null);
 
 public readonly record struct HostOwnerEntry(
     Guid LeaseId,

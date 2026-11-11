@@ -4,6 +4,16 @@ namespace Magpilot.Agent.Runtime.Sdk;
 
 internal static class SdkSessionProfileMapper
 {
+    // The stable SDK exposes Fusion routing through its extensible Auto-tier API.
+    public static AutoTier? AutoTierFor(string? fusionTier) => fusionTier switch
+    {
+        "standard" => new AutoTier("balance"),
+        "high" => new AutoTier("hydrafusion"),
+        "max" => new AutoTier("hydrafusion-max"),
+        null => null,
+        _ => throw new ArgumentException($"Invalid Fusion tier '{fusionTier}'.", nameof(fusionTier)),
+    };
+
     public static SessionConfig Create(
         SessionRuntimeProfile profile,
         string workingDirectory,

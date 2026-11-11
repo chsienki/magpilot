@@ -22,7 +22,8 @@ internal sealed class SdkSessionStatusTracker(SessionRuntimeProfile profile)
         TokenLimit: null,
         AiCreditsUsed: null,
         CanEditModel: true,
-        DateTimeOffset.UtcNow);
+        DateTimeOffset.UtcNow,
+        profile.FusionTier);
 
     public SessionRuntimeProfile Profile
     {
@@ -79,16 +80,23 @@ internal sealed class SdkSessionStatusTracker(SessionRuntimeProfile profile)
     {
         lock (_sync)
         {
+            var fusionTier = current.ModelId is "auto" or "fusion"
+                ? FusionTierFor(current.PendingAutoTier ?? current.ActivatingAutoTier)
+                    ?? current.FusionTier
+                    ?? FusionTierFor(current.AutoTier)
+                : null;
             _profile = _profile with
             {
                 Model = current.ModelId,
-                ReasoningEffort = current.ReasoningEffort,
+                ReasoningEffort = fusionTier is null ? current.ReasoningEffort : null,
+                FusionTier = fusionTier,
             };
             _status = _status with
             {
                 ModelId = current.ModelId,
                 ModelName = DisplayName(current.ModelId),
                 ReasoningEffort = current.ReasoningEffort,
+                FusionTier = fusionTier,
                 UpdatedAt = DateTimeOffset.UtcNow,
             };
         }
@@ -113,16 +121,21 @@ internal sealed class SdkSessionStatusTracker(SessionRuntimeProfile profile)
             switch (evt)
             {
                 case SessionModelChangeEvent changed:
+                    var fusionTier = changed.Data.NewModel is "auto" or "fusion"
+                        ? FusionTierFor(changed.Data.AutoTier) ?? _profile.FusionTier
+                        : null;
                     _profile = _profile with
                     {
                         Model = changed.Data.NewModel,
-                        ReasoningEffort = changed.Data.ReasoningEffort,
+                        ReasoningEffort = fusionTier is null ? changed.Data.ReasoningEffort : null,
+                        FusionTier = fusionTier,
                     };
                     _status = _status with
                     {
                         ModelId = changed.Data.NewModel,
                         ModelName = DisplayName(changed.Data.NewModel),
                         ReasoningEffort = changed.Data.ReasoningEffort,
+                        FusionTier = fusionTier,
                         UpdatedAt = DateTimeOffset.UtcNow,
                     };
                     break;
@@ -160,7 +173,7 @@ internal sealed class SdkSessionStatusTracker(SessionRuntimeProfile profile)
         }
     }
 
-    public void SetAppliedProfile(string model, string? reasoningEffort)
+    public void SetAppliedProfile(string model, string? reasoningEffort, string? fusionTier = null)
     {
         lock (_sync)
         {
@@ -168,12 +181,14 @@ internal sealed class SdkSessionStatusTracker(SessionRuntimeProfile profile)
             {
                 Model = model,
                 ReasoningEffort = reasoningEffort,
+                FusionTier = fusionTier,
             };
             _status = _status with
             {
                 ModelId = model,
                 ModelName = DisplayName(model),
                 ReasoningEffort = reasoningEffort,
+                FusionTier = fusionTier,
                 UpdatedAt = DateTimeOffset.UtcNow,
             };
         }
@@ -183,6 +198,14 @@ internal sealed class SdkSessionStatusTracker(SessionRuntimeProfile profile)
         totalNanoAiu is null
             ? null
             : totalNanoAiu.Value / NanoAiUnitsPerCredit;
+
+    private static string? FusionTierFor(AutoTier? tier) => tier?.Value switch
+    {
+        "balance" => "standard",
+        "hydrafusion" => "high",
+        "hydrafusion-max" => "max",
+        _ => null,
+    };
 
     private string? DisplayName(string? modelId) =>
         modelId is not null && _models.TryGetValue(modelId, out var model)

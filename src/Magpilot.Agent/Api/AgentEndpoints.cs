@@ -118,7 +118,8 @@ public static class AgentEndpoints
                     agent: req.Agent,
                     availableTools: req.AvailableTools,
                     noCustomInstructions: req.NoCustomInstructions,
-                    copilotHome: req.CopilotHome);
+                    copilotHome: req.CopilotHome,
+                    fusionTier: req.FusionTier);
             }
             catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
             catch (SessionRuntimeConfigurationException ex)
@@ -357,7 +358,8 @@ public static class AgentEndpoints
                     req.Agent,
                     req.AvailableTools,
                     req.NoCustomInstructions,
-                    req.CopilotHome);
+                    req.CopilotHome,
+                    req.FusionTier);
                 return Results.Ok(info);
             }
             catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }

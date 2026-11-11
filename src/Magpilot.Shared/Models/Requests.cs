@@ -10,7 +10,8 @@ public sealed record NewSessionRequest(
     string? Agent = null,
     string[]? AvailableTools = null,
     bool NoCustomInstructions = false,
-    string? CopilotHome = null);
+    string? CopilotHome = null,
+    string? FusionTier = null);
 public sealed record PromptRequest(string Text, string? Source = null);
 public sealed record AdoptRequest(
     bool Force = false,
@@ -20,11 +21,13 @@ public sealed record AdoptRequest(
     string? Agent = null,
     string[]? AvailableTools = null,
     bool? NoCustomInstructions = null,
-    string? CopilotHome = null);
+    string? CopilotHome = null,
+    string? FusionTier = null);
 public sealed record ApprovalResponse(string OptionId);
 public sealed record SessionModelUpdateRequest(
     string Model,
-    string? ReasoningEffort = null);
+    string? ReasoningEffort = null,
+    string? FusionTier = null);
 
 /// <summary>
 /// Body for <c>POST /api/sessions/{id}/release-request</c>. Triggers a

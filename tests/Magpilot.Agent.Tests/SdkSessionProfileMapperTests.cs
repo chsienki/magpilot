@@ -7,6 +7,33 @@ namespace Magpilot.Agent.Tests;
 
 public sealed class SdkSessionProfileMapperTests
 {
+    [Theory]
+    [InlineData("standard", "balance")]
+    [InlineData("high", "hydrafusion")]
+    [InlineData("max", "hydrafusion-max")]
+    public void Fusion_configuration_preserves_routing_without_pinning_reasoning(
+        string tier,
+        string routingPreference)
+    {
+        var profile = SessionRuntimeProfile.Resolve("auto", null, fusionTier: tier);
+        var config = SdkSessionProfileMapper.Resume(profile, "C:\\work");
+
+        Assert.Equal("auto", config.Model);
+        Assert.Null(config.ReasoningEffort);
+        Assert.Equal(routingPreference, SdkSessionProfileMapper.AutoTierFor(profile.FusionTier)!.Value.Value);
+    }
+
+    [Theory]
+    [InlineData("model-1", null, "high")]
+    [InlineData("auto", "high", "high")]
+    [InlineData("auto", null, "invalid")]
+    public void Fusion_rejects_incompatible_configuration(
+        string model,
+        string? reasoning,
+        string tier) =>
+        Assert.Throws<ArgumentException>(() =>
+            SessionRuntimeProfile.Resolve(model, reasoning, fusionTier: tier));
+
     [Fact]
     public void Create_maps_supported_session_configuration()
     {

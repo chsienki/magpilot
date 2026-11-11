@@ -9,6 +9,48 @@ namespace Magpilot.Agent.Tests;
 public sealed class SdkTurnEventMapperTests
 {
     [Fact]
+    public void Committed_output_without_deltas_is_delivered_once()
+    {
+        var mapper = new SdkTurnEventMapper();
+        mapper.BeginTurn();
+        var message = new AssistantMessageEvent
+        {
+            Data = new AssistantMessageData
+            {
+                MessageId = "fusion-final",
+                Content = "Final answer",
+            },
+        };
+
+        Assert.Equal(new AssistantDelta("Final answer"), Assert.Single(mapper.Map(message)));
+        Assert.Empty(mapper.Map(message));
+    }
+
+    [Fact]
+    public void Final_message_does_not_duplicate_streamed_output()
+    {
+        var mapper = new SdkTurnEventMapper();
+        mapper.BeginTurn();
+        mapper.Map(new AssistantMessageDeltaEvent
+        {
+            Data = new AssistantMessageDeltaData
+            {
+                MessageId = "streamed",
+                DeltaContent = "Answer",
+            },
+        });
+
+        Assert.Empty(mapper.Map(new AssistantMessageEvent
+        {
+            Data = new AssistantMessageData
+            {
+                MessageId = "streamed",
+                Content = "Answer",
+            },
+        }));
+    }
+
+    [Fact]
     public void Streaming_message_and_reasoning_deltas_map_to_existing_events()
     {
         var mapper = new SdkTurnEventMapper();

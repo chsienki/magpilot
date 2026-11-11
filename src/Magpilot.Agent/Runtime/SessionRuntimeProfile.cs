@@ -10,7 +10,8 @@ public sealed record SessionRuntimeProfile(
     string? Agent = null,
     IReadOnlyList<string>? AvailableTools = null,
     bool NoCustomInstructions = false,
-    string? CopilotHome = null)
+    string? CopilotHome = null,
+    string? FusionTier = null)
 {
     public static readonly SessionRuntimeProfile Default = new();
 
@@ -21,10 +22,16 @@ public sealed record SessionRuntimeProfile(
         string? agent = null,
         IReadOnlyList<string>? availableTools = null,
         bool noCustomInstructions = false,
-        string? copilotHome = null)
+        string? copilotHome = null,
+        string? fusionTier = null)
     {
         var requestedModel = string.IsNullOrWhiteSpace(model) ? null : ValidateModel(model);
         var effort = ValidateEffort(reasoningEffort);
+        var tier = ValidateFusionTier(fusionTier);
+        if (tier is not null && requestedModel != "auto")
+            throw new ArgumentException("Fusion tier requires model 'auto'.", nameof(fusionTier));
+        if (tier is not null && effort is not null)
+            throw new ArgumentException("Fusion controls reasoning; omit reasoningEffort.", nameof(reasoningEffort));
         var disabled = ValidateMcpServerNames(disableMcpServers);
         var requestedAgent = string.IsNullOrWhiteSpace(agent) ? null : ValidateAgent(agent);
         var tools = ValidateToolSelectors(availableTools);
@@ -39,7 +46,8 @@ public sealed record SessionRuntimeProfile(
             requestedAgent,
             tools,
             noCustomInstructions,
-            requestedCopilotHome);
+            requestedCopilotHome,
+            tier);
     }
 
     public static void ValidateAvailableToolsRequest(IReadOnlyList<string>? selectors)
@@ -51,12 +59,22 @@ public sealed record SessionRuntimeProfile(
                 "Available tools cannot be empty; omit the property to leave tools unrestricted.",
                 nameof(selectors));
         }
+
         if (selectors.Any(string.IsNullOrWhiteSpace))
         {
             throw new ArgumentException(
                 "Available tools cannot contain a blank selector.",
                 nameof(selectors));
         }
+    }
+
+    private static string? ValidateFusionTier(string? tier)
+    {
+        if (string.IsNullOrWhiteSpace(tier)) return null;
+        var normalized = tier.ToLowerInvariant();
+        return normalized is "standard" or "high" or "max"
+            ? normalized
+            : throw new ArgumentException($"Invalid Fusion tier '{tier}'.", nameof(tier));
     }
 
     private static string ValidateModel(string model)

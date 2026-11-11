@@ -12,7 +12,8 @@ public sealed record SessionRuntimeStatus(
     long? TokenLimit,
     double? AiCreditsUsed,
     bool CanEditModel,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    string? FusionTier = null);
 
 /// <summary>
 /// One model choice advertised by the active Copilot runtime.

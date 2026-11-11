@@ -10,11 +10,15 @@ internal sealed class SdkTurnEventMapper
 {
     private bool _active;
     private bool _terminalPublished;
+    private readonly HashSet<string> _streamedMessages = [];
+    private readonly HashSet<string> _completedMessages = [];
 
     public void BeginTurn()
     {
         _active = true;
         _terminalPublished = false;
+        _streamedMessages.Clear();
+        _completedMessages.Clear();
     }
 
     public IReadOnlyList<StreamEvent> Map(SessionEvent evt)
@@ -25,7 +29,9 @@ internal sealed class SdkTurnEventMapper
         return evt switch
         {
             AssistantMessageDeltaEvent message =>
-                [new AssistantDelta(message.Data.DeltaContent ?? "")],
+                MapMessageDelta(message.Data),
+            AssistantMessageEvent message =>
+                MapCompletedMessage(message.Data),
             AssistantReasoningDeltaEvent reasoning =>
                 [new ThoughtDelta(reasoning.Data.DeltaContent ?? "")],
             ToolExecutionStartEvent tool =>
@@ -50,6 +56,23 @@ internal sealed class SdkTurnEventMapper
 
     public IReadOnlyList<StreamEvent> Fail(string message) =>
         _active ? CompleteWithError(message) : [];
+
+    private IReadOnlyList<StreamEvent> MapMessageDelta(AssistantMessageDeltaData data)
+    {
+        if (!string.IsNullOrEmpty(data.DeltaContent))
+            _streamedMessages.Add(data.MessageId);
+        return [new AssistantDelta(data.DeltaContent ?? "")];
+    }
+
+    private IReadOnlyList<StreamEvent> MapCompletedMessage(AssistantMessageData data)
+    {
+        // Fusion can commit canonical output without streaming root-message deltas.
+        if (_streamedMessages.Contains(data.MessageId) ||
+            !_completedMessages.Add(data.MessageId) ||
+            string.IsNullOrEmpty(data.Content))
+            return [];
+        return [new AssistantDelta(data.Content)];
+    }
 
     private IReadOnlyList<StreamEvent> CompleteWithError(string? message)
     {

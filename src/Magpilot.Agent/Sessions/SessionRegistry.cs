@@ -114,7 +114,12 @@ public sealed class SessionRegistry
             var current = _runtime.EffectiveProfile(sessionId)
                 ?? throw new InvalidOperationException(
                     $"Session {sessionId} has no effective runtime profile.");
-            var reasoning = SessionModelSelection.ResolveReasoningEffort(
+            var fusionTier = SessionRuntimeProfile.Resolve(
+                selected.Id,
+                reasoningEffort: request.ReasoningEffort,
+                fusionTier: request.FusionTier ??
+                    (selected.Id == "auto" ? current.FusionTier : null)).FusionTier;
+            var reasoning = fusionTier is not null ? null : SessionModelSelection.ResolveReasoningEffort(
                 request.ReasoningEffort,
                 current.ReasoningEffort,
                 selected);
@@ -124,6 +129,7 @@ public sealed class SessionRegistry
                 {
                     Model = selected.Id,
                     ReasoningEffort = reasoning,
+                    FusionTier = fusionTier,
                 },
                 processScopeSpecified: false,
                 ct);
@@ -240,7 +246,8 @@ public sealed class SessionRegistry
         string? agent = null,
         string[]? availableTools = null,
         bool noCustomInstructions = false,
-        string? copilotHome = null)
+        string? copilotHome = null,
+        string? fusionTier = null)
     {
         SessionRuntimeProfile.ValidateAvailableToolsRequest(availableTools);
         cwd ??= Environment.CurrentDirectory;
@@ -251,7 +258,8 @@ public sealed class SessionRegistry
             agent,
             availableTools,
             noCustomInstructions,
-            copilotHome);
+            copilotHome,
+            fusionTier);
         // The runtime invokes onAttached only after the complete requested
         // configuration has been applied and verified. A failed configure may
         // leave a quarantined route for retry, but it is not advertised as Owned.
@@ -328,7 +336,8 @@ public sealed class SessionRegistry
         string? agent = null,
         string[]? availableTools = null,
         bool? noCustomInstructions = null,
-        string? copilotHome = null)
+        string? copilotHome = null,
+        string? fusionTier = null)
     {
         SessionRuntimeProfile.ValidateAvailableToolsRequest(availableTools);
         var gate = await AcquireLifecycleGateAsync(sessionId, ct);
@@ -344,7 +353,8 @@ public sealed class SessionRegistry
                 agent,
                 availableTools,
                 noCustomInstructions,
-                copilotHome);
+                copilotHome,
+                fusionTier);
         }
         finally { gate.Release(); }
     }
@@ -359,7 +369,8 @@ public sealed class SessionRegistry
         string? agent,
         string[]? availableTools,
         bool? noCustomInstructions,
-        string? copilotHome)
+        string? copilotHome,
+        string? fusionTier)
     {
         var info = Get(sessionId)
             ?? throw new FileNotFoundException($"Session {sessionId} not on disk");
@@ -375,7 +386,8 @@ public sealed class SessionRegistry
             agent,
             availableTools,
             noCustomInstructions ?? false,
-            copilotHome);
+            copilotHome,
+            fusionTier);
         var processScopeSpecified =
             disableMcpServers is not null ||
             agent is not null ||
@@ -427,12 +439,13 @@ public sealed class SessionRegistry
                 ? requestedProfile
                 : SessionRuntimeProfile.Resolve(
                     model ?? retainedProfile.Model,
-                    reasoningEffort ?? retainedProfile.ReasoningEffort,
+                    fusionTier is not null ? null : reasoningEffort ?? retainedProfile.ReasoningEffort,
                     disableMcpServers ?? retainedProfile.DisabledMcpServers,
                     agent ?? retainedProfile.Agent,
                     availableTools ?? retainedProfile.AvailableTools,
                     noCustomInstructions ?? retainedProfile.NoCustomInstructions,
-                    copilotHome ?? retainedProfile.CopilotHome);
+                    copilotHome ?? retainedProfile.CopilotHome,
+                    fusionTier ?? (model is null or "auto" ? retainedProfile.FusionTier : null));
             _logger.LogWarning(
                 "Session {Sid} was invalidated with its co-hosted runtime; re-attaching it from disk",
                 sessionId);
@@ -458,12 +471,13 @@ public sealed class SessionRegistry
                 ? requestedProfile
                 : SessionRuntimeProfile.Resolve(
                     model ?? retainedProfile.Model,
-                    reasoningEffort ?? retainedProfile.ReasoningEffort,
+                    fusionTier is not null ? null : reasoningEffort ?? retainedProfile.ReasoningEffort,
                     disableMcpServers ?? retainedProfile.DisabledMcpServers,
                     agent ?? retainedProfile.Agent,
                     availableTools ?? retainedProfile.AvailableTools,
                     noCustomInstructions ?? retainedProfile.NoCustomInstructions,
-                    copilotHome ?? retainedProfile.CopilotHome);
+                    copilotHome ?? retainedProfile.CopilotHome,
+                    fusionTier ?? (model is null or "auto" ? retainedProfile.FusionTier : null));
             await _runtime.ReloadFromDiskAsync(
                 sessionId,
                 info.Cwd ?? Environment.CurrentDirectory,
@@ -951,7 +965,8 @@ public sealed class SessionRegistry
                 Agent: profile.Agent,
                 AvailableTools: profile.AvailableTools?.ToArray(),
                 NoCustomInstructions: profile.NoCustomInstructions,
-                CopilotHome: profile.CopilotHome);
+                CopilotHome: profile.CopilotHome,
+                FusionTier: profile.FusionTier);
 
     private static SessionRuntimeProfile? ResolveProfile(HostSessionProfile? recorded) =>
         recorded is null
@@ -963,7 +978,8 @@ public sealed class SessionRegistry
                 recorded.Agent,
                 recorded.AvailableTools,
                 recorded.NoCustomInstructions,
-                recorded.CopilotHome);
+                recorded.CopilotHome,
+                recorded.FusionTier);
 
     private LastEventInfo? TryReadLastEvent(string sessionId)
     {

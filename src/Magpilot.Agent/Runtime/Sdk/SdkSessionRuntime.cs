@@ -29,7 +29,8 @@ internal sealed class SdkSessionRuntime(
         ".copilot",
         "session-state");
 
-    public bool IsQuarantined(string sessionId) => false;
+    public bool IsQuarantined(string sessionId) =>
+        _sessions.TryGetValue(sessionId, out var attached) && !attached.ConfigurationVerified;
 
     public bool IsAttached(string sessionId) => _sessions.ContainsKey(sessionId);
 
@@ -159,7 +160,7 @@ internal sealed class SdkSessionRuntime(
                 $"Session {sessionId} was attached twice.");
         }
 
-        await InitializeStatusAsync(attached, ct);
+        await InitializeSessionAsync(attached, profile, ct);
         await MarkOurRuntimeHoldersAsync(sessionId, ct);
         onAttached?.Invoke(sessionId);
         log.LogInformation(
@@ -219,7 +220,7 @@ internal sealed class SdkSessionRuntime(
                 $"Session {sessionId} was attached twice.");
         }
 
-        await InitializeStatusAsync(attached, ct);
+        await InitializeSessionAsync(attached, profile, ct);
         await MarkOurRuntimeHoldersAsync(sessionId, ct);
         onAttached?.Invoke(sessionId);
         log.LogInformation(
@@ -258,13 +259,18 @@ internal sealed class SdkSessionRuntime(
             }
 
             var model = requested.Model ?? current.Model;
-            var reasoning = requested.ReasoningEffort
-                ?? current.ReasoningEffort;
+            var fusionTier = model == "auto" ? requested.FusionTier ?? current.FusionTier : null;
+            var reasoning = fusionTier is null
+                ? requested.ReasoningEffort ?? current.ReasoningEffort
+                : null;
+            if (fusionTier is not null)
+                attached.ConfigurationVerified = false;
             if (!string.Equals(model, current.Model, StringComparison.OrdinalIgnoreCase) ||
                 !string.Equals(
                     reasoning,
                     current.ReasoningEffort,
-                    StringComparison.OrdinalIgnoreCase))
+                    StringComparison.OrdinalIgnoreCase) ||
+                fusionTier != current.FusionTier)
             {
                 if (model is null)
                 {
@@ -274,11 +280,25 @@ internal sealed class SdkSessionRuntime(
 
                 await attached.Session.SetModelAsync(
                     model,
-                    new SetModelOptions { ReasoningEffort = reasoning },
+                    new SetModelOptions
+                    {
+                        ReasoningEffort = reasoning,
+                        AutoTier = SdkSessionProfileMapper.AutoTierFor(fusionTier),
+                    },
                     ct);
             }
 
-            attached.Status.SetAppliedProfile(model!, reasoning);
+            if (model == "auto")
+            {
+                attached.Status.Apply(await attached.Session.Rpc.Model.GetCurrentAsync(ct));
+                if (fusionTier is not null)
+                    VerifyFusionTier(attached, fusionTier);
+            }
+            else
+            {
+                attached.Status.SetAppliedProfile(model!, reasoning);
+            }
+            attached.ConfigurationVerified = true;
         }
         catch (SessionRuntimeConfigurationException ex)
         {
@@ -300,6 +320,51 @@ internal sealed class SdkSessionRuntime(
 
     public bool HasForeignLiveHolder(string sessionId)
         => ForeignLiveHolderPids(sessionId).Count > 0;
+
+    private async Task InitializeSessionAsync(
+        AttachedSession attached,
+        SessionRuntimeProfile profile,
+        CancellationToken ct)
+    {
+        try
+        {
+            if (profile.FusionTier is not null)
+            {
+                await attached.Session.SetModelAsync(
+                    "auto",
+                    new SetModelOptions
+                    {
+                        AutoTier = SdkSessionProfileMapper.AutoTierFor(profile.FusionTier),
+                    },
+                    ct);
+            }
+            await InitializeStatusAsync(attached, ct);
+            if (profile.FusionTier is not null)
+            {
+                attached.Status.Apply(await attached.Session.Rpc.Model.GetCurrentAsync(ct));
+                VerifyFusionTier(attached, profile.FusionTier);
+            }
+        }
+        catch (Exception ex)
+        {
+            _sessions.TryRemove(attached.Session.SessionId, out _);
+            await DisposeAttachedAsync(attached);
+            throw WrapConfigurationFailure(
+                "SDK session configuration could not be verified.",
+                attached.Session.SessionId,
+                ex);
+        }
+    }
+
+    private static void VerifyFusionTier(AttachedSession attached, string expected)
+    {
+        if (attached.Status.Profile.Model != "auto" ||
+            attached.Status.Profile.FusionTier != expected)
+        {
+            throw new SessionRuntimeConfigurationException(
+                $"The runtime did not confirm Fusion tier '{expected}'.");
+        }
+    }
 
     public IReadOnlyList<int> ForeignLiveHolderPids(string sessionId)
     {
@@ -375,6 +440,8 @@ internal sealed class SdkSessionRuntime(
             }
 
             var attached = SessionFor(sessionId);
+            if (!attached.ConfigurationVerified)
+                throw new InvalidOperationException("The session configuration needs to be re-adopted.");
             turn = new ActiveTurn(
                 requester,
                 DateTimeOffset.UtcNow,
@@ -880,6 +947,7 @@ internal sealed class SdkSessionRuntime(
         public SdkSessionStatusTracker Status { get; } = new(profile);
         public CancellationTokenSource Lifetime { get; } = lifetime;
         public IDisposable? Subscription { get; set; }
+        public bool ConfigurationVerified { get; set; } = true;
     }
 
     private sealed class ActiveTurn(

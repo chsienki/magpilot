@@ -28,6 +28,8 @@
     {
         get
         {
+            if (Status?.FusionTier is { } tier)
+                return $"Copilot Fusion ({tier})";
             var model = Status?.ModelName ?? Status?.ModelId;
             if (model is null)
                 return "N/A";
@@ -57,7 +59,9 @@
             : "N/A";
 
     private string ModelTooltip =>
-        Status is null
+        Status?.FusionTier is { } tier
+            ? $"Copilot Fusion ({tier}) chooses backing models and reasoning for each task." + EditHint
+            : Status is null
             ? "Runtime model is unavailable."
             : $"Model: {Status.ModelName ?? Status.ModelId ?? "unknown"} ({Status.ModelId ?? "unknown"}). "
               + $"Reasoning effort: {Status.ReasoningEffort ?? "not set"}."
