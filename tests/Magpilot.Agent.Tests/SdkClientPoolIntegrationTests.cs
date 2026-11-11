@@ -128,10 +128,11 @@ public sealed class SdkClientPoolIntegrationTests
         try
         {
             await pool.AcquireAsync(SessionRuntimeProfile.Default, cts.Token);
-            var runtimeName = OperatingSystem.IsWindows()
-                ? "copilot"
-                : "copilot-runtime";
-            var children = Process.GetProcessesByName(runtimeName);
+            var children = Process.GetProcessesByName("copilot-runtime")
+                .Concat(OperatingSystem.IsWindows()
+                    ? Process.GetProcessesByName("copilot")
+                    : [])
+                .ToArray();
             try
             {
                 Assert.Contains(children, process =>

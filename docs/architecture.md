@@ -123,7 +123,7 @@ zero. `/state` does not make SDK RPCs.
 
 Copilot's `inuse.<pid>.lock` files are advisory, not a mutex. An SDK session
 may acquire its runtime lock after attachment, so the agent recognizes its
-own direct-child SDK process (`copilot-runtime` on Linux, `copilot` on Windows)
+own direct-child SDK process (`copilot-runtime` or Windows' `copilot` wrapper)
 even when no lock existed during the initial scan. Other live holders remain
 foreign. The agent persists terminal
 leases in `.copilot/magpilot/hostownership.json`. PID start times guard against

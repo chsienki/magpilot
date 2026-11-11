@@ -98,13 +98,16 @@ internal static class ProcessAncestry
         try
         {
             using var process = Process.GetProcessById(pid);
-            var runtimeName = OperatingSystem.IsWindows()
-                ? "copilot"
-                : "copilot-runtime";
+            var runtimeName = process.ProcessName;
             if (!string.Equals(
-                    process.ProcessName,
                     runtimeName,
-                    StringComparison.OrdinalIgnoreCase))
+                    "copilot-runtime",
+                    StringComparison.OrdinalIgnoreCase) &&
+                (!OperatingSystem.IsWindows() ||
+                 !string.Equals(
+                     runtimeName,
+                     "copilot",
+                     StringComparison.OrdinalIgnoreCase)))
                 return false;
         }
         catch

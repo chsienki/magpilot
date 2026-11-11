@@ -180,7 +180,7 @@ local iteration.
   including the registration-versus-toggle race.
 - SDK runtime locks can appear after session attachment. In addition to
   holders captured at attach, recognize a live SDK process (`copilot-runtime`
-  on Linux, `copilot` on Windows) that is a direct child of this agent;
+  or Windows' `copilot` wrapper) that is a direct child of this agent;
   do not classify arbitrary descendants or external processes as SDK-owned.
   Never evict the agent's own runtime.
 - The turn watchdog exempts open tool calls. Silence from a long-running tool
