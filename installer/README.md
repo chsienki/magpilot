@@ -152,8 +152,11 @@ Close remaining launcher sessions and rerun setup if necessary; copying a
 managed `magpilot.dll` beside the Native AOT executable does not update it.
 
 To revoke a host, use **Revoke** on the hub's **Agents** page. Subsequent
-proxied requests return `410 Gone`. Re-pairing with fresh credentials restores
-access.
+proxied requests return `410 Gone`, and the host disappears from the app's host
+drawer. Re-pairing with fresh credentials restores access. To forget a revoked
+host's saved entry, use **Remove**. A running host may be discovered again,
+but stays out of the host drawer until paired again. Offline paired hosts
+remain in the drawer so they can be used when they return.
 
 ## Service and firewall operations
 

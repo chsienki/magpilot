@@ -100,18 +100,18 @@
                     }
                 </MudList>
             }
-            else if (_agents.Count == 0)
+            else if (!_agents.Any(a => a.IsPaired))
             {
                 <MudAlert Severity="Severity.Info" Dense="true" Class="mx-3 my-2">
-                    No hosts discovered yet.
+                    No paired hosts yet.
                 </MudAlert>
             }
             else
             {
                 <MudList T="string" Dense="true" SelectedValue="@Agent">
-                    @foreach (var a in _agents)
+                    @foreach (var a in _agents.Where(a => a.IsPaired))
                     {
-                        <MudListItem T="string" Value="@a.Name" OnClick="@(() => OnAgentClicked(a.Name))">
+                        <MudListItem @key="a.Name" T="string" Value="@a.Name" OnClick="@(() => OnAgentClicked(a.Name))">
                             <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
                                 <MudIcon Icon="@(a.Online ? Icons.Material.Filled.RadioButtonChecked : Icons.Material.Filled.RadioButtonUnchecked)"
                                          Color="@(a.Online ? Color.Success : Color.Default)"

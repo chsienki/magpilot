@@ -21,5 +21,8 @@ public sealed record AgentInfo(
     // (or discovered but never enrolled); such rows are visible only
     // to the admin (the first OAUTH_ALLOWED_GITHUB_USERS entry) and to
     // infrastructure bearer callers.
-    string? OwnerUser = null
+    string? OwnerUser = null,
+    // Credentials, rather than enrollment dates, distinguish usable pairings
+    // from discovery-only entries and include pairings from older databases.
+    bool IsPaired = false
 );

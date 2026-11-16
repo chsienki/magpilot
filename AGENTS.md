@@ -241,6 +241,9 @@ local iteration.
 - Main agent-list scoping and permission to access an agent are different
   predicates. Administrator users have a separate all-agents view;
   infrastructure bearer callers remain unscoped.
+- The host drawer uses `AgentInfo.IsPaired`: the hub has a token and the
+  agent is not revoked. Enrollment timestamps can be absent on older
+  pairings. Removal forgets credentials, not discovery eligibility.
 - Claims are authenticated but not owner-scoped. Do not document them as
   administrator-only or imply hostile-user isolation.
 - `AgentRegistry.AddColumnIfMissing` owns additive registry schema changes.

@@ -109,6 +109,17 @@ public sealed class HubClient
     }
 
     /// <summary>
+    /// Remove an agent and its credentials from the hub registry.
+    /// Discovery can add the machine again without credentials. 404 surfaces as
+    /// <see cref="HttpRequestException"/>.
+    /// </summary>
+    public async Task RemoveAgentAsync(string name, CancellationToken ct = default)
+    {
+        using var resp = await _http.DeleteAsync($"api/agents/{Uri.EscapeDataString(name)}", ct);
+        resp.EnsureSuccessStatusCode();
+    }
+
+    /// <summary>
     /// V3 pairing: list recent pairing claims (pending + recently
     /// decided) for the /admin/agents "Pending pair requests" section.
     /// </summary>

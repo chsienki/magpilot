@@ -286,7 +286,7 @@ Additional hub routes:
 | GET | `/api/me` | Signed-in identity and administrator flag |
 | GET | `/api/agents` | Caller-scoped agent list |
 | GET | `/api/admin/agents/all` | Administrator's cross-user agent list |
-| DELETE | `/api/agents/{name}` | Remove a registry entry |
+| DELETE | `/api/agents/{name}` | Forget a registry entry and its credentials |
 | POST | `/api/agents/discover` | Trigger a discovery sweep |
 | POST | `/api/admin/agents/{name}/revoke` | Revoke agent credentials |
 | GET | `/api/agent-version` | Hub's cached latest release |
@@ -338,6 +338,14 @@ The separate hub pairing responder listens on UDP 47824. Discovery updates
 location and online state, not credentials or ownership. Broadcasts stay within
 their network segment and may be filtered by access points or container
 networking.
+
+Discovery-only entries remain visible on **Agents & pairing**, but the host
+drawer shows only agents with credentials that have not been revoked.
+`AgentInfo.IsPaired` reports that credential state, including older pairings
+without an enrollment timestamp. Revoked entries offer **Remove** to forget
+their saved record. Removal does not block discovery: a responding machine
+can reappear without credentials and must be paired again before use. A dead
+machine stays forgotten because it does not answer discovery.
 
 Interactive pairing uses a five-minute claim and a six-character fingerprint.
 The launcher polls until approved, then writes the hub URL and minted agent

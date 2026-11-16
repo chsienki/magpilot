@@ -180,7 +180,8 @@ public sealed class AgentRegistry
                     Online = a.RevokedAt is null
                         && a.Online
                         && a.LastSeen is { } ls
-                        && (now - ls) <= _staleAfter
+                        && (now - ls) <= _staleAfter,
+                    IsPaired = a.RevokedAt is null && _tokens.ContainsKey(a.Name)
                 })
                 .ToList();
         }
@@ -188,7 +189,12 @@ public sealed class AgentRegistry
 
     public AgentInfo? Get(string name)
     {
-        lock (_lock) return _agents.GetValueOrDefault(name);
+        lock (_lock)
+        {
+            return _agents.TryGetValue(name, out var agent)
+                ? agent with { IsPaired = agent.RevokedAt is null && _tokens.ContainsKey(name) }
+                : null;
+        }
     }
 
     /// <summary>

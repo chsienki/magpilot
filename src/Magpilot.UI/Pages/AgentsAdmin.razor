@@ -262,9 +262,14 @@
                         <MudTd Style="text-align: right;">
                             @if (isRevoked)
                             {
-                                <MudText Typo="Typo.caption" Color="Color.Default">
-                                    Re-pair to restore
-                                </MudText>
+                                <MudTooltip Text="Re-pair the agent to restore it, or remove it from the hub.">
+                                    <MudButton Size="Size.Small" Variant="Variant.Outlined" Color="Color.Error"
+                                               StartIcon="@Icons.Material.Filled.Delete"
+                                               Disabled="@_busyAgents.Contains(context.Name)"
+                                               OnClick="@(() => RemoveAsync(context.Name))">
+                                        Remove
+                                    </MudButton>
+                                </MudTooltip>
                             }
                             else
                             {
@@ -281,7 +286,8 @@
 
                 <MudText Typo="Typo.caption" Color="Color.Default" Class="d-block mt-3">
                     Revoking clears the agent's bearer token. Re-pair the
-                    agent with <code>magpilot --magpilot-pair</code> to restore access.
+                    agent with <code>magpilot --magpilot-pair</code> to restore access,
+                    or remove a revoked agent to delete it from the hub.
                 </MudText>
             }
         </MudContainer>
@@ -516,6 +522,38 @@
         catch (Exception ex)
         {
             Snackbar.Add($"Could not revoke {name}: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _busyAgents.Remove(name);
+            StateHasChanged();
+        }
+    }
+
+    private async Task RemoveAsync(string name)
+    {
+        var dialogParams = new MessageBoxOptions
+        {
+            Title = $"Remove {name}?",
+            Message = $"This forgets {name} and its credentials. A running agent may be discovered again, but must be paired again before use. Continue?",
+            YesText = "Remove",
+            CancelText = "Cancel",
+        };
+        var ok = await DialogService.ShowMessageBoxAsync(dialogParams);
+        if (ok != true) return;
+
+        _busyAgents.Add(name);
+        StateHasChanged();
+        try
+        {
+            await Hub.RemoveAgentAsync(name);
+            _agentVersions.Remove(name);
+            Snackbar.Add($"{name} removed", Severity.Info);
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Could not remove {name}: {ex.Message}", Severity.Error);
         }
         finally
         {
