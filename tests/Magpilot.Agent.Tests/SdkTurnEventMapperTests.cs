@@ -135,22 +135,44 @@ public sealed class SdkTurnEventMapperTests
         Assert.Empty(replay);
     }
 
-    private static AssistantFusionPhaseStartedEvent DraftPhaseStarted() => new()
+    [Fact]
+    public void Later_candidate_phases_are_withheld_until_the_commit()
+    {
+        var mapper = new SdkTurnEventMapper();
+        mapper.BeginTurn();
+        mapper.Map(DraftPhaseStarted());
+        var draft = Assert.Single(mapper.Map(FusionMessage("d", "Draft", commitId: null, phaseId: "draft")));
+        mapper.Map(DraftPhaseStarted("critic", FusionPhaseKind.Critic, FusionConversationScope.Review));
+        mapper.Map(DraftPhaseStarted("revision", FusionPhaseKind.Revision));
+
+        var revision = mapper.Map(FusionMessage("r", "Revised", commitId: null, phaseId: "revision"));
+        var final = Assert.Single(mapper.Map(FusionMessage("c", "Revised", commitId: "commit-1", phaseId: "revision")));
+
+        Assert.Equal(new AssistantDelta("Draft", Provisional: true), draft);
+        Assert.Empty(revision);
+        Assert.Equal(new AssistantDelta("Revised"), final);
+    }
+
+    private static AssistantFusionPhaseStartedEvent DraftPhaseStarted(
+        string phaseId = "draft",
+        FusionPhaseKind? kind = null,
+        FusionConversationScope? scope = null) => new()
     {
         Data = new AssistantFusionPhaseStartedData
         {
             FusionId = "fusion-1",
-            PhaseId = "draft",
-            PhaseKind = FusionPhaseKind.Draft,
+            PhaseId = phaseId,
+            PhaseKind = kind ?? FusionPhaseKind.Draft,
             Pattern = FusionPattern.Critique,
-            ConversationScope = FusionConversationScope.Root,
+            ConversationScope = scope ?? FusionConversationScope.Root,
             Model = "model",
-            Role = "draft",
+            Role = phaseId,
         },
     };
 
-    private static AssistantMessageEvent FusionMessage(        string messageId, string content, string? commitId, string scope = "root",
-        string pattern = "critique") => new()
+    private static AssistantMessageEvent FusionMessage(
+        string messageId, string content, string? commitId, string scope = "root",
+        string pattern = "critique", string? phaseId = null) => new()
     {
         Data = new AssistantMessageData
         {
@@ -160,6 +182,7 @@ public sealed class SdkTurnEventMapperTests
             {
                 FusionId = "fusion-1",
                 Pattern = pattern,
+                PhaseId = phaseId,
                 Policy = "high",
                 SyntheticModel = "auto",
                 CommitId = commitId,

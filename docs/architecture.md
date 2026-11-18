@@ -268,6 +268,9 @@ with a commit ID. `assistant_delta` therefore carries `Provisional: true` for
 text from a started Fusion phase until a committed message arrives (the
 committed copy is published even when it reuses the candidate's message ID).
 Single-pattern output is never provisional because it is always the answer.
+Only the first root candidate phase is published; a later revision or repair
+phase is withheld because the commit replays it moments later, and publishing
+it would stack a second candidate.
 Review-scope critic/judge text is not published, and replayed tool events are published
 once per tool-call ID. A consumer that can revise output replaces provisional
 text with the committed text that follows. A consumer that cannot should hold

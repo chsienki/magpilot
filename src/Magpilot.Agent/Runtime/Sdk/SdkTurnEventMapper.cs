@@ -12,6 +12,8 @@ internal sealed class SdkTurnEventMapper
     private bool _active;
     private bool _terminalPublished;
     private bool _fusionUncommitted;
+    private bool _laterCandidatePhase;
+    private string? _candidatePhaseId;
     private readonly HashSet<string> _streamedMessages = [];
     private readonly HashSet<string> _completedMessages = [];
     private readonly HashSet<string> _provisionalMessages = [];
@@ -23,6 +25,8 @@ internal sealed class SdkTurnEventMapper
         _active = true;
         _terminalPublished = false;
         _fusionUncommitted = false;
+        _laterCandidatePhase = false;
+        _candidatePhaseId = null;
         _streamedMessages.Clear();
         _completedMessages.Clear();
         _provisionalMessages.Clear();
@@ -70,9 +74,17 @@ internal sealed class SdkTurnEventMapper
 
     private IReadOnlyList<StreamEvent> StartFusionPhase(AssistantFusionPhaseStartedData data)
     {
+        if (data.ConversationScope == FusionConversationScope.Review)
+            return [];
         // A single-pattern phase is always the committed answer, so there is
         // no candidate for a consumer to replace.
         _fusionUncommitted = data.Pattern != FusionPattern.Single;
+        if (!_fusionUncommitted)
+            return [];
+        if (_candidatePhaseId is null)
+            _candidatePhaseId = data.PhaseId;
+        else if (data.PhaseId != _candidatePhaseId)
+            _laterCandidatePhase = true;
         return [];
     }
 
@@ -84,6 +96,8 @@ internal sealed class SdkTurnEventMapper
             if (_fusionUncommitted)
                 _provisionalMessages.Add(data.MessageId);
         }
+        if (_laterCandidatePhase)
+            return [];
         // Deltas carry no Fusion attribution, so phase state decides whether
         // they belong to a candidate that a later commit may replace.
         return [new AssistantDelta(data.DeltaContent ?? "", _fusionUncommitted)];
@@ -100,6 +114,8 @@ internal sealed class SdkTurnEventMapper
         if (committed)
         {
             _fusionUncommitted = false;
+            _laterCandidatePhase = false;
+            _candidatePhaseId = null;
             // The commit can reuse the candidate's message ID; consumers holding
             // provisional text still need the committed copy.
             if (_provisionalMessages.Remove(data.MessageId) && !string.IsNullOrEmpty(data.Content))
@@ -118,7 +134,16 @@ internal sealed class SdkTurnEventMapper
             ? !committed && !string.Equals(fusion.Pattern, "single", StringComparison.OrdinalIgnoreCase)
             : _fusionUncommitted;
         if (provisional)
+        {
             _provisionalMessages.Add(data.MessageId);
+            // Only the first candidate phase is shown. A revision or repair
+            // supersedes it and is replayed by the commit moments later, so
+            // publishing it live would only stack a second candidate.
+            if (_laterCandidatePhase ||
+                (_candidatePhaseId is not null && !string.IsNullOrEmpty(fusion?.PhaseId) &&
+                 fusion.PhaseId != _candidatePhaseId))
+                return [];
+        }
         return [new AssistantDelta(data.Content, provisional)];
     }
 
