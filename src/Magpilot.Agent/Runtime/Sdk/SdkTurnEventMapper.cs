@@ -14,6 +14,7 @@ internal sealed class SdkTurnEventMapper
     private bool _fusionUncommitted;
     private readonly HashSet<string> _streamedMessages = [];
     private readonly HashSet<string> _completedMessages = [];
+    private readonly HashSet<string> _provisionalMessages = [];
     private readonly HashSet<string> _startedTools = [];
     private readonly HashSet<string> _completedTools = [];
 
@@ -24,6 +25,7 @@ internal sealed class SdkTurnEventMapper
         _fusionUncommitted = false;
         _streamedMessages.Clear();
         _completedMessages.Clear();
+        _provisionalMessages.Clear();
         _startedTools.Clear();
         _completedTools.Clear();
     }
@@ -39,8 +41,8 @@ internal sealed class SdkTurnEventMapper
                 MapMessageDelta(message.Data),
             AssistantMessageEvent message =>
                 MapCompletedMessage(message.Data),
-            AssistantFusionPhaseStartedEvent =>
-                StartFusionPhase(),
+            AssistantFusionPhaseStartedEvent phase =>
+                StartFusionPhase(phase.Data),
             AssistantReasoningDeltaEvent reasoning =>
                 [new ThoughtDelta(reasoning.Data.DeltaContent ?? "")],
             ToolExecutionStartEvent tool =>
@@ -66,16 +68,22 @@ internal sealed class SdkTurnEventMapper
     public IReadOnlyList<StreamEvent> Fail(string message) =>
         _active ? CompleteWithError(message) : [];
 
-    private IReadOnlyList<StreamEvent> StartFusionPhase()
+    private IReadOnlyList<StreamEvent> StartFusionPhase(AssistantFusionPhaseStartedData data)
     {
-        _fusionUncommitted = true;
+        // A single-pattern phase is always the committed answer, so there is
+        // no candidate for a consumer to replace.
+        _fusionUncommitted = data.Pattern != FusionPattern.Single;
         return [];
     }
 
     private IReadOnlyList<StreamEvent> MapMessageDelta(AssistantMessageDeltaData data)
     {
         if (!string.IsNullOrEmpty(data.DeltaContent))
+        {
             _streamedMessages.Add(data.MessageId);
+            if (_fusionUncommitted)
+                _provisionalMessages.Add(data.MessageId);
+        }
         // Deltas carry no Fusion attribution, so phase state decides whether
         // they belong to a candidate that a later commit may replace.
         return [new AssistantDelta(data.DeltaContent ?? "", _fusionUncommitted)];
@@ -90,7 +98,13 @@ internal sealed class SdkTurnEventMapper
 
         var committed = !string.IsNullOrEmpty(fusion?.CommitId);
         if (committed)
+        {
             _fusionUncommitted = false;
+            // The commit can reuse the candidate's message ID; consumers holding
+            // provisional text still need the committed copy.
+            if (_provisionalMessages.Remove(data.MessageId) && !string.IsNullOrEmpty(data.Content))
+                return [new AssistantDelta(data.Content)];
+        }
 
         // Fusion can commit canonical output without streaming root-message deltas.
         if (_streamedMessages.Contains(data.MessageId) ||
@@ -100,7 +114,11 @@ internal sealed class SdkTurnEventMapper
 
         // Fusion output without a commit ID is a candidate (draft, primary, or
         // repair input); the selected output is replayed later with a commit ID.
-        var provisional = fusion is not null ? !committed : _fusionUncommitted;
+        var provisional = fusion is not null
+            ? !committed && !string.Equals(fusion.Pattern, "single", StringComparison.OrdinalIgnoreCase)
+            : _fusionUncommitted;
+        if (provisional)
+            _provisionalMessages.Add(data.MessageId);
         return [new AssistantDelta(data.Content, provisional)];
     }
 

@@ -265,8 +265,10 @@ produce, it publishes that content once instead of dropping the response.
 Fusion candidate output (a draft, cascade primary, or other uncommitted phase)
 streams before Fusion selects the answer, then the selected phase is replayed
 with a commit ID. `assistant_delta` therefore carries `Provisional: true` for
-text from a started Fusion phase until a committed message arrives; review-scope
-critic/judge text is not published, and replayed tool events are published
+text from a started Fusion phase until a committed message arrives (the
+committed copy is published even when it reuses the candidate's message ID).
+Single-pattern output is never provisional because it is always the answer.
+Review-scope critic/judge text is not published, and replayed tool events are published
 once per tool-call ID. A consumer that can revise output replaces provisional
 text with the committed text that follows. A consumer that cannot should hold
 provisional text and use it only if the turn completes without committed text.

@@ -108,6 +108,33 @@ public sealed class SdkTurnEventMapperTests
         Assert.Empty(mapper.Map(complete));
     }
 
+    [Fact]
+    public void Commit_reusing_a_candidate_message_id_is_delivered_as_final()
+    {
+        var mapper = new SdkTurnEventMapper();
+        mapper.BeginTurn();
+        mapper.Map(DraftPhaseStarted());
+
+        var draft = Assert.Single(mapper.Map(FusionMessage("same", "Answer", commitId: null)));
+        var final = Assert.Single(mapper.Map(FusionMessage("same", "Answer", commitId: "commit-1")));
+
+        Assert.True(((AssistantDelta)draft).Provisional);
+        Assert.Equal(new AssistantDelta("Answer"), final);
+    }
+
+    [Fact]
+    public void Single_pattern_output_is_never_provisional()
+    {
+        var mapper = new SdkTurnEventMapper();
+        mapper.BeginTurn();
+
+        var live = Assert.Single(mapper.Map(FusionMessage("same", "Answer", commitId: null, pattern: "single")));
+        var replay = mapper.Map(FusionMessage("same", "Answer", commitId: "commit-1", pattern: "single"));
+
+        Assert.Equal(new AssistantDelta("Answer"), live);
+        Assert.Empty(replay);
+    }
+
     private static AssistantFusionPhaseStartedEvent DraftPhaseStarted() => new()
     {
         Data = new AssistantFusionPhaseStartedData
@@ -122,7 +149,8 @@ public sealed class SdkTurnEventMapperTests
         },
     };
 
-    private static AssistantMessageEvent FusionMessage(        string messageId, string content, string? commitId, string scope = "root") => new()
+    private static AssistantMessageEvent FusionMessage(        string messageId, string content, string? commitId, string scope = "root",
+        string pattern = "critique") => new()
     {
         Data = new AssistantMessageData
         {
@@ -131,7 +159,7 @@ public sealed class SdkTurnEventMapperTests
             Fusion = new FusionAttribution
             {
                 FusionId = "fusion-1",
-                Pattern = "critique",
+                Pattern = pattern,
                 Policy = "high",
                 SyntheticModel = "auto",
                 CommitId = commitId,
