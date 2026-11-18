@@ -261,6 +261,18 @@ defaults also apply to SSE. Event definitions are in
 The SDK mapper publishes streaming deltas without duplicate final messages.
 If a message arrives only as a completed canonical message, as Fusion can
 produce, it publishes that content once instead of dropping the response.
+
+Fusion candidate output (a draft, cascade primary, or other uncommitted phase)
+streams before Fusion selects the answer, then the selected phase is replayed
+with a commit ID. `assistant_delta` therefore carries `Provisional: true` for
+text from a started Fusion phase until a committed message arrives; review-scope
+critic/judge text is not published, and replayed tool events are published
+once per tool-call ID. A consumer that can revise output replaces provisional
+text with the committed text that follows. A consumer that cannot should hold
+provisional text and use it only if the turn completes without committed text.
+The browser removes provisional bubbles when committed text arrives, and
+`/quick-prompt` returns committed text, falling back to provisional text.
+
 `session.idle` is the successful turn boundary. Errors publish one error and
 one terminal event; later idle events must not double-complete the turn.
 The stall watchdog aborts silent turns after its configured threshold, but

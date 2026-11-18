@@ -1,3 +1,4 @@
+#pragma warning disable GHCP001
 using System.Text.Json;
 using GitHub.Copilot;
 using Magpilot.Agent.Runtime.Sdk;
@@ -49,6 +50,95 @@ public sealed class SdkTurnEventMapperTests
             },
         }));
     }
+
+    [Fact]
+    public void Fusion_candidate_is_provisional_and_commit_is_final()
+    {
+        var mapper = new SdkTurnEventMapper();
+        mapper.BeginTurn();
+        mapper.Map(DraftPhaseStarted());
+
+        var draft = Assert.Single(mapper.Map(FusionMessage("draft", "Draft", commitId: null)));
+        var review = mapper.Map(FusionMessage("critic", "Revise it", commitId: null, scope: "review"));
+        var final = Assert.Single(mapper.Map(FusionMessage("final", "Final", commitId: "commit-1")));
+
+        Assert.Equal(new AssistantDelta("Draft", Provisional: true), draft);
+        Assert.Empty(review);
+        Assert.Equal(new AssistantDelta("Final"), final);
+    }
+
+    [Fact]
+    public void Deltas_during_an_uncommitted_fusion_phase_are_provisional()
+    {
+        var mapper = new SdkTurnEventMapper();
+        mapper.BeginTurn();
+        mapper.Map(DraftPhaseStarted());
+
+        var delta = Assert.Single(mapper.Map(new AssistantMessageDeltaEvent
+        {
+            Data = new AssistantMessageDeltaData { MessageId = "draft", DeltaContent = "Dr" },
+        }));
+        mapper.Map(FusionMessage("final", "Final", commitId: "commit-1"));
+        var after = Assert.Single(mapper.Map(new AssistantMessageDeltaEvent
+        {
+            Data = new AssistantMessageDeltaData { MessageId = "next", DeltaContent = "More" },
+        }));
+
+        Assert.Equal(new AssistantDelta("Dr", Provisional: true), delta);
+        Assert.Equal(new AssistantDelta("More"), after);
+    }
+
+    [Fact]
+    public void Replayed_fusion_tool_events_are_published_once()
+    {
+        var mapper = new SdkTurnEventMapper();
+        mapper.BeginTurn();
+        var start = new ToolExecutionStartEvent
+        {
+            Data = new ToolExecutionStartData { ToolCallId = "tool-1", ToolName = "view" },
+        };
+        var complete = new ToolExecutionCompleteEvent
+        {
+            Data = new ToolExecutionCompleteData { ToolCallId = "tool-1", Success = true },
+        };
+
+        Assert.Single(mapper.Map(start));
+        Assert.Single(mapper.Map(complete));
+        Assert.Empty(mapper.Map(start));
+        Assert.Empty(mapper.Map(complete));
+    }
+
+    private static AssistantFusionPhaseStartedEvent DraftPhaseStarted() => new()
+    {
+        Data = new AssistantFusionPhaseStartedData
+        {
+            FusionId = "fusion-1",
+            PhaseId = "draft",
+            PhaseKind = FusionPhaseKind.Draft,
+            Pattern = FusionPattern.Critique,
+            ConversationScope = FusionConversationScope.Root,
+            Model = "model",
+            Role = "draft",
+        },
+    };
+
+    private static AssistantMessageEvent FusionMessage(        string messageId, string content, string? commitId, string scope = "root") => new()
+    {
+        Data = new AssistantMessageData
+        {
+            MessageId = messageId,
+            Content = content,
+            Fusion = new FusionAttribution
+            {
+                FusionId = "fusion-1",
+                Pattern = "critique",
+                Policy = "high",
+                SyntheticModel = "auto",
+                CommitId = commitId,
+                ConversationScope = scope,
+            },
+        },
+    };
 
     [Fact]
     public void Streaming_message_and_reasoning_deltas_map_to_existing_events()
@@ -209,3 +299,4 @@ public sealed class SdkTurnEventMapperTests
         Assert.Empty(events);
     }
 }
+#pragma warning restore GHCP001

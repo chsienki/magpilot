@@ -283,6 +283,7 @@ public static class AgentEndpoints
             // Subscribe BEFORE sending the prompt so we don't race the first delta.
             var reader = runtime.Subscribe(sid);
             var responseText = new System.Text.StringBuilder();
+            var provisionalText = new System.Text.StringBuilder();
             var stopReason = "unknown";
             string? errorMessage = null;
             try
@@ -298,7 +299,8 @@ public static class AgentEndpoints
                 // Drain events until TurnComplete or ErrorEvent.
                 await foreach (var evt in reader.ReadAllAsync(cts.Token))
                 {
-                    if (evt is AssistantDelta ad) responseText.Append(ad.Text);
+                    if (evt is AssistantDelta { Provisional: true } pd) provisionalText.Append(pd.Text);
+                    else if (evt is AssistantDelta ad) responseText.Append(ad.Text);
                     else if (evt is TurnComplete tc)
                     {
                         stopReason = tc.StopReason;
@@ -333,6 +335,10 @@ public static class AgentEndpoints
                     catch (Exception ex) { log.LogWarning(ex, "QuickPrompt: detach failed for {Sid}", sid); }
                 }
             }
+
+            // Committed text supersedes a Fusion candidate; the candidate is
+            // the answer only when no commit arrived.
+            if (responseText.Length == 0) responseText.Append(provisionalText);
 
             if (errorMessage is not null)
             {

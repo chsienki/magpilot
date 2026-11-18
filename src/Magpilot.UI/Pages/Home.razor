@@ -831,6 +831,8 @@
     private bool _sessionsRefreshing;
     private readonly ObservableCollection<ChatMessage> _messages = new();
     private ChatMessage? _streamingAssistant;
+    // Fusion candidate bubbles shown live; committed output replaces them.
+    private readonly List<ChatMessage> _provisionalAssistant = [];
     private ChatMessage? _streamingThought;
     /// <summary>
     /// Last <see cref="ThoughtDelta"/> text appended to
@@ -2416,10 +2418,19 @@
             case AssistantDelta d:
                 ArmThinkingDebounce();
                 _streamingThought = null;
+                if (!d.Provisional && d.Text.Length > 0 && _provisionalAssistant.Count > 0)
+                {
+                    foreach (var draft in _provisionalAssistant)
+                        _messages.Remove(draft);
+                    _provisionalAssistant.Clear();
+                    _streamingAssistant = null;
+                }
                 if (_streamingAssistant is null)
                 {
                     _streamingAssistant = new ChatMessage { Role = "assistant", Text = "" };
                     _messages.Add(_streamingAssistant);
+                    if (d.Provisional)
+                        _provisionalAssistant.Add(_streamingAssistant);
                 }
                 _streamingAssistant.Text += d.Text;
                 if (d.Text.Length <= 32)
@@ -2535,6 +2546,7 @@
                 _thinking = false;
                 CancelThinkingDebounce();
                 _streamingAssistant = null;
+                _provisionalAssistant.Clear();
                 _streamingThought = null;
                 _busy = false;
                 // The session may have been /rename'd or otherwise

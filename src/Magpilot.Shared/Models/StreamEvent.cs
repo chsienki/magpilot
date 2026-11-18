@@ -19,7 +19,11 @@ namespace Magpilot.Shared.Models;
 [JsonDerivedType(typeof(ReleaseRequested), "release_requested")]
 public abstract record StreamEvent;
 
-public sealed record AssistantDelta(string Text) : StreamEvent;
+/// <param name="Provisional">True for candidate output (for example a Copilot Fusion draft)
+/// that the same turn may supersede with committed text. Consumers that cannot revise
+/// earlier output should hold provisional text and fall back to it only if no committed
+/// text follows before <see cref="TurnComplete"/>.</param>
+public sealed record AssistantDelta(string Text, bool Provisional = false) : StreamEvent;
 public sealed record ThoughtDelta(string Text) : StreamEvent;
 /// <param name="Source">Originating surface when the turn was injected out-of-band
 /// (e.g. "assistant", "whatsapp", "cron"); null for a normal in-band send. Lets a

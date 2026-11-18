@@ -173,6 +173,9 @@ local iteration.
 - `SdkTurnEventMapper` publishes streaming message/reasoning deltas and ignores
   duplicate final messages. Final-only canonical messages, including Fusion
   commits, must be emitted once when no deltas exist for that message ID.
+  Uncommitted Fusion candidate text is published with `Provisional=true`,
+  review-scope text is dropped, and replayed tool events are deduplicated by
+  tool-call ID so consumers can replace the candidate with the commit.
   A successful turn ends on SDK `session.idle`;
   errors publish exactly one error and terminal boundary.
 - `SdkPermissionBroker` fails closed. Managed-required permissions always
